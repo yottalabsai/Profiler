@@ -1,0 +1,54 @@
+"""
+Mapping Manifest schema — intermediate artifact produced by manifest_builder.py
+and consumed by range_replay.py and profile_builder.py.
+"""
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+from .profile import AttributionMethod, Confidence, NvtxRangeInfo, SourceLocation
+
+MANIFEST_SCHEMA_VERSION = "1.0"
+
+
+class KernelManifestEntry(BaseModel):
+    kernel_id: str
+    kernel_name: str
+    stream_id: int
+    device_id: int
+    start_ns: int
+    end_ns: int
+    duration_ns: int
+    grid_dim: tuple[int, int, int] | None = None
+    block_dim: tuple[int, int, int] | None = None
+    attribution: KernelAttribution
+
+
+class KernelAttribution(BaseModel):
+    method: AttributionMethod
+    source_operators: list[str] = Field(default_factory=list)
+    source_locations: list[SourceLocation] = Field(default_factory=list)
+    nvtx_range: NvtxRangeInfo | None = None
+    confidence: Confidence
+    is_fused: bool = False
+    # All enclosing NVTX ranges, outermost first — needed for fused kernel attribution
+    all_enclosing_ranges: list[NvtxRangeInfo] = Field(default_factory=list)
+
+
+class CaptureManifestMetadata(BaseModel):
+    model_name: str
+    torch_version: str
+    compile_mode: str
+    nsys_report_path: str | None = None
+    provenance_log_path: str | None = None
+    capture_timestamp_utc: str
+    # Input shapes recorded at capture time — validated at replay to prevent
+    # dynamic-shape kernel count mismatches (edge case #6)
+    input_shapes: dict[str, list[int]] = Field(default_factory=dict)
+
+
+class MappingManifest(BaseModel):
+    schema_version: str = MANIFEST_SCHEMA_VERSION
+    capture_metadata: CaptureManifestMetadata
+    kernels: list[KernelManifestEntry] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "capture_metadata": {
+    "model_name": "TestModel",
+    "torch_version": "2.3.0",
+    "cuda_version": "12.4",
+    "compile_mode": "inductor",
+    "nsys_report_path": "tests/fixtures/profile.nsys-rep",
+    "ncu_report_path": "tests/fixtures/profile.ncu-rep",
+    "provenance_log_path": "tests/fixtures/provenance.jsonl",
+    "capture_timestamp_utc": "2026-03-19T00:00:00+00:00",
+    "device_name": "NVIDIA A100 SXM4 80GB"
+  },
+  "operators": [
+    {
+      "operator_id": "aten::linear_0",
+      "operator_name": "aten::linear",
+      "call_index": 0,
+      "source_location": {"file": "model.py", "line": 42, "col": null, "op": "aten::linear"},
+      "is_fused": true,
+      "fused_with": ["aten::relu"],
+      "nvtx_range": {
+        "text": "aten::linear",
+        "depth": 2,
+        "start_ns": 999000,
+        "end_ns": 1001000,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00000",
+          "kernel_name": "triton_per_fused_linear_relu_0",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 1000000,
+          "end_ns": 1000210,
+          "duration_ns": 210,
+          "grid_dim": [32, 1, 1],
+          "block_dim": [128, 1, 1],
+          "metrics": {
+            "sm_active_cycles": 12500.0,
+            "dram_bytes_read": 8192,
+            "dram_bytes_written": 2048,
+            "l1_hit_rate": 78.5,
+            "achieved_occupancy": 62.3,
+            "tensor_core_active_pct": 45.1,
+            "arithmetic_intensity": 12.3,
+            "achieved_gflops": 180.4,
+            "raw": {
+              "dram__bytes_read.sum": 8192,
+              "dram__bytes_written.sum": 2048,
+              "sm__active_cycles_elapsed.sum": 12500.0
+            }
+          },
+          "attribution_method": "provenance",
+          "confidence": "high",
+          "nvtx_range": {
+            "text": "aten::linear",
+            "depth": 2,
+            "start_ns": 999000,
+            "end_ns": 1001000,
+            "domain": "default"
+          },
+          "source_locations": [
+            {"file": "model.py", "line": 42, "col": null, "op": "aten::linear"}
+          ]
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 210,
+        "kernel_count": 1,
+        "total_dram_bytes_read": 8192,
+        "total_dram_bytes_written": 2048,
+        "mean_achieved_occupancy": 62.3,
+        "mean_tensor_core_active_pct": 45.1,
+        "bottleneck_classification": "compute_bound"
+      }
+    }
+  ],
+  "unattributed_kernels": [],
+  "warnings": []
+}

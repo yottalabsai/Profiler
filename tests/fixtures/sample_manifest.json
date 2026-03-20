@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "capture_metadata": {
+    "model_name": "TestModel",
+    "torch_version": "2.3.0",
+    "compile_mode": "inductor",
+    "nsys_report_path": "tests/fixtures/profile.nsys-rep",
+    "provenance_log_path": "tests/fixtures/provenance.jsonl",
+    "capture_timestamp_utc": "2026-03-19T00:00:00+00:00",
+    "input_shapes": {"x": [1, 512]}
+  },
+  "kernels": [
+    {
+      "kernel_id": "k_00000",
+      "kernel_name": "triton_per_fused_linear_relu_0",
+      "stream_id": 7,
+      "device_id": 0,
+      "start_ns": 1000000,
+      "end_ns": 1000210,
+      "duration_ns": 210,
+      "grid_dim": [32, 1, 1],
+      "block_dim": [128, 1, 1],
+      "attribution": {
+        "method": "provenance",
+        "source_operators": ["aten::linear", "aten::relu"],
+        "source_locations": [
+          {"file": "model.py", "line": 42, "col": null, "op": "aten::linear"}
+        ],
+        "nvtx_range": {
+          "text": "aten::linear",
+          "depth": 2,
+          "start_ns": 999000,
+          "end_ns": 1001000,
+          "domain": "default"
+        },
+        "confidence": "high",
+        "is_fused": true,
+        "all_enclosing_ranges": [
+          {
+            "text": "model_forward",
+            "depth": 1,
+            "start_ns": 900000,
+            "end_ns": 2000000,
+            "domain": "default"
+          },
+          {
+            "text": "aten::linear",
+            "depth": 2,
+            "start_ns": 999000,
+            "end_ns": 1001000,
+            "domain": "default"
+          }
+        ]
+      }
+    },
+    {
+      "kernel_id": "k_00001",
+      "kernel_name": "void at::native::reduce_kernel<float>",
+      "stream_id": 7,
+      "device_id": 0,
+      "start_ns": 1002000,
+      "end_ns": 1002300,
+      "duration_ns": 300,
+      "grid_dim": null,
+      "block_dim": null,
+      "attribution": {
+        "method": "nvtx",
+        "source_operators": ["aten::mm"],
+        "source_locations": [],
+        "nvtx_range": {
+          "text": "aten::mm",
+          "depth": 3,
+          "start_ns": 1001500,
+          "end_ns": 1003000,
+          "domain": "default"
+        },
+        "confidence": "medium",
+        "is_fused": false,
+        "all_enclosing_ranges": [
+          {
+            "text": "aten::mm",
+            "depth": 3,
+            "start_ns": 1001500,
+            "end_ns": 1003000,
+            "domain": "default"
+          }
+        ]
+      }
+    }
+  ],
+  "warnings": []
+}

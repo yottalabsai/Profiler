@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg-link
+.installed.cfg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.coveragerc
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Profiling artifacts (can be large / machine-specific)
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdstrm
+*.qdrep
+
+# Provenance sidecars (generated at runtime)
+*.provenance.jsonl
+
+# Manifest and profile outputs (generated artifacts)
+*.manifest.json
+*_attributed_profile.json
+
+# ncu temporary replay files
+/ncu_replays/
+/ncu_output/
+
+# Logs
+*.log
+
+# Secrets / env
+.env
+.env.*
+secrets.json

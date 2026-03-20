@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "operator-profiler"
+version = "0.1.0"
+description = "Correlate GPU hardware metrics with PyTorch operators"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock",
+]
+
+[project.scripts]
+operator-profiler = "operator_profiler.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["operator_profiler*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires CUDA GPU + nsys/ncu on PATH",
+]
+# Run unit tests by default; use -m integration to run integration tests
+addopts = "-m 'not integration'"
