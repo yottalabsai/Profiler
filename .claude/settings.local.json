@@ -8,7 +8,12 @@
       "Bash(do echo:*)",
       "Read(//c/Users/s-lch/OneDrive - Duke University/Yotta Labs/Operator-Profiler/**)",
       "Bash(grep -E \"\\\\.py$|^total|^d\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(nsys --version)",
+      "Read(//usr/**)",
+      "Bash(/dev/null -name nsys)",
+      "Read(//opt/**)",
+      "Read(//usr/bin/**)"
     ]
   }
 }
