@@ -17,7 +17,12 @@
       "Bash(pip install:*)",
       "Bash(python:*)",
       "Bash(python -c \"import torch; print\\(torch.cuda.is_available\\(\\), torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else ''''no gpu''''\\)\")",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(pip3 install:*)",
+      "Bash(ls /workspace/Operator-Profiler/*.txt /workspace/Operator-Profiler/*.toml /workspace/Operator-Profiler/*.cfg)",
+      "Bash(nvidia-smi)",
+      "Bash(operator-profiler profile:*)",
+      "Bash(wc:*)"
     ]
   }
 }
