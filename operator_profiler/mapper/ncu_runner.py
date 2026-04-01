@@ -40,6 +40,10 @@ class NcuKernelProfileConfig:
     script: str | Path                 # Python script to replay
     script_args: list[str] = field(default_factory=list)
     kernel_name_filter: str = ""       # Exact name or regex passed to --kernel-name
+    # ncu_metric_set takes precedence over metrics when non-empty.
+    # Use a named ncu set ("full", "default", "roofline", "basic") to collect
+    # all metrics the GPU supports rather than a fixed list.
+    ncu_metric_set: str = "full"
     metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
     output_path: str | Path = ""       # .ncu-rep output path
     ncu_executable: str = "ncu"
@@ -70,11 +74,15 @@ def run_kernel_profile(config: NcuKernelProfileConfig) -> Path:
     else:
         script_cmd = [str(script_path)]
 
-    metrics_arg = ",".join(config.metrics)
+    if config.ncu_metric_set:
+        metric_args = ["--set", config.ncu_metric_set]
+    else:
+        metric_args = ["--metrics", ",".join(config.metrics)]
+
     ncu_cmd = [
         config.ncu_executable,
         "--replay-mode", "kernel",
-        "--metrics", metrics_arg,
+        *metric_args,
         "--export", str(output_path),
         "--force-overwrite",
         *config.extra_ncu_args,

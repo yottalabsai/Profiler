@@ -65,10 +65,8 @@ def build_profile(
     """
     # Aggregate metrics for each operator
     for op in operator_records:
-        all_metrics = [k.metrics for k in op.kernels]
-        total_ns = sum(k.duration_ns for k in op.kernels)
-        if all_metrics:
-            op.aggregated = build_aggregated_metrics(all_metrics, total_ns)
+        if op.kernels:
+            op.aggregated = build_aggregated_metrics(op.kernels)
 
     # Optional DiagnosisAgent post-pass — re-classifies each operator using
     # model-wide metric distributions for relative comparison.

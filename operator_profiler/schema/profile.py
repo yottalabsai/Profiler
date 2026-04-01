@@ -52,15 +52,8 @@ class NvtxRangeInfo(BaseModel):
 
 
 class KernelMetrics(BaseModel):
-    sm_active_cycles: float | None = None
-    dram_bytes_read: int | None = None
-    dram_bytes_written: int | None = None
-    l1_hit_rate: float | None = None
-    achieved_occupancy: float | None = None
-    tensor_core_active_pct: float | None = None
-    arithmetic_intensity: float | None = None  # FLOP/byte (roofline)
-    achieved_gflops: float | None = None
-    # Forward-compat: arbitrary ncu metrics across CUDA versions
+    # All NCU metrics stored as-collected — no hard-coded named fields.
+    # Use operator_profiler.schema.metrics.get_raw_value() to read by logical name.
     raw: dict[str, float | int | str] = Field(default_factory=dict)
 
 
@@ -93,13 +86,20 @@ class KernelRecord(BaseModel):
 class AggregatedMetrics(BaseModel):
     total_duration_ns: int
     kernel_count: int
-    total_dram_bytes_read: int = 0
-    total_dram_bytes_written: int = 0
+    # Kernel that accounts for the most GPU time — primary optimization target
+    dominant_kernel_id: str | None = None
+    # Additive quantities — sum correctly across heterogeneous kernels.
+    # None means the metric was unavailable on this hardware (e.g. Blackwell);
+    # 0 means the metric was collected and genuinely zero.
+    total_dram_bytes_read: int | None = None
+    total_dram_bytes_written: int | None = None
+    total_executed_instructions: int = 0
+    total_issued_instructions: int = 0
+    # Rate/utilization metrics — duration-weighted mean across kernels
     mean_achieved_occupancy: float | None = None
     mean_tensor_core_active_pct: float | None = None
-    bottleneck_classification: Literal[
-        "compute_bound", "memory_bound", "latency_bound", "unknown"
-    ] = "unknown"
+    # Set by DiagnosisAgent when present; None otherwise
+    bottleneck_classification: str | None = None
 
 
 # ---------------------------------------------------------------------------

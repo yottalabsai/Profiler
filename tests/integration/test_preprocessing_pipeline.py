@@ -91,6 +91,37 @@ with P.emit_nvtx():
 torch.cuda.synchronize()
 """
 
+_COMPLEX_WORKLOAD_SCRIPT = """\
+import torch
+import torch.nn as nn
+import torch.autograd.profiler as P
+
+class MLPBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(512, 2048)
+        self.fc2 = nn.Linear(2048, 512)
+        self.act = nn.GELU()
+        self.norm = nn.LayerNorm(512)
+
+    def forward(self, x):
+        return self.norm(x + self.fc2(self.act(self.fc1(x))))
+
+model = MLPBlock().cuda()
+x = torch.randn(8, 512, device="cuda")
+
+# Warm-up
+for _ in range(3):
+    _ = model(x)
+torch.cuda.synchronize()
+
+# Measurement window
+with P.emit_nvtx():
+    for _ in range(3):
+        _ = model(x)
+torch.cuda.synchronize()
+"""
+
 
 # ---------------------------------------------------------------------------
 # Module-scoped fixture: runs the full pipeline once
@@ -216,7 +247,7 @@ def full_pipeline_profile(tmp_path_factory):
         ncu_extra_env={"PYTHONPATH": pythonpath},
     )
     orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
-    orch.run()
+    ncu_output_dir = orch.run()
 
     # ------------------------------------------------------------------
     # Stage 6: build_profile — calls build_aggregated_metrics internally
@@ -229,7 +260,12 @@ def full_pipeline_profile(tmp_path_factory):
         unattributed_kernels=unattributed,
         model_name="E2ETest",
         torch_version=torch.__version__,
+        ncu_report_path=str(ncu_output_dir),
     )
+
+    profile_json_path = tmp / "profile.json"
+    profile_json_path.write_text(profile.model_dump_json(indent=2))
+    print(f"\nProfile JSON written to: {profile_json_path}")
 
     return profile, nsys_rep, manifest, operator_records
 
@@ -342,12 +378,15 @@ class TestPreprocessingPipelineIntegration:
         linear_ops = {"aten::mm", "aten::linear", "aten::addmm"}
         found_metrics = False
 
+        from operator_profiler.schema.metrics import get_raw_value
+
         for op in profile.operators:
             if op.operator_name.split(",")[0].strip() not in linear_ops:
                 continue
             for kernel in op.kernels:
-                if kernel.metrics.achieved_occupancy is not None:
-                    assert kernel.metrics.achieved_occupancy > 0, (
+                occ = get_raw_value(kernel.metrics.raw, "achieved_occupancy")
+                if occ is not None:
+                    assert occ > 0, (
                         f"achieved_occupancy is 0 for kernel '{kernel.kernel_name}' "
                         f"in operator '{op.operator_name}'"
                     )
@@ -369,9 +408,8 @@ class TestPreprocessingPipelineIntegration:
         - Every operator has aggregated metrics set
         - kernel_count matches the number of kernels in the record
         - total_duration_ns > 0 for all operators
-        - linear/mm operators have total_dram_bytes_read > 0
-        - bottleneck_classification is set (non-"unknown") for linear/mm operators
-          that have ncu metrics
+        - dominant_kernel_id refers to a real kernel in the operator
+        - linear/mm operators with ncu metrics have mean_achieved_occupancy > 0
         """
         profile, _, _, _ = full_pipeline_profile
 
@@ -390,13 +428,17 @@ class TestPreprocessingPipelineIntegration:
             assert op.aggregated.total_duration_ns > 0, (
                 f"total_duration_ns is 0 for '{op.operator_name}'"
             )
+            kernel_ids = {k.kernel_id for k in op.kernels}
+            assert op.aggregated.dominant_kernel_id in kernel_ids, (
+                f"dominant_kernel_id '{op.aggregated.dominant_kernel_id}' not found "
+                f"in kernels for '{op.operator_name}'"
+            )
 
             if op.operator_name.split(",")[0].strip() in linear_ops:
-                # Only assert on occupancy if ncu metrics were collected.
-                # Note: dram__bytes_read.sum returns "n/a" on Blackwell (CC 12.0),
-                # so total_dram_bytes_read may be 0 even when ncu ran successfully.
+                from operator_profiler.schema.metrics import get_raw_value
                 has_ncu = any(
-                    k.metrics.achieved_occupancy is not None for k in op.kernels
+                    get_raw_value(k.metrics.raw, "achieved_occupancy") is not None
+                    for k in op.kernels
                 )
                 if has_ncu:
                     assert op.aggregated.mean_achieved_occupancy is not None, (
@@ -481,6 +523,124 @@ class TestPreprocessingPipelineIntegration:
             # Verify ncu metrics survive the roundtrip
             for orig_k, rest_k in zip(orig_op.kernels, rest_op.kernels):
                 assert rest_k.kernel_id == orig_k.kernel_id
-                assert rest_k.metrics.dram_bytes_read == orig_k.metrics.dram_bytes_read
-                assert rest_k.metrics.achieved_occupancy == orig_k.metrics.achieved_occupancy
+                assert rest_k.metrics.raw == orig_k.metrics.raw
                 assert rest_k.attribution_method == orig_k.attribution_method
+
+
+# ---------------------------------------------------------------------------
+# Complex workload fixture + smoke test
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def complex_pipeline_profile(tmp_path_factory):
+    """
+    Full pipeline on a multi-operator MLP block:
+      fc1 (512→2048) → GELU → fc2 (2048→512) → LayerNorm + residual
+
+    Exercises:
+      - Multiple operator types (addmm, gelu, layer_norm)
+      - GEMM kernels (batch=8, large matrices) rather than GEMV
+      - Multiple unique kernel names → multiple ncu profile runs
+      - 1:many operator→kernel potential (layer_norm dispatches several kernels)
+    """
+    if not _cuda_available():
+        pytest.skip("CUDA not available")
+    if not _nsys_available():
+        pytest.skip("nsys not available")
+    ncu_exe = _ncu_executable()
+    if ncu_exe is None:
+        pytest.skip("ncu not available")
+
+    import site
+    import torch
+    from operator_profiler.mapper.manifest_builder import ManifestBuilder
+    from operator_profiler.schema.manifest import CaptureManifestMetadata
+    from operator_profiler.mapper.attribution_engine import AttributionEngine
+    from operator_profiler.mapper.range_replay import RangeReplayConfig, RangeReplayOrchestrator
+    from operator_profiler.aggregator.profile_builder import build_profile
+
+    tmp = tmp_path_factory.mktemp("pipeline_complex")
+    script = tmp / "workload.py"
+    script.write_text(_COMPLEX_WORKLOAD_SCRIPT)
+
+    output_prefix = str(tmp / "profile")
+    nsys_rep = tmp / "profile.nsys-rep"
+
+    subprocess.run(
+        ["nsys", "profile", "--trace=cuda,nvtx",
+         f"--output={output_prefix}", "--force-overwrite=true",
+         sys.executable, str(script)],
+        check=True, timeout=120, capture_output=True,
+    )
+    if not nsys_rep.exists():
+        candidates = list(tmp.glob("*.nsys-rep"))
+        nsys_rep = candidates[0] if candidates else pytest.fail("no .nsys-rep produced")
+
+    sqlite_path = tmp / "profile.sqlite"
+    subprocess.run(
+        ["nsys", "export", "--type=sqlite",
+         f"--output={sqlite_path}", "--force-overwrite=true", str(nsys_rep)],
+        check=True, timeout=60, capture_output=True,
+    )
+    if not sqlite_path.exists():
+        candidates = list(tmp.glob("*.sqlite"))
+        sqlite_path = candidates[0] if candidates else pytest.fail("no .sqlite produced")
+
+    metadata = CaptureManifestMetadata(
+        model_name="MLPBlock",
+        torch_version=torch.__version__,
+        compile_mode="eager",
+        nsys_report_path=str(nsys_rep),
+        capture_timestamp_utc="2026-04-01T00:00:00+00:00",
+    )
+    manifest = ManifestBuilder(nsys_rep_path=nsys_rep, metadata=metadata).build()
+    engine = AttributionEngine(manifest)
+    operator_records, unattributed = engine.run()
+
+    user_site = next(
+        (p for p in site.getsitepackages() if "dist-packages" in p or "site-packages" in p), ""
+    )
+    pythonpath = ":".join(filter(None, [site.getusersitepackages(), user_site]))
+    replay_config = RangeReplayConfig(
+        replay_script=script,
+        output_dir=str(tmp),
+        ncu_executable=ncu_exe,
+        ncu_sudo=True,
+        ncu_extra_env={"PYTHONPATH": pythonpath},
+    )
+    orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
+    ncu_output_dir = orch.run()
+
+    profile = build_profile(
+        manifest=manifest,
+        operator_records=operator_records,
+        unattributed_kernels=unattributed,
+        model_name="MLPBlock",
+        torch_version=torch.__version__,
+        ncu_report_path=str(ncu_output_dir),
+    )
+
+    profile_json_path = tmp / "profile.json"
+    profile_json_path.write_text(profile.model_dump_json(indent=2))
+    print(f"\nComplex profile JSON written to: {profile_json_path}")
+
+    return profile, nsys_rep, manifest, operator_records
+
+
+class TestComplexWorkloadPipeline:
+
+    def test_complex_profile_produced(self, complex_pipeline_profile):
+        """Smoke test: profile has multiple operator types and all kernels attributed."""
+        profile, _, _, _ = complex_pipeline_profile
+
+        op_base_names = {op.operator_name.split(",")[0].strip() for op in profile.operators}
+        assert len(profile.operators) > 3, (
+            f"Expected more than 3 operators, got {len(profile.operators)}: {sorted(op_base_names)}"
+        )
+        assert not profile.unattributed_kernels, (
+            f"{len(profile.unattributed_kernels)} kernels went unattributed"
+        )
+        for op in profile.operators:
+            assert op.aggregated is not None
+            assert op.aggregated.dominant_kernel_id is not None
+            assert op.aggregated.total_duration_ns > 0

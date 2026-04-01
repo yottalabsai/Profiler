@@ -18,7 +18,6 @@ import io
 import logging
 from collections import defaultdict
 
-from operator_profiler.schema.metrics import NCU_NAME_TO_POLICY
 from operator_profiler.schema.profile import KernelMetrics
 
 log = logging.getLogger(__name__)
@@ -101,29 +100,11 @@ def parse_ncu_csv_by_id(
 
 def _build_metrics(raw_dict: dict[str, str]) -> KernelMetrics:
     """Convert a flat {metric_name: value_str} dict → KernelMetrics."""
-    known_fields: dict[str, float | int] = {}
-    all_raw: dict[str, float | int | str] = {}
-
+    raw: dict[str, float | int | str] = {}
     for metric_name, value_str in raw_dict.items():
-        # Store everything in raw for forward-compat
         parsed = _try_parse_numeric(value_str)
-        all_raw[metric_name] = parsed if parsed is not None else value_str
-
-        # Map known ncu metric names to typed KernelMetrics fields
-        policy = NCU_NAME_TO_POLICY.get(metric_name)
-        if policy and parsed is not None:
-            known_fields[policy.profile_field] = parsed
-
-    # Build KernelMetrics with named fields + raw
-    return KernelMetrics(
-        sm_active_cycles=_get(known_fields, "sm_active_cycles"),
-        dram_bytes_read=_get_int(known_fields, "dram_bytes_read"),
-        dram_bytes_written=_get_int(known_fields, "dram_bytes_written"),
-        l1_hit_rate=_get(known_fields, "l1_hit_rate"),
-        achieved_occupancy=_get(known_fields, "achieved_occupancy"),
-        tensor_core_active_pct=_get(known_fields, "tensor_core_active_pct"),
-        raw=all_raw,
-    )
+        raw[metric_name] = parsed if parsed is not None else value_str
+    return KernelMetrics(raw=raw)
 
 
 def _try_parse_numeric(value: str) -> float | int | None:
@@ -140,11 +121,3 @@ def _try_parse_numeric(value: str) -> float | int | None:
         return None
 
 
-def _get(d: dict, key: str) -> float | None:
-    v = d.get(key)
-    return float(v) if v is not None else None
-
-
-def _get_int(d: dict, key: str) -> int | None:
-    v = d.get(key)
-    return int(v) if v is not None else None

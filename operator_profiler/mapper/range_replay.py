@@ -67,6 +67,10 @@ class RangeReplayConfig:
     replay_script: str | Path           # Python script to replay
     replay_script_args: list[str] = field(default_factory=list)
     output_dir: str | Path = ""
+    # ncu_metric_set takes precedence over metrics when non-empty.
+    # Use a named ncu set ("full", "default", "roofline", "basic") to collect
+    # all metrics the GPU supports rather than a fixed list.
+    ncu_metric_set: str = "full"
     metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
     ncu_executable: str = "ncu"
     # Set True to prefix ncu with "sudo -E" (needed when perf counters are
@@ -108,9 +112,11 @@ class RangeReplayOrchestrator:
     # Public entry point
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self) -> Path:
         """
         Run all kernel profiles and merge metrics into operator_records in-place.
+
+        Returns the directory containing the .ncu-rep output files.
         """
         # Edge case #6: validate input shapes before replay
         if self.config.expected_input_shapes:
@@ -135,6 +141,7 @@ class RangeReplayOrchestrator:
             self._merge_metrics(target, metrics_map)
 
         self._apply_metrics_to_records()
+        return output_dir
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -172,6 +179,7 @@ class RangeReplayOrchestrator:
             script=self.config.replay_script,
             script_args=self.config.replay_script_args,
             kernel_name_filter=target.kernel_name,
+            ncu_metric_set=self.config.ncu_metric_set,
             metrics=self.config.metrics,
             output_path=ncu_rep_path,
             ncu_executable=self.config.ncu_executable,

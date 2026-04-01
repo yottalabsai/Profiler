@@ -60,7 +60,7 @@ def _run(args) -> None:
         expected_input_shapes=manifest.capture_metadata.input_shapes,
     )
     orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
-    orch.run()
+    ncu_output_dir = orch.run()
 
     # Assemble profile
     profile = build_profile(
@@ -70,6 +70,7 @@ def _run(args) -> None:
         model_name=args.model_name,
         torch_version=torch_version,
         device_name=args.device_name,
+        ncu_report_path=str(ncu_output_dir),
     )
 
     output_path = Path(args.output)

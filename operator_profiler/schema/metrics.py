@@ -84,5 +84,60 @@ METRIC_POLICIES: list[MetricPolicy] = [
 # Map ncu column name → MetricPolicy for fast lookup
 NCU_NAME_TO_POLICY: dict[str, MetricPolicy] = {p.ncu_name: p for p in METRIC_POLICIES}
 
+# Human-readable aliases emitted by `ncu --set` (default/full) instead of raw
+# counter names.  These are NOT added to METRIC_POLICIES (and thus not to
+# DEFAULT_NCU_METRICS) since they cannot be passed to `--metrics`.
+_HUMAN_READABLE_ALIASES: list[MetricPolicy] = [
+    MetricPolicy(
+        "Achieved Occupancy",
+        "achieved_occupancy",
+        AggregationOp.MEAN,
+        "Achieved occupancy (--set alias)",
+    ),
+    MetricPolicy(
+        "SM Active Cycles",
+        "sm_active_cycles",
+        AggregationOp.MEAN,
+        "SM active cycles (--set alias)",
+    ),
+    MetricPolicy(
+        "L1/TEX Hit Rate",
+        "l1_hit_rate",
+        AggregationOp.MEAN,
+        "L1 cache hit rate (--set alias)",
+    ),
+    MetricPolicy(
+        "Compute (SM) Throughput",
+        "sm_throughput_pct",
+        AggregationOp.MEAN,
+        "SM throughput % of peak (--set alias)",
+    ),
+]
+NCU_NAME_TO_POLICY.update({p.ncu_name: p for p in _HUMAN_READABLE_ALIASES})
+
+# Reverse lookup: logical profile_field → all NCU names (raw counters + aliases)
+# Used by get_raw_value() to find a metric regardless of which name NCU used.
+PROFILE_FIELD_TO_NCU_NAMES: dict[str, list[str]] = {}
+for _p in NCU_NAME_TO_POLICY.values():
+    PROFILE_FIELD_TO_NCU_NAMES.setdefault(_p.profile_field, []).append(_p.ncu_name)
+
+
+def get_raw_value(
+    raw: dict[str, "float | int | str"], profile_field: str
+) -> "float | None":
+    """
+    Look up a metric from a KernelMetrics.raw dict by logical name.
+
+    Checks all NCU name aliases (raw counter names and human-readable names
+    from --set mode) so callers don't need to know which variant NCU used.
+    Returns the first numeric match, or None if absent or non-numeric.
+    """
+    for ncu_name in PROFILE_FIELD_TO_NCU_NAMES.get(profile_field, []):
+        val = raw.get(ncu_name)
+        if isinstance(val, (int, float)):
+            return float(val)
+    return None
+
+
 # Minimal set of metrics for a standard ncu run
 DEFAULT_NCU_METRICS: list[str] = [p.ncu_name for p in METRIC_POLICIES]
