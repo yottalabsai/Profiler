@@ -44,7 +44,24 @@
       "Bash(sudo -l)",
       "Bash(sudo /usr/local/cuda-12.8/bin/ncu --nvtx --metrics gpu__time_duration.sum /usr/bin/python -c \"import torch; x=torch.randn\\(128,128,device='cuda'\\); torch.mm\\(x,x\\); torch.cuda.synchronize\\(\\)\" 2>&1)",
       "Bash(nvidia-smi -q)",
-      "Bash(capsh --print)"
+      "Bash(capsh --print)",
+      "Bash(sudo apt-get:*)",
+      "Bash(export PATH=/opt/nvidia/nsight-compute/2025.4.1:$PATH)",
+      "Bash(/usr/bin/python3 /tmp/pytest-of-ubuntu/pytest-1/pipeline_e2e0/workload.py)",
+      "Bash(pip uninstall:*)",
+      "Read(//tmp/pytest-of-ubuntu/pytest-2/pipeline_e2e0/**)",
+      "Read(//tmp/pytest-of-ubuntu/pytest-2/**)",
+      "Bash(ncu --import /tmp/pytest-of-ubuntu/pytest-2/pipeline_e2e0/aten__mm_0.ncu-rep --csv)",
+      "Bash(ncu --replay-mode kernel --metrics l1tex__t_bytes.sum,sm__cycles_active.sum --export /tmp/test_kernel.ncu-rep --force-overwrite python3 /tmp/test_workload.py)",
+      "Bash(sudo /opt/nvidia/nsight-compute/2025.4.1/ncu --replay-mode kernel --metrics l1tex__t_bytes.sum,sm__cycles_active.sum --export /tmp/test_kernel.ncu-rep --force-overwrite python3 /tmp/test_workload.py)",
+      "Bash(sudo /opt/nvidia/nsight-compute/2025.4.1/ncu --replay-mode kernel --metrics l1tex__t_bytes.sum,sm__cycles_active.sum --export /tmp/test_kernel.ncu-rep --force-overwrite /usr/bin/python3 /tmp/test_workload.py)",
+      "Bash(sudo PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages /opt/nvidia/nsight-compute/2025.4.1/ncu --replay-mode kernel --metrics l1tex__t_bytes.sum,sm__cycles_active.sum --export /tmp/test_kernel.ncu-rep --force-overwrite /usr/bin/python3 /tmp/test_workload.py)",
+      "Bash(sudo PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages /opt/nvidia/nsight-compute/2025.4.1/ncu --nvtx --replay-mode range --metrics l1tex__t_bytes.sum,sm__cycles_active.sum --export /tmp/test_nvtx.ncu-rep --force-overwrite /usr/bin/python3 /tmp/test_workload.py)",
+      "Bash(sudo PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \\\\\n    /opt/nvidia/nsight-compute/2025.4.1/ncu --nvtx \\\\\n    --nvtx-include \"aten::addmm*]\" \\\\\n    --replay-mode range \\\\\n    --metrics l1tex__t_bytes.sum,sm__cycles_active.sum \\\\\n    --export /tmp/test_nvtx2.ncu-rep \\\\\n    --force-overwrite \\\\\n    /usr/bin/python3 /tmp/test_workload.py 2>&1)",
+      "Bash(sudo env:*)",
+      "Bash(ldd /home/ubuntu/.local/lib/python3.10/site-packages/torch/lib/libtorch_cuda.so)",
+      "Bash(PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \\\\\nsudo -E /opt/nvidia/nsight-compute/2025.4.1/ncu \\\\\n    --replay-mode kernel \\\\\n    --kernel-name \"gemv2T_kernel_val\" \\\\\n    --metrics l1tex__t_bytes.sum,sm__cycles_active.sum \\\\\n    --export /tmp/debug_test.ncu-rep \\\\\n    --force-overwrite \\\\\n    /usr/bin/python3 /tmp/test_workload.py 2>&1)",
+      "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --import /tmp/test_full_metrics.ncu-rep --csv)"
     ]
   }
 }

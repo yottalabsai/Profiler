@@ -2,8 +2,20 @@
 ncu subprocess wrapper.
 
 Provides two entry points:
-  1. run_range_replay()   — collect metrics for one NVTX range
-  2. import_ncu_report()  — export an existing .ncu-rep to CSV
+  1. run_kernel_profile()  — collect metrics for one kernel name across the workload
+  2. import_ncu_report()   — export an existing .ncu-rep to CSV
+
+Kernel-name based profiling
+----------------------------
+Instead of NVTX range filtering (which requires a shared libnvToolsExt.so that
+recent PyTorch builds no longer expose), we filter by kernel name using ncu's
+--kernel-name flag.  This works regardless of how the workload links NVTX and
+handles both eager and compiled (Triton) workloads:
+
+  - Eager mode:   kernel names are stable cuBLAS/cuDNN identifiers.
+  - Compiled mode: Inductor-generated Triton kernels have unique names per fused
+                   operation (e.g. triton_per_fused_addmm_relu_0), so one kernel
+                   name == one fused unit — no grouping needed.
 
 Edge case #8: ncu timestamps are NEVER used for attribution ordering;
 only metric values are extracted from ncu output.
@@ -23,31 +35,34 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
-class NcuRangeReplayConfig:
-    """Configuration for a single ncu range-replay run."""
-    script: str | Path            # Python script to replay
+class NcuKernelProfileConfig:
+    """Configuration for a single ncu kernel-name-filtered profile run."""
+    script: str | Path                 # Python script to replay
     script_args: list[str] = field(default_factory=list)
-    nvtx_include: str = ""        # NVTX range text to filter (glob)
+    kernel_name_filter: str = ""       # Exact name or regex passed to --kernel-name
     metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
-    replay_mode: str = "range"    # "range" or "kernel"
-    output_path: str | Path = ""  # .ncu-rep output path
+    output_path: str | Path = ""       # .ncu-rep output path
     ncu_executable: str = "ncu"
     extra_ncu_args: list[str] = field(default_factory=list)
+    # Prefix the ncu command with "sudo -E" to gain GPU counter access when
+    # the system restricts profiling to root (ERR_NVGPUCTRPERM).
+    use_sudo: bool = False
+    # Extra environment variables forwarded to the ncu subprocess.
+    extra_env: dict[str, str] = field(default_factory=dict)
 
 
-def run_range_replay(config: NcuRangeReplayConfig) -> Path:
+def run_kernel_profile(config: NcuKernelProfileConfig) -> Path:
     """
-    Run ncu with --nvtx --nvtx-include <range> --replay-mode range.
+    Run ncu with --kernel-name <filter> --replay-mode kernel.
+
+    Profiles every invocation of matching kernels across the full workload
+    execution.  Results are written to a .ncu-rep file which is then imported
+    via import_ncu_report().
 
     Returns the path to the .ncu-rep output file.
-
-    --replay-mode range preserves cache state across the fused kernel sequence,
-    which is critical for fused kernel metrics (see architecture plan §4).
     """
     output_path = Path(config.output_path)
 
-    # ncu cannot execute Python scripts directly — prepend the interpreter
-    # if the target is a .py file.
     script_cmd: list[str] = []
     script_path = Path(config.script)
     if script_path.suffix == ".py":
@@ -56,24 +71,32 @@ def run_range_replay(config: NcuRangeReplayConfig) -> Path:
         script_cmd = [str(script_path)]
 
     metrics_arg = ",".join(config.metrics)
-    cmd = [
+    ncu_cmd = [
         config.ncu_executable,
-        "--nvtx",
-        "--nvtx-include", config.nvtx_include,
-        "--replay-mode", config.replay_mode,
+        "--replay-mode", "kernel",
         "--metrics", metrics_arg,
         "--export", str(output_path),
         "--force-overwrite",
         *config.extra_ncu_args,
-        *script_cmd,
-        *config.script_args,
     ]
+    if config.kernel_name_filter:
+        ncu_cmd += ["--kernel-name", config.kernel_name_filter]
+    ncu_cmd += [*script_cmd, *config.script_args]
+
+    # Prepend sudo -E to preserve the environment when root access is needed
+    # for GPU performance counters (ERR_NVGPUCTRPERM).
+    cmd = (["sudo", "-E"] + ncu_cmd) if config.use_sudo else ncu_cmd
+
     log.info(
-        "Running ncu range replay for range '%s': %s",
-        config.nvtx_include,
+        "Running ncu kernel profile for '%s': %s",
+        config.kernel_name_filter or "(all kernels)",
         shlex.join(cmd),
     )
-    run_subprocess(cmd, description=f"ncu range replay '{config.nvtx_include}'")
+    run_subprocess(
+        cmd,
+        description=f"ncu kernel profile '{config.kernel_name_filter}'",
+        extra_env=config.extra_env or None,
+    )
     return output_path
 
 
