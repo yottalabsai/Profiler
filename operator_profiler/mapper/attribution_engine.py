@@ -29,7 +29,6 @@ from operator_profiler.schema.profile import (
     KernelRecord,
     KernelMetrics,
     OperatorRecord,
-    SourceLocation,
     NvtxRangeInfo,
 )
 
@@ -177,13 +176,6 @@ class AttributionEngine:
                         if op not in fused_with:
                             fused_with.append(op)
 
-            # Source location from first provenance hit
-            source_loc: SourceLocation | None = None
-            for e in entries:
-                if e.attribution.source_locations:
-                    source_loc = e.attribution.source_locations[0]
-                    break
-
             # NVTX range info from first attributed kernel
             nvtx_range: NvtxRangeInfo | None = None
             for e in entries:
@@ -196,7 +188,6 @@ class AttributionEngine:
                     operator_id=operator_id,
                     operator_name=op_name,
                     call_index=call_idx,
-                    source_location=source_loc,
                     is_fused=is_fused,
                     fused_with=fused_with,
                     nvtx_range=nvtx_range,
@@ -211,7 +202,7 @@ class AttributionEngine:
     def _entry_to_kernel_record(self, entry: KernelManifestEntry) -> KernelRecord:
         a = entry.attribution
         # Edge case #8: no ncu timestamps here — metrics are empty until
-        # range_replay.py fills them in.
+        # kernel_profiler.py fills them in.
         return KernelRecord(
             kernel_id=entry.kernel_id,
             kernel_name=entry.kernel_name,
@@ -226,5 +217,4 @@ class AttributionEngine:
             attribution_method=a.method,
             confidence=a.confidence,
             nvtx_range=a.nvtx_range,
-            source_locations=a.source_locations,
         )

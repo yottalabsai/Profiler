@@ -105,9 +105,6 @@ class OptimizationMemory:
         """
         op_sequence = [op.operator_name for op in profile.operators]
         input_shapes: dict[str, list[int]] = {}
-        for op in profile.operators:
-            if op.source_location is not None:
-                pass  # shapes come from capture_metadata if available
         return GraphPattern(
             op_sequence=op_sequence,
             pattern_hash=_make_pattern_hash(op_sequence),

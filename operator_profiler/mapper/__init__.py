@@ -4,7 +4,7 @@ from .manifest_builder import ManifestBuilder
 from .attribution_engine import AttributionEngine, CudaGraphManifest
 from .ncu_runner import NcuKernelProfileConfig, run_kernel_profile, import_ncu_report
 from .ncu_parser import parse_ncu_csv, parse_ncu_csv_by_id
-from .range_replay import RangeReplayOrchestrator, RangeReplayConfig, KernelReplayTarget
+from .kernel_profiler import KernelProfileOrchestrator, KernelProfileConfig, KernelReplayTarget
 
 __all__ = [
     "NvtxIntervalForest",
@@ -21,7 +21,7 @@ __all__ = [
     "import_ncu_report",
     "parse_ncu_csv",
     "parse_ncu_csv_by_id",
-    "RangeReplayOrchestrator",
-    "RangeReplayConfig",
+    "KernelProfileOrchestrator",
+    "KernelProfileConfig",
     "KernelReplayTarget",
 ]

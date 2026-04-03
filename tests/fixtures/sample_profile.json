@@ -7,7 +7,6 @@
     "compile_mode": "inductor",
     "nsys_report_path": "tests/fixtures/profile.nsys-rep",
     "ncu_report_path": "tests/fixtures/profile.ncu-rep",
-    "provenance_log_path": "tests/fixtures/provenance.jsonl",
     "capture_timestamp_utc": "2026-03-19T00:00:00+00:00",
     "device_name": "NVIDIA A100 SXM4 80GB"
   },
@@ -16,7 +15,6 @@
       "operator_id": "aten::linear_0",
       "operator_name": "aten::linear",
       "call_index": 0,
-      "source_location": {"file": "model.py", "line": 42, "col": null, "op": "aten::linear"},
       "is_fused": true,
       "fused_with": ["aten::relu"],
       "nvtx_range": {
@@ -39,21 +37,16 @@
           "grid_dim": [32, 1, 1],
           "block_dim": [128, 1, 1],
           "metrics": {
-            "sm_active_cycles": 12500.0,
-            "dram_bytes_read": 8192,
-            "dram_bytes_written": 2048,
-            "l1_hit_rate": 78.5,
-            "achieved_occupancy": 62.3,
-            "tensor_core_active_pct": 45.1,
-            "arithmetic_intensity": 12.3,
-            "achieved_gflops": 180.4,
             "raw": {
               "dram__bytes_read.sum": 8192,
               "dram__bytes_written.sum": 2048,
-              "sm__active_cycles_elapsed.sum": 12500.0
+              "sm__active_cycles_elapsed.sum": 12500.0,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 62.3,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 45.1,
+              "arithmetic_intensity": 12.3
             }
           },
-          "attribution_method": "provenance",
+          "attribution_method": "nvtx",
           "confidence": "high",
           "nvtx_range": {
             "text": "aten::linear",
@@ -61,10 +54,7 @@
             "start_ns": 999000,
             "end_ns": 1001000,
             "domain": "default"
-          },
-          "source_locations": [
-            {"file": "model.py", "line": 42, "col": null, "op": "aten::linear"}
-          ]
+          }
         }
       ],
       "aggregated": {

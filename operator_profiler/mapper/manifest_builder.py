@@ -1,15 +1,13 @@
 """
-Manifest builder — the three-way join at the heart of the Operator Mapper Stage.
+Manifest builder — the two-way join at the heart of the Operator Mapper Stage.
 
 Sources joined:
   1. nsys SQLite export  → CUDA kernel rows + NVTX event rows
-  2. Inductor provenance JSONL sidecar → kernel_name → {source_ops, locations}
-  3. Per-stream NVTX interval tree → innermost NVTX range enclosing each kernel
+  2. Per-stream NVTX interval tree → innermost NVTX range enclosing each kernel
 
 Produces: MappingManifest
 
 Confidence scoring:
-  provenance hit     → method=provenance,      confidence=high
   NVTX enclosure     → method=nvtx,            confidence=medium
   name substring     → method=name_heuristic,  confidence=low
     (includes Triton fused-name parsing: triton_*_fused_op1_op2_N)
@@ -38,7 +36,6 @@ torch.compile() / Triton note:
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import statistics
@@ -54,7 +51,6 @@ from operator_profiler.schema.profile import (
     AttributionMethod,
     Confidence,
     NvtxRangeInfo,
-    SourceLocation,
 )
 from operator_profiler.mapper.interval_tree import NvtxIntervalForest
 from operator_profiler.mapper.nsys_export import (
@@ -120,14 +116,12 @@ _WARMUP_OUTLIER_RATIO = 10.0
 
 class ManifestBuilder:
     """
-    Build a MappingManifest from nsys + provenance inputs.
+    Build a MappingManifest from nsys inputs.
 
     Parameters
     ----------
     nsys_rep_path:
         Path to the .nsys-rep file (will be exported to SQLite).
-    provenance_jsonl_path:
-        Path to the INDUCTOR_PROVENANCE=1 sidecar (optional — None for eager mode).
     metadata:
         CaptureManifestMetadata for the manifest header.
     """
@@ -136,13 +130,9 @@ class ManifestBuilder:
         self,
         nsys_rep_path: str | Path,
         metadata: CaptureManifestMetadata,
-        provenance_jsonl_path: str | Path | None = None,
         sqlite_cache_dir: str | Path | None = None,
     ) -> None:
         self.nsys_rep_path = Path(nsys_rep_path)
-        self.provenance_jsonl_path = (
-            Path(provenance_jsonl_path) if provenance_jsonl_path else None
-        )
         self.metadata = metadata
         self.sqlite_cache_dir = sqlite_cache_dir
 
@@ -159,10 +149,7 @@ class ManifestBuilder:
         # Step 2: Build per-stream NVTX interval forest
         forest = self._build_forest(nvtx_rows)
 
-        # Step 3: Load provenance sidecar
-        provenance = self._load_provenance()
-
-        # Step 4: Detect initialization kernels (edge case #4)
+        # Step 3: Detect initialization kernels (edge case #4)
         # Uses NVTX time boundary when available (kernels before the first NVTX
         # range ran during torch.compile() warm-up, before emit_nvtx() was
         # active).  Falls back to duration-outlier heuristic if no NVTX data.
@@ -173,13 +160,13 @@ class ManifestBuilder:
                 len(outlier_ids),
             )
 
-        # Step 5: Build kernel entries via three-way join
+        # Step 4: Build kernel entries via two-way join
         entries: list[KernelManifestEntry] = []
         warnings: list[str] = []
 
         for i, kr in enumerate(kernel_rows):
             kernel_id = f"k_{i:05d}"
-            attribution = self._attribute(kr, forest, provenance)
+            attribution = self._attribute(kr, forest)
             is_warmup = kernel_id in outlier_ids
 
             if is_warmup:
@@ -235,36 +222,10 @@ class ManifestBuilder:
             )
         return forest
 
-    def _load_provenance(self) -> dict[str, dict]:
-        """Return kernel_name → {source_ops, source_locations} from JSONL."""
-        result: dict[str, dict] = {}
-        if self.provenance_jsonl_path is None:
-            return result
-        if not self.provenance_jsonl_path.exists():
-            log.warning("Provenance file not found: %s", self.provenance_jsonl_path)
-            return result
-
-        with open(self.provenance_jsonl_path, encoding="utf-8") as fh:
-            for lineno, line in enumerate(fh, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    kernel_name = record.get("generated_kernel_name", "")
-                    if kernel_name:
-                        result[kernel_name] = record
-                except json.JSONDecodeError as exc:
-                    log.warning("Provenance JSONL parse error at line %d: %s", lineno, exc)
-
-        log.info("Loaded provenance for %d kernels", len(result))
-        return result
-
     def _attribute(
         self,
         kr: KernelRow,
         forest: NvtxIntervalForest,
-        provenance: dict[str, dict],
     ) -> KernelAttribution:
         # NVTX_EVENTS rows are keyed by host globalTid, not GPU streamId.
         # Use host_tid from the RUNTIME join; fall back to stream_id for older
@@ -279,33 +240,7 @@ class ManifestBuilder:
         # the launch call happens inside the aten:: NVTX range.
         nvtx_query_ts = kr.cpu_launch_start_ns if kr.cpu_launch_start_ns else kr.start_ns
 
-        # --- Priority 1: provenance sidecar (high confidence) ---
-        prov = provenance.get(kr.kernel_name)
-        if prov:
-            source_ops: list[str] = prov.get("source_ops", [])
-            raw_locs: list[dict] = prov.get("source_locations", [])
-            locs = [
-                SourceLocation(
-                    file=loc.get("file", ""),
-                    line=loc.get("line", 0),
-                    col=loc.get("col"),
-                    op=loc.get("op", source_ops[0] if source_ops else ""),
-                )
-                for loc in raw_locs
-            ]
-            all_ranges = forest.query_enclosing(nvtx_tid, kr.device_id, nvtx_query_ts)
-            innermost = all_ranges[-1] if all_ranges else None
-            return KernelAttribution(
-                method=AttributionMethod.PROVENANCE,
-                source_operators=source_ops,
-                source_locations=locs,
-                nvtx_range=innermost,
-                confidence=Confidence.HIGH,
-                is_fused=len(source_ops) > 1,
-                all_enclosing_ranges=all_ranges,
-            )
-
-        # --- Priority 2: NVTX enclosure (medium confidence) ---
+        # --- Priority 1: NVTX enclosure (medium confidence) ---
         # Only accept ranges whose text is an aten:: op name. Walk from
         # innermost outward and take the first aten:: match. Non-aten:: ranges
         # (inductor graph markers, TorchDynamo internals, etc.) fall through.
@@ -323,7 +258,7 @@ class ManifestBuilder:
                 all_enclosing_ranges=all_ranges,
             )
 
-        # --- Priority 3: kernel name heuristic (low confidence) ---
+        # --- Priority 2: kernel name heuristic (low confidence) ---
         # Handles both Triton inductor names (triton_*_fused_op1_op2_N) and
         # cuBLAS/cuDNN names via substring matching.
         heuristic_ops = self._name_heuristic(kr.kernel_name)

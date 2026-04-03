@@ -5,7 +5,7 @@ operator records and unattributed kernels.
 Called after:
   1. ManifestBuilder.build()         → MappingManifest
   2. AttributionEngine.run()         → (operator_records, unattributed_kernels)
-  3. RangeReplayOrchestrator.run()   → metrics populated in operator_records
+  3. KernelProfileOrchestrator.run() → metrics populated in operator_records
   4. build_aggregated_metrics()      → AggregatedMetrics per operator
 
 Optional DiagnosisAgent post-pass
@@ -91,9 +91,9 @@ def build_profile(
         compile_mode=meta.compile_mode,  # type: ignore[arg-type]
         nsys_report_path=meta.nsys_report_path,
         ncu_report_path=ncu_report_path,
-        provenance_log_path=meta.provenance_log_path,
-        capture_timestamp_utc=meta.capture_timestamp_utc
-        or datetime.now(timezone.utc).isoformat(),
+        capture_timestamp_utc=(
+            meta.capture_timestamp_utc or datetime.now(timezone.utc).isoformat()
+        ),
         device_name=device_name,
     )
 

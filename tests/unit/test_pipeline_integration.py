@@ -96,12 +96,12 @@ def _make_kernel(
         start_ns=0,
         end_ns=duration_ns,
         duration_ns=duration_ns,
-        metrics=KernelMetrics(
-            dram_bytes_read=512,
-            dram_bytes_written=512,
-            achieved_occupancy=occupancy,
-            arithmetic_intensity=ai,
-        ),
+        metrics=KernelMetrics(raw={
+            "dram__bytes_read.sum": 512,
+            "dram__bytes_written.sum": 512,
+            "sm__warps_active.avg.pct_of_peak_sustained_active": occupancy,
+            "arithmetic_intensity": ai,
+        }),
     )
 
 

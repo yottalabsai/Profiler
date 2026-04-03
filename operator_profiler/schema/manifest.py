@@ -1,12 +1,12 @@
 """
 Mapping Manifest schema — intermediate artifact produced by manifest_builder.py
-and consumed by range_replay.py and profile_builder.py.
+and consumed by kernel_profiler.py and profile_builder.py.
 """
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from .profile import AttributionMethod, Confidence, NvtxRangeInfo, SourceLocation
+from .profile import AttributionMethod, Confidence, NvtxRangeInfo
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 
@@ -27,7 +27,6 @@ class KernelManifestEntry(BaseModel):
 class KernelAttribution(BaseModel):
     method: AttributionMethod
     source_operators: list[str] = Field(default_factory=list)
-    source_locations: list[SourceLocation] = Field(default_factory=list)
     nvtx_range: NvtxRangeInfo | None = None
     confidence: Confidence
     is_fused: bool = False
@@ -40,7 +39,6 @@ class CaptureManifestMetadata(BaseModel):
     torch_version: str
     compile_mode: str
     nsys_report_path: str | None = None
-    provenance_log_path: str | None = None
     capture_timestamp_utc: str
     # Input shapes recorded at capture time — validated at replay to prevent
     # dynamic-shape kernel count mismatches (edge case #6)

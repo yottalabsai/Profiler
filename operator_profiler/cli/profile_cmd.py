@@ -1,8 +1,8 @@
 """
 operator-profiler profile <script> [args]
 
-End-to-end command: runs nsys + provenance capture, then builds the mapping
-manifest.  Does NOT run ncu replay (use `map` for that).
+End-to-end command: runs nsys capture, then builds the mapping manifest.
+Does NOT run ncu replay (use `map` for that).
 
 Usage:
     operator-profiler profile model.py --model-name MyModel --output profile.nsys-rep
@@ -31,7 +31,6 @@ def add_parser(subparsers) -> None:
     p.add_argument("--compile-mode", choices=["eager", "inductor", "cudagraphs"], default="eager")
     p.add_argument("--warmup-iters", type=int, default=2)
     p.add_argument("--nsys-executable", default="nsys")
-    p.add_argument("--no-provenance", action="store_true", help="Disable inductor provenance")
     p.set_defaults(func=_run)
 
 
@@ -43,14 +42,6 @@ def _run(args) -> None:
     output_prefix = Path(args.output)
 
     extra_env: dict[str, str] = {}
-    provenance_path: str | None = None
-
-    if args.compile_mode == "inductor" and not args.no_provenance:
-        provenance_path = str(output_prefix.with_suffix(".provenance.jsonl"))
-        extra_env["INDUCTOR_PROVENANCE"] = "1"
-        extra_env["INDUCTOR_COMPILE_THREADS"] = "1"
-        extra_env["INDUCTOR_PROVENANCE_OUTPUT"] = provenance_path
-        log.info("Inductor provenance sidecar → %s", provenance_path)
 
     nsys_config = NsysRunConfig(
         script=args.script,
@@ -74,14 +65,12 @@ def _run(args) -> None:
         torch_version=torch_version,
         compile_mode=args.compile_mode,
         nsys_report_path=str(rep_path),
-        provenance_log_path=provenance_path,
         capture_timestamp_utc=datetime.now(timezone.utc).isoformat(),
     )
 
     builder = ManifestBuilder(
         nsys_rep_path=rep_path,
         metadata=metadata,
-        provenance_jsonl_path=provenance_path,
     )
     manifest = builder.build()
 

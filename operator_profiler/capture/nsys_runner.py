@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def run_nsys_profile(config: NsysRunConfig) -> Path:
         "--output", str(output_path),
         "--force-overwrite", "true",
         *config.extra_nsys_args,
-        "python", str(config.script),
+        sys.executable, str(config.script),
         *config.script_args,
     ]
     log.info("Running nsys: %s", shlex.join(cmd))

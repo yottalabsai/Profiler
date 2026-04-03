@@ -8,7 +8,7 @@ Stages verified:
   0. Environment check  — ncu on PATH, CUDA available
   1. nsys capture       — run workload under nsys with emit_nvtx
   2. ManifestBuilder    — build MappingManifest + AttributionEngine
-  3. ncu range replay   — RangeReplayOrchestrator collects KernelMetrics
+  3. ncu kernel profile   — KernelProfileOrchestrator collects KernelMetrics
   4. build_profile      — assemble OperatorAttributedProfile with metrics
   5. Metrics check      — assert metrics are non-empty, bottleneck classified
 
@@ -186,19 +186,17 @@ def main(argv: list[str] | None = None) -> int:
         # Build manifest using internal helpers (no second nsys export call)
         builder = ManifestBuilder.__new__(ManifestBuilder)
         builder.nsys_rep_path = sqlite_path
-        builder.provenance_jsonl_path = None
         builder.metadata = meta
         builder.sqlite_cache_dir = None
 
         forest = builder._build_forest(nvtx_rows)
-        provenance = builder._load_provenance()
         outlier_ids = builder._detect_initialization_kernels(kernel_rows, nvtx_rows)
 
         entries: list[KernelManifestEntry] = []
         warnings: list[str] = []
         for i, kr in enumerate(kernel_rows):
             kid = f"k_{i:05d}"
-            attribution = builder._attribute(kr, forest, provenance)
+            attribution = builder._attribute(kr, forest)
             if kid in outlier_ids:
                 warnings.append(f"{kid} ({kr.kernel_name}): flagged as initialization kernel")
             entries.append(KernelManifestEntry(
@@ -245,14 +243,14 @@ def main(argv: list[str] | None = None) -> int:
         return _print_summary(overall)
 
     # -----------------------------------------------------------------------
-    # Stage 3 — ncu range replay
+    # Stage 3 — ncu kernel profile
     # -----------------------------------------------------------------------
-    _header(3, "ncu range replay  (RangeReplayOrchestrator)")
+    _header(3, "ncu kernel profile  (KernelProfileOrchestrator)")
 
-    from operator_profiler.mapper.range_replay import RangeReplayConfig, RangeReplayOrchestrator
+    from operator_profiler.mapper.kernel_profiler import KernelProfileConfig, KernelProfileOrchestrator
 
     ncu_out_dir = Path(tempfile.mkdtemp(prefix="op_profiler_ncu_out_"))
-    replay_config = RangeReplayConfig(
+    replay_config = KernelProfileConfig(
         replay_script=str(workload_script),
         replay_script_args=[],
         output_dir=str(ncu_out_dir),
@@ -260,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
+        orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
         t0 = time.perf_counter()
         orch.run()
         elapsed = time.perf_counter() - t0
@@ -298,11 +296,11 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             break
 
-        overall.append(("ncu_range_replay", metrics_populated > 0))
+        overall.append(("ncu_kernel_profile", metrics_populated > 0))
     except Exception as exc:
         import traceback; traceback.print_exc()
-        _fail(f"RangeReplayOrchestrator raised: {exc}")
-        overall.append(("ncu_range_replay", False))
+        _fail(f"KernelProfileOrchestrator raised: {exc}")
+        overall.append(("ncu_kernel_profile", False))
 
     # -----------------------------------------------------------------------
     # Stage 4 — build_profile

@@ -61,7 +61,15 @@
       "Bash(sudo env:*)",
       "Bash(ldd /home/ubuntu/.local/lib/python3.10/site-packages/torch/lib/libtorch_cuda.so)",
       "Bash(PYTHONPATH=/home/ubuntu/.local/lib/python3.10/site-packages \\\\\nsudo -E /opt/nvidia/nsight-compute/2025.4.1/ncu \\\\\n    --replay-mode kernel \\\\\n    --kernel-name \"gemv2T_kernel_val\" \\\\\n    --metrics l1tex__t_bytes.sum,sm__cycles_active.sum \\\\\n    --export /tmp/debug_test.ncu-rep \\\\\n    --force-overwrite \\\\\n    /usr/bin/python3 /tmp/test_workload.py 2>&1)",
-      "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --import /tmp/test_full_metrics.ncu-rep --csv)"
+      "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --import /tmp/test_full_metrics.ncu-rep --csv)",
+      "Bash(find /home/ubuntu/Operator-Profiler/operator_profiler/agents -name \"*.py\" -exec head -15 {} \\\\;)",
+      "Bash(pip3 list:*)",
+      "Bash(sudo /opt/nvidia/nsight-compute/2025.4.1/ncu --version)",
+      "Bash(ls /tmp/op_profiler_ncu_*)",
+      "Bash(echo \"none\" ls /tmp/op_profiler_nsys_*)",
+      "Bash(head -5 ls /tmp/op_profiler_ncu_*)",
+      "Bash(pip show:*)",
+      "Bash(pip3 show:*)"
     ]
   }
 }

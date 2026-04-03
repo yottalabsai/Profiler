@@ -42,6 +42,15 @@ def _make_kernel(
     occupancy: float | None = None,
     ai: float | None = None,
 ) -> KernelRecord:
+    raw: dict = {}
+    if dram_read is not None:
+        raw["dram__bytes_read.sum"] = dram_read
+    if dram_write is not None:
+        raw["dram__bytes_written.sum"] = dram_write
+    if occupancy is not None:
+        raw["sm__warps_active.avg.pct_of_peak_sustained_active"] = occupancy
+    if ai is not None:
+        raw["arithmetic_intensity"] = ai
     return KernelRecord(
         kernel_id=kernel_id,
         kernel_name=f"kernel_{kernel_id}",
@@ -51,12 +60,7 @@ def _make_kernel(
         start_ns=0,
         end_ns=duration_ns,
         duration_ns=duration_ns,
-        metrics=KernelMetrics(
-            dram_bytes_read=dram_read,
-            dram_bytes_written=dram_write,
-            achieved_occupancy=occupancy,
-            arithmetic_intensity=ai,
-        ),
+        metrics=KernelMetrics(raw=raw),
     )
 
 

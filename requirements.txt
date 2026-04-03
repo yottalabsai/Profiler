@@ -1,0 +1,13 @@
+# Core
+pydantic>=2.0
+torch>=2.0          # install via https://pytorch.org — choose the CUDA variant for your driver
+
+# Agents (optional — only needed for DiagnosisAgent / CuratorAgent / etc.)
+anthropic>=0.25
+
+# CLI display (optional — only needed for rich-formatted reports)
+rich>=13.0
+
+# Dev / testing
+pytest>=8.0
+pytest-mock

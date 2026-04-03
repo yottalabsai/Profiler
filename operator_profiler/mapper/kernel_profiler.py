@@ -62,7 +62,7 @@ class KernelReplayTarget:
 
 
 @dataclass
-class RangeReplayConfig:
+class KernelProfileConfig:
     """Top-level configuration for the KernelProfileOrchestrator."""
     replay_script: str | Path           # Python script to replay
     replay_script_args: list[str] = field(default_factory=list)
@@ -83,16 +83,17 @@ class RangeReplayConfig:
     expected_input_shapes: dict[str, list[int]] = field(default_factory=dict)
 
 
-class RangeReplayOrchestrator:
+class KernelProfileOrchestrator:
     """
     Runs ncu kernel profiles for all unique kernel names in the manifest and
     populates KernelMetrics on OperatorRecord.kernels in-place.
 
-    Despite the name (kept for API compatibility), this orchestrator no longer
-    uses NVTX range replay.  It profiles by kernel name instead.
+    For each unique kernel name, runs the workload script under ncu with
+    ``--kernel-name <name> --replay-mode kernel`` to collect hardware counters,
+    then matches ncu invocation rows back to manifest entries by launch order.
 
     Usage:
-        orch = RangeReplayOrchestrator(manifest, operator_records, config)
+        orch = KernelProfileOrchestrator(manifest, operator_records, config)
         orch.run()
         # operator_records[i].kernels[j].metrics is now populated
     """
@@ -101,7 +102,7 @@ class RangeReplayOrchestrator:
         self,
         manifest: MappingManifest,
         operator_records: list[OperatorRecord],
-        config: RangeReplayConfig,
+        config: KernelProfileConfig,
     ) -> None:
         self.manifest = manifest
         self.operator_records = operator_records

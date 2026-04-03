@@ -1,23 +1,20 @@
 """
-Unit tests for ManifestBuilder — the three-way join logic.
+Unit tests for ManifestBuilder — the two-way join logic (nsys + NVTX forest).
 
-Uses mocked nsys SQLite + provenance JSONL so no real GPU hardware is needed.
+Uses mocked nsys SQLite so no real GPU hardware is needed.
 
 Verifies:
-  - Provenance hit → method=provenance, confidence=high (highest priority)
-  - NVTX enclosure only → method=nvtx, confidence=medium
+  - NVTX enclosure → method=nvtx, confidence=medium
   - Name heuristic only → method=name_heuristic, confidence=low
   - No match → method=unattributed, confidence=unattributed
-  - Fused kernel (multiple source_ops) → is_fused=True
+  - Fused kernel (multiple source_ops from heuristic) → is_fused=True
   - Warm-up outlier detection (edge case #4)
 """
 from __future__ import annotations
 
-import json
-import sqlite3
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -67,12 +64,6 @@ def make_nvtx_row(**kwargs) -> NvtxRow:
     return NvtxRow(**defaults)
 
 
-def make_provenance_jsonl(entries: list[dict], path: Path) -> None:
-    with open(path, "w") as f:
-        for e in entries:
-            f.write(json.dumps(e) + "\n")
-
-
 # ---------------------------------------------------------------------------
 # ManifestBuilder with mocked nsys export
 # ---------------------------------------------------------------------------
@@ -82,21 +73,14 @@ class TestManifestBuilder:
         self,
         kernel_rows: list[KernelRow],
         nvtx_rows: list[NvtxRow],
-        provenance_entries: list[dict] | None = None,
     ):
         """Helper: run ManifestBuilder with mocked nsys I/O functions only."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            prov_path = None
-            if provenance_entries is not None:
-                prov_path = tmp_path / "provenance.jsonl"
-                make_provenance_jsonl(provenance_entries, prov_path)
-
-            metadata = make_metadata(provenance_log_path=str(prov_path) if prov_path else None)
+            metadata = make_metadata()
             builder = ManifestBuilder(
                 nsys_rep_path=tmp_path / "fake.nsys-rep",
                 metadata=metadata,
-                provenance_jsonl_path=prov_path,
             )
 
             # Mock only the I/O boundary — let _build_forest and _attribute run normally
@@ -111,43 +95,6 @@ class TestManifestBuilder:
                 manifest = builder.build()
 
         return manifest
-
-    # --- Provenance attribution ---
-
-    def test_provenance_high_confidence(self):
-        kernel = make_kernel_row(kernel_name="triton_per_fused_linear_relu_0")
-        nvtx = make_nvtx_row(text="aten::linear", start_ns=900, end_ns=1300, nesting_level=2)
-        prov = [
-            {
-                "generated_kernel_name": "triton_per_fused_linear_relu_0",
-                "source_ops": ["aten::linear", "aten::relu"],
-                "source_locations": [{"file": "model.py", "line": 42, "op": "aten::linear"}],
-            }
-        ]
-        manifest = self._build([kernel], [nvtx], prov)
-        entry = manifest.kernels[0]
-        assert entry.attribution.method == AttributionMethod.PROVENANCE
-        assert entry.attribution.confidence == Confidence.HIGH
-        assert "aten::linear" in entry.attribution.source_operators
-        assert "aten::relu" in entry.attribution.source_operators
-
-    def test_provenance_fused_kernel_marked(self):
-        kernel = make_kernel_row(kernel_name="triton_fused_add_relu_0")
-        prov = [
-            {
-                "generated_kernel_name": "triton_fused_add_relu_0",
-                "source_ops": ["aten::add", "aten::relu"],
-                "source_locations": [],
-            }
-        ]
-        manifest = self._build([kernel], [], prov)
-        assert manifest.kernels[0].attribution.is_fused is True
-
-    def test_provenance_single_op_not_fused(self):
-        kernel = make_kernel_row(kernel_name="triton_mm_0")
-        prov = [{"generated_kernel_name": "triton_mm_0", "source_ops": ["aten::mm"], "source_locations": []}]
-        manifest = self._build([kernel], [], prov)
-        assert manifest.kernels[0].attribution.is_fused is False
 
     # --- NVTX attribution ---
 
@@ -188,18 +135,6 @@ class TestManifestBuilder:
         assert entry.attribution.method == AttributionMethod.UNATTRIBUTED
         assert entry.attribution.confidence == Confidence.UNATTRIBUTED
 
-    # --- Priority order: provenance > NVTX > heuristic ---
-
-    def test_provenance_beats_nvtx(self):
-        kernel = make_kernel_row(kernel_name="triton_relu_0", start_ns=1000, end_ns=1200)
-        nvtx = make_nvtx_row(text="aten::mm", start_ns=900, end_ns=1300)
-        prov = [{"generated_kernel_name": "triton_relu_0", "source_ops": ["aten::relu"], "source_locations": []}]
-        manifest = self._build([kernel], [nvtx], prov)
-        entry = manifest.kernels[0]
-        # Provenance must win
-        assert entry.attribution.method == AttributionMethod.PROVENANCE
-        assert "aten::relu" in entry.attribution.source_operators
-
     # --- Warm-up outlier detection (edge case #4) ---
 
     def test_warmup_outlier_flagged(self):
@@ -215,8 +150,8 @@ class TestManifestBuilder:
             kernel_name="warm_up_kernel", start_ns=0, end_ns=outlier_dur
         )
         manifest = self._build(kernels, [])
-        # At least one warning about warm-up
-        assert any("warm-up outlier" in w for w in manifest.warnings)
+        # At least one warning about initialization kernel
+        assert any("initialization kernel" in w for w in manifest.warnings)
 
     def test_no_false_warmup_with_uniform_durations(self):
         kernels = [

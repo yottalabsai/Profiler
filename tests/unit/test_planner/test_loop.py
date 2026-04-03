@@ -211,7 +211,7 @@ def test_loop_executor_failure_does_not_crash(tmp_path):
         # Reference a node that doesn't exist → PreFlightError
         from operator_profiler.rewriter.dsl import FuseOp, RewritePlan
         return RewritePlan(
-            ops=[FuseOp(id="f0", nodes=["nonexistent_a", "nonexistent_b"])]
+            ops=[FuseOp(op="fuse", id="f0", nodes=["nonexistent_a", "nonexistent_b"])]
         )
 
     loop, initial_profile = _make_loop(

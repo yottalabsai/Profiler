@@ -6,7 +6,7 @@ Verifies:
   - All fields survive JSON → Pydantic → JSON → Pydantic roundtrip
   - schema_version is preserved
   - Enums serialize to their string values
-  - Nested models (KernelMetrics.raw, SourceLocation) roundtrip correctly
+  - Nested models (KernelMetrics.raw) roundtrip correctly
 """
 import json
 from pathlib import Path
@@ -69,15 +69,8 @@ class TestSchemaRoundtrip:
     def test_attribution_enum_roundtrip(self):
         profile = load_sample_profile()
         kernel = profile.operators[0].kernels[0]
-        assert kernel.attribution_method == AttributionMethod.PROVENANCE
+        assert kernel.attribution_method == AttributionMethod.NVTX
         assert kernel.confidence == Confidence.HIGH
-
-    def test_source_location_preserved(self):
-        profile = load_sample_profile()
-        op = profile.operators[0]
-        assert op.source_location is not None
-        assert op.source_location.file == "model.py"
-        assert op.source_location.line == 42
 
     def test_nvtx_range_preserved(self):
         profile = load_sample_profile()

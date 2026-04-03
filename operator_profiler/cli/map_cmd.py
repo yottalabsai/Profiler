@@ -34,7 +34,7 @@ def add_parser(subparsers) -> None:
 def _run(args) -> None:
     from operator_profiler.schema.manifest import MappingManifest
     from operator_profiler.mapper.attribution_engine import AttributionEngine
-    from operator_profiler.mapper.range_replay import RangeReplayConfig, RangeReplayOrchestrator
+    from operator_profiler.mapper.kernel_profiler import KernelProfileConfig, KernelProfileOrchestrator
     from operator_profiler.aggregator.profile_builder import build_profile
 
     manifest_path = Path(args.manifest)
@@ -53,13 +53,13 @@ def _run(args) -> None:
         except ImportError:
             torch_version = "unknown"
 
-    replay_config = RangeReplayConfig(
+    replay_config = KernelProfileConfig(
         replay_script=args.script,
         replay_script_args=args.script_args or [],
         ncu_executable=args.ncu_executable,
         expected_input_shapes=manifest.capture_metadata.input_shapes,
     )
-    orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
+    orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()
 
     # Assemble profile

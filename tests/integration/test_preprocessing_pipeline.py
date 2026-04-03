@@ -9,7 +9,7 @@ Covers all pipeline stages:
   2. nsys export     — .nsys-rep → .sqlite
   3. Manifest build  — ManifestBuilder (query_kernels + query_nvtx_events + attribution)
   4. Attribution     — AttributionEngine.run() → operator_records
-  5. ncu replay      — RangeReplayOrchestrator.run() → kernel metrics populated
+  5. ncu replay      — KernelProfileOrchestrator.run() → kernel metrics populated
   6. Aggregation     — build_profile() → AggregatedMetrics per operator
   7. Schema roundtrip — model_dump_json → model_validate_json
 """
@@ -227,7 +227,7 @@ def full_pipeline_profile(tmp_path_factory):
     # Stage 5: ncu kernel profiling — populates kernel metrics in-place
     # ------------------------------------------------------------------
     import site
-    from operator_profiler.mapper.range_replay import RangeReplayConfig, RangeReplayOrchestrator
+    from operator_profiler.mapper.kernel_profiler import KernelProfileConfig, KernelProfileOrchestrator
 
     # ncu needs GPU counter access (sudo) and the user's Python packages
     # (PYTHONPATH) when running under a different user context.
@@ -239,14 +239,14 @@ def full_pipeline_profile(tmp_path_factory):
     local_site = site.getusersitepackages()
     pythonpath = ":".join(filter(None, [local_site, user_site]))
 
-    replay_config = RangeReplayConfig(
+    replay_config = KernelProfileConfig(
         replay_script=script,
         output_dir=str(tmp),
         ncu_executable=ncu_exe,
         ncu_sudo=True,
         ncu_extra_env={"PYTHONPATH": pythonpath},
     )
-    orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
+    orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()
 
     # ------------------------------------------------------------------
@@ -556,7 +556,7 @@ def complex_pipeline_profile(tmp_path_factory):
     from operator_profiler.mapper.manifest_builder import ManifestBuilder
     from operator_profiler.schema.manifest import CaptureManifestMetadata
     from operator_profiler.mapper.attribution_engine import AttributionEngine
-    from operator_profiler.mapper.range_replay import RangeReplayConfig, RangeReplayOrchestrator
+    from operator_profiler.mapper.kernel_profiler import KernelProfileConfig, KernelProfileOrchestrator
     from operator_profiler.aggregator.profile_builder import build_profile
 
     tmp = tmp_path_factory.mktemp("pipeline_complex")
@@ -601,14 +601,14 @@ def complex_pipeline_profile(tmp_path_factory):
         (p for p in site.getsitepackages() if "dist-packages" in p or "site-packages" in p), ""
     )
     pythonpath = ":".join(filter(None, [site.getusersitepackages(), user_site]))
-    replay_config = RangeReplayConfig(
+    replay_config = KernelProfileConfig(
         replay_script=script,
         output_dir=str(tmp),
         ncu_executable=ncu_exe,
         ncu_sudo=True,
         ncu_extra_env={"PYTHONPATH": pythonpath},
     )
-    orch = RangeReplayOrchestrator(manifest, operator_records, replay_config)
+    orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()
 
     profile = build_profile(
