@@ -1,9 +1,8 @@
 """CLI entry point — delegates to subcommand modules."""
 import argparse
 import logging
-import sys
 
-from . import map_cmd, profile_cmd, report_cmd, summarize_cmd, explain_cmd
+from . import map_cmd, profile_cmd
 
 
 def main() -> None:
@@ -14,15 +13,12 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="operator-profiler",
-        description="Correlate GPU hardware metrics with PyTorch operators.",
+        description="Profile GPU workloads and attribute hardware metrics to PyTorch operators.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     profile_cmd.add_parser(subparsers)
     map_cmd.add_parser(subparsers)
-    report_cmd.add_parser(subparsers)
-    summarize_cmd.add_parser(subparsers)
-    explain_cmd.add_parser(subparsers)
 
     args = parser.parse_args()
     args.func(args)

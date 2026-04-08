@@ -69,7 +69,17 @@
       "Bash(echo \"none\" ls /tmp/op_profiler_nsys_*)",
       "Bash(head -5 ls /tmp/op_profiler_ncu_*)",
       "Bash(pip show:*)",
-      "Bash(pip3 show:*)"
+      "Bash(pip3 show:*)",
+      "Bash(grep -E \"\\\\.\\(py|txt|json|yaml|yml|toml\\)$\")",
+      "Bash(find /root/Profiler/operator_profiler -type f -name \"*.py\" -exec wc -l {} \\\\;)",
+      "Bash(git -C /root/Profiler show HEAD:scripts/verify_ncu_pipeline.py)",
+      "Bash(git -C /root/Profiler log --oneline --all -- scripts/verify_ncu_pipeline.py)",
+      "Bash(git -C /root/Profiler checkout HEAD -- scripts/verify_ncu_pipeline.py)",
+      "Bash(git -C /root/Profiler show HEAD:tests/)",
+      "Bash(git -C /root/Profiler ls-tree -r HEAD --name-only)",
+      "Bash(git -C /root/Profiler show HEAD:tests/unit/test_schema_roundtrip.py)",
+      "Bash(git -C /root/Profiler show HEAD:tests/unit/test_pipeline_integration.py)",
+      "Bash(git -C /root/Profiler checkout HEAD -- tests/__init__.py tests/fixtures/sample_manifest.json tests/fixtures/sample_profile.json tests/integration/__init__.py tests/integration/test_nvtx_capture.py tests/integration/test_preprocessing_pipeline.py tests/unit/__init__.py tests/unit/test_interval_tree.py tests/unit/test_manifest_builder.py tests/unit/test_metric_aggregator.py tests/unit/test_schema_roundtrip.py)"
     ]
   }
 }

@@ -5,19 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "operator-profiler"
 version = "0.1.0"
-description = "Correlate GPU hardware metrics with PyTorch operators"
+description = "GPU profiler: attribute hardware metrics to PyTorch operators and get LLM-powered optimization feedback"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-mock",
-]
-rich = [
-    "rich>=13.0",
+llm = [
+    "anthropic",
 ]
 
 [project.scripts]
@@ -32,5 +28,4 @@ testpaths = ["tests"]
 markers = [
     "integration: requires CUDA GPU + nsys/ncu on PATH",
 ]
-# Run unit tests by default; use -m integration to run integration tests
 addopts = "-m 'not integration'"

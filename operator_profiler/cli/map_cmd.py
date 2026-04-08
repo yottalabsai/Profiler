@@ -9,6 +9,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import logging
 from pathlib import Path
 
@@ -28,6 +29,16 @@ def add_parser(subparsers) -> None:
     p.add_argument("--model-name", default="model")
     p.add_argument("--torch-version", default=None)
     p.add_argument("--device-name", default=None)
+    p.add_argument(
+        "--diagnose",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use the DiagnosisAgent (Claude via Anthropic API) to classify bottlenecks "
+            "relative to the workload's own metric distribution. Requires ANTHROPIC_API_KEY. "
+            "Falls back to roofline heuristics if the API is unavailable. (default: enabled)"
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -62,6 +73,16 @@ def _run(args) -> None:
     orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()
 
+    # Optional LLM-powered bottleneck diagnosis
+    diagnosis_agent = None
+    if args.diagnose:
+        try:
+            from operator_profiler.agents.diagnosis import DiagnosisAgent
+            diagnosis_agent = DiagnosisAgent()
+            log.info("DiagnosisAgent enabled — LLM will classify bottlenecks relative to workload distribution")
+        except Exception as e:
+            log.warning("DiagnosisAgent unavailable (%s); falling back to roofline heuristics", e)
+
     # Assemble profile
     profile = build_profile(
         manifest=manifest,
@@ -71,6 +92,7 @@ def _run(args) -> None:
         torch_version=torch_version,
         device_name=args.device_name,
         ncu_report_path=str(ncu_output_dir),
+        diagnosis_agent=diagnosis_agent,
     )
 
     output_path = Path(args.output)
