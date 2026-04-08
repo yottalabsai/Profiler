@@ -120,17 +120,61 @@ class AggregatedMetrics(BaseModel):
     kernel_count: int
     # Kernel that accounts for the most GPU time — primary optimization target
     dominant_kernel_id: str | None = None
-    # Additive quantities — sum correctly across heterogeneous kernels.
-    # None means the metric was unavailable on this hardware (e.g. Blackwell);
-    # 0 means the metric was collected and genuinely zero.
+
+    # ------------------------------------------------------------------
+    # Memory bandwidth (None = counter unavailable on this hardware)
+    # ------------------------------------------------------------------
     total_dram_bytes_read: int | None = None
     total_dram_bytes_written: int | None = None
+
+    # ------------------------------------------------------------------
+    # Memory subsystem throughput — % of peak (duration-weighted mean)
+    # ------------------------------------------------------------------
+    memory_throughput_pct: float | None = None   # overall memory subsystem
+    dram_throughput_pct: float | None = None     # DRAM specifically
+    mem_busy_pct: float | None = None            # memory pipeline busy %
+
+    # ------------------------------------------------------------------
+    # Cache efficiency — % hit rate (duration-weighted mean)
+    # ------------------------------------------------------------------
+    l1_hit_rate: float | None = None
+    l2_hit_rate: float | None = None
+
+    # ------------------------------------------------------------------
+    # Compute utilization — % of peak (duration-weighted mean)
+    # ------------------------------------------------------------------
+    sm_throughput_pct: float | None = None       # overall SM compute
+    tensor_core_active_pct: float | None = None  # Tensor Core pipe
+
+    # ------------------------------------------------------------------
+    # Occupancy & latency (duration-weighted mean)
+    # ------------------------------------------------------------------
+    achieved_occupancy: float | None = None
+    warp_cycles_per_instruction: float | None = None  # high → latency-bound
+    eligible_cycles_pct: float | None = None          # low → latency-bound
+
+    # ------------------------------------------------------------------
+    # Instruction throughput
+    # ------------------------------------------------------------------
     total_executed_instructions: int = 0
-    total_issued_instructions: int = 0
-    # Rate/utilization metrics — duration-weighted mean across kernels
-    mean_achieved_occupancy: float | None = None
-    mean_tensor_core_active_pct: float | None = None
+    total_issued_instructions: int = 0           # backward compat; ≈ executed
+    ipc_active: float | None = None              # IPC when SM is active
+
+    # ------------------------------------------------------------------
+    # Thread utilization
+    # ------------------------------------------------------------------
+    avg_threads_per_warp: float | None = None    # <32 → control-flow divergence
+
+    # ------------------------------------------------------------------
+    # Register / shared memory pressure (max across kernels in operator)
+    # ------------------------------------------------------------------
+    registers_per_thread: float | None = None    # high → limits occupancy
+    local_memory_spills: int | None = None       # nonzero → costly DRAM spills
+    dynamic_smem_per_block: float | None = None  # bytes; high → limits occupancy
+
+    # ------------------------------------------------------------------
     # Set by DiagnosisAgent when present; None otherwise
+    # ------------------------------------------------------------------
     bottleneck_classification: str | None = None
 
 

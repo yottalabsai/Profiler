@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from operator_profiler.schema.metrics import DEFAULT_NCU_METRICS
+from operator_profiler.schema.metrics import AGGREGATE_NCU_METRICS
 from operator_profiler.utils.subprocess_utils import run_subprocess
 
 log = logging.getLogger(__name__)
@@ -41,10 +41,10 @@ class NcuKernelProfileConfig:
     script_args: list[str] = field(default_factory=list)
     kernel_name_filter: str = ""       # Exact name or regex passed to --kernel-name
     # ncu_metric_set takes precedence over metrics when non-empty.
-    # Use a named ncu set ("full", "default", "roofline", "basic") to collect
-    # all metrics the GPU supports rather than a fixed list.
-    ncu_metric_set: str = "full"
-    metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
+    # Leave empty (default) to use AGGREGATE_NCU_METRICS via --metrics.
+    # Pass a named set ("full", "default", "roofline", "basic") to override.
+    ncu_metric_set: str = ""
+    metrics: list[str] = field(default_factory=lambda: list(AGGREGATE_NCU_METRICS))
     output_path: str | Path = ""       # .ncu-rep output path
     ncu_executable: str = "ncu"
     extra_ncu_args: list[str] = field(default_factory=list)

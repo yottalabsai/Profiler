@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from operator_profiler.schema.manifest import MappingManifest
-from operator_profiler.schema.metrics import DEFAULT_NCU_METRICS
+from operator_profiler.schema.metrics import AGGREGATE_NCU_METRICS
 from operator_profiler.schema.profile import KernelMetrics, OperatorRecord
 from operator_profiler.mapper.ncu_runner import NcuKernelProfileConfig, run_kernel_profile, import_ncu_report
 from operator_profiler.mapper.ncu_parser import parse_ncu_csv_by_id
@@ -68,10 +68,11 @@ class KernelProfileConfig:
     replay_script_args: list[str] = field(default_factory=list)
     output_dir: str | Path = ""
     # ncu_metric_set takes precedence over metrics when non-empty.
-    # Use a named ncu set ("full", "default", "roofline", "basic") to collect
-    # all metrics the GPU supports rather than a fixed list.
-    ncu_metric_set: str = "full"
-    metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
+    # Leave empty (default) to use AGGREGATE_NCU_METRICS via --metrics, which
+    # collects only the 20 counters needed for bottleneck classification.
+    # Pass a named set ("full", "default", "roofline", "basic") to override.
+    ncu_metric_set: str = ""
+    metrics: list[str] = field(default_factory=lambda: list(AGGREGATE_NCU_METRICS))
     ncu_executable: str = "ncu"
     # Set True to prefix ncu with "sudo -E" (needed when perf counters are
     # restricted to root, e.g. ERR_NVGPUCTRPERM).

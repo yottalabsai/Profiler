@@ -22,7 +22,7 @@ from .metrics import (
     MetricPolicy,
     METRIC_POLICIES,
     NCU_NAME_TO_POLICY,
-    DEFAULT_NCU_METRICS,
+    AGGREGATE_NCU_METRICS,
 )
 
 __all__ = [
@@ -45,5 +45,5 @@ __all__ = [
     "MetricPolicy",
     "METRIC_POLICIES",
     "NCU_NAME_TO_POLICY",
-    "DEFAULT_NCU_METRICS",
+    "AGGREGATE_NCU_METRICS",
 ]
