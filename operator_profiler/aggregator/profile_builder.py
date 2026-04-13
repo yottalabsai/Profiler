@@ -152,10 +152,10 @@ def _compute_model_stats(
             if k.metrics.arithmetic_intensity is not None:
                 ais.append(k.metrics.arithmetic_intensity)
         if op.aggregated is not None:
-            if op.aggregated.mean_achieved_occupancy is not None:
-                occs.append(op.aggregated.mean_achieved_occupancy)
-            if op.aggregated.mean_tensor_core_active_pct is not None:
-                tc_pcts.append(op.aggregated.mean_tensor_core_active_pct)
+            if op.aggregated.achieved_occupancy is not None:
+                occs.append(op.aggregated.achieved_occupancy)
+            if op.aggregated.tensor_core_active_pct is not None:
+                tc_pcts.append(op.aggregated.tensor_core_active_pct)
 
     def _percentile(vals: list[float], p: int) -> float | None:
         if not vals:

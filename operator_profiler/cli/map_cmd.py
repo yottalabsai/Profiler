@@ -26,6 +26,19 @@ def add_parser(subparsers) -> None:
     p.add_argument("--script-args", nargs="*", default=[])
     p.add_argument("--output", default="profile.json", help="Output profile JSON path")
     p.add_argument("--ncu-executable", default="ncu")
+    p.add_argument(
+        "--ncu-sudo",
+        action="store_true",
+        default=False,
+        help="Prefix ncu with 'sudo -E' (required when GPU perf counters are restricted to root)",
+    )
+    p.add_argument(
+        "--ncu-env",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        help="Extra environment variable forwarded to ncu (e.g. PYTHONPATH=/my/repo). Repeatable.",
+    )
     p.add_argument("--model-name", default="model")
     p.add_argument("--torch-version", default=None)
     p.add_argument("--device-name", default=None)
@@ -64,10 +77,17 @@ def _run(args) -> None:
         except ImportError:
             torch_version = "unknown"
 
+    ncu_extra_env: dict[str, str] = {}
+    for pair in args.ncu_env:
+        key, _, value = pair.partition("=")
+        ncu_extra_env[key] = value
+
     replay_config = KernelProfileConfig(
         replay_script=args.script,
         replay_script_args=args.script_args or [],
         ncu_executable=args.ncu_executable,
+        ncu_sudo=args.ncu_sudo,
+        ncu_extra_env=ncu_extra_env,
         expected_input_shapes=manifest.capture_metadata.input_shapes,
     )
     orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)

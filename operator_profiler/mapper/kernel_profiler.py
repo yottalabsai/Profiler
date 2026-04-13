@@ -190,6 +190,18 @@ class KernelProfileOrchestrator:
         )
         run_kernel_profile(ncu_config)
 
+        # ncu exits 0 when it finds no matching kernel invocations (e.g. kernels
+        # that only launch under emit_nvtx profiling overhead but not in a plain
+        # replay run). In that case it skips writing the .ncu-rep file entirely.
+        if not ncu_rep_path.exists():
+            log.warning(
+                "ncu produced no output for kernel '%s' — kernel was not observed "
+                "during the replay run (likely a profiling-overhead kernel from "
+                "emit_nvtx). Skipping metric collection for this kernel.",
+                target.kernel_name,
+            )
+            return {}
+
         csv_text = import_ncu_report(ncu_rep_path, self.config.ncu_executable)
         return parse_ncu_csv_by_id(csv_text)
 

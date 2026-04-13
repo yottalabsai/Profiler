@@ -84,6 +84,18 @@ class KernelMetrics(BaseModel):
         return float(v) if v is not None else None
 
     @property
+    def l1_hit_rate(self) -> float | None:
+        from operator_profiler.schema.metrics import get_raw_value
+        v = get_raw_value(self.raw, "l1_hit_rate")
+        return float(v) if v is not None else None
+
+    @property
+    def l2_hit_rate(self) -> float | None:
+        from operator_profiler.schema.metrics import get_raw_value
+        v = get_raw_value(self.raw, "l2_hit_rate")
+        return float(v) if v is not None else None
+
+    @property
     def arithmetic_intensity(self) -> float | None:
         # Not a standard NCU column — stored directly under this key if available.
         v = self.raw.get("arithmetic_intensity")
