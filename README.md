@@ -28,11 +28,6 @@ Rather than relying on PyTorch's built-in timing hooks, Operator Profiler:
    - **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range emitted by `emit_nvtx`
    - **Kernel name heuristic** (`low` confidence) — Triton kernel name parsed to infer fused aten ops
 
-### Roofline utilities
-
-The tool includes built-in roofline model specs for multiple GPUs (A100, H100, RTX 4090/5090, and more). You can use these to compute arithmetic intensity and reason about compute vs. memory bandwidth limits in your operators using the Python API.
-
-
 ---
 
 ## Pipeline
@@ -117,7 +112,7 @@ operator-profiler map runs/my_run.manifest.json \
 | `--ncu-executable` | `ncu` | Path to `ncu` binary |
 | `--ncu-sudo` | disabled | Prefix `ncu` with `sudo -E`; required on most Linux systems to access GPU performance counters |
 | `--ncu-env KEY=VAL` | `[]` | Extra env vars forwarded under `sudo` (e.g. `PYTHONPATH=/path/to/repo`); needed because `sudo` drops the environment |
-| `--device-name` | auto | GPU name (used for roofline specs lookup) |
+| `--device-name` | auto | GPU name (stored in metadata for reference) |
 
 Output: `profile.json` — an `OperatorAttributedProfile` with per-operator hardware metrics.
 
@@ -246,22 +241,25 @@ for op in operators_by_duration[:5]:
 
 ---
 
-## Supported GPUs
+## Optimization Workflow
 
-Roofline specs are built in for:
+Once you have a profile, use the provided prompt templates to identify and implement optimizations:
 
-| GPU | Peak Compute (TFLOPS FP16) | Peak Bandwidth (GB/s) |
-|---|---|---|
-| H100 SXM5 80GB | 1,979 | 3,350 |
-| A100 SXM4 80GB | 312 | 2,000 |
-| A100 PCIe 80GB | 312 | 1,935 |
-| RTX 5090 | 839 | 1,792 |
-| RTX 4090 | 83 | 1,008 |
-| RTX 3090 | 36 | 936 |
-| RTX 5070 | 244 | 672 |
-| RTX 5070 Laptop | 198 | 448 |
+### 1. Identify Optimizations (`optimization_proposal_prompt.md`)
 
-Custom specs can be added to `operator_profiler/aggregator/roofline.py:KNOWN_GPU_SPECS`.
+Pass your `profile.json` to this prompt along with your baseline `workload.py`. It analyzes hardware metrics and produces a structured list of operator-level optimizations with:
+- Specific operators and bottleneck analysis (e.g., "Waves/SM=0.11 indicates kernel launch starvation")
+- Concrete FX graph transformations (fusion, elimination, kernel substitution)
+- Impact estimates (latency, throughput, memory improvements)
+
+### 2. Implement Optimizations (`optimization_implementation_prompt.md`)
+
+Pass the optimization recommendations and your workload to this prompt. It generates:
+- A custom `torch.compile()` backend with FX graph passes that implement the optimizations
+- A test script to verify the optimized workload
+- Before/after documentation
+
+See **[example.md](example.md)** for a full walkthrough of this workflow with real measured improvements (6.3× speedup on a TransformerBlock).
 
 ---
 
