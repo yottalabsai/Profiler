@@ -6,6 +6,14 @@ Operator Profiler captures real NVIDIA hardware counter data (`nsys` + `ncu`) an
 
 ---
 
+## Quick Start
+
+For a complete walkthrough — baseline capture, bottleneck diagnosis, FX graph optimizations, and before/after comparison with real measured numbers — see **[example.md](example.md)**.
+
+The example walks through a TransformerBlock workload on an NVIDIA RTX PRO 6000 Blackwell GPU, achieving a **6.3× per-sample speedup** purely from profiler-guided changes.
+
+---
+
 ## Why this profiler?
 
 Most profiling tools tell you *what* ran. Operator Profiler tells you *why it was slow* and *which operators to fix first*.
@@ -33,6 +41,8 @@ The `DiagnosisAgent` goes beyond static thresholds. It uses Claude to reason abo
 - Produces a `bottleneck_classification` field (`compute_bound`, `memory_bound`, `latency_bound`, `unknown`) with full reasoning in the agent's internal trace
 
 This prompt-engineered analysis runs as a post-pass over all operators after hardware metrics are collected, so it has global context across the entire workload before making any call.
+
+After diagnosis, use `prompt.md` as a reusable template to ask Claude for operator-level optimization recommendations based on your `profile.json`. The resulting structured recommendations (like those in `OPTIMIZATIONS.json`) map hardware evidence to concrete code transformations, ready to implement as FX graph passes or dtype/shape changes. See **[example.md](example.md)** for the full optimization workflow in action.
 
 ---
 
@@ -128,10 +138,35 @@ operator-profiler map runs/my_run.manifest.json \
 | `--script-args` | `[]` | Arguments forwarded to the script |
 | `--output` | `profile.json` | Output path for `OperatorAttributedProfile` JSON |
 | `--ncu-executable` | `ncu` | Path to `ncu` binary |
+| `--ncu-sudo` | disabled | Prefix `ncu` with `sudo -E`; required on most Linux systems to access GPU performance counters |
+| `--ncu-env KEY=VAL` | `[]` | Extra env vars forwarded under `sudo` (e.g. `PYTHONPATH=/path/to/repo`); needed because `sudo` drops the environment |
 | `--device-name` | auto | GPU name (used for roofline specs lookup) |
 | `--diagnose` / `--no-diagnose` | enabled | Run DiagnosisAgent for LLM-powered bottleneck classification |
 
 Output: `profile.json` — an `OperatorAttributedProfile` with per-operator hardware metrics and bottleneck classifications.
+
+---
+
+## Example Workloads
+
+Six ready-to-run workloads are in `scripts/workloads/`. Each exposes a `get_model_and_input()` function compatible with `scripts/run_workload.py`:
+
+| Workload | What it covers |
+|---|---|
+| `transformer_block` | Attention + FFN + LayerNorm — the reference workload for `example.md` |
+| `conv_block` | Conv2d + BatchNorm + ReLU |
+| `mlp_activations` | Deep MLP with multiple activation types |
+| `sdpa_attention` | Multi-head SDPA (routes to FlashAttention-2 under Inductor) |
+| `depthwise_separable_conv` | Depthwise + pointwise convolutions |
+| `embedding_projection` | Embedding lookup + linear projection |
+
+To profile all six in one batch:
+
+```bash
+python scripts/run_all_profiles.py
+```
+
+Results land in `runs/<workload_name>/`.
 
 ---
 
