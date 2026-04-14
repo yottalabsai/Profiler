@@ -90,7 +90,13 @@
       "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --query-metrics)",
       "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --help)",
       "Bash(sudo -E /opt/nvidia/nsight-compute/2025.4.1/ncu --query-metrics)",
-      "Bash(tee /tmp/profiling_run.log)"
+      "Bash(tee /tmp/profiling_run.log)",
+      "Bash(PYTHONPATH=/home/ubuntu/Profiler python3 -c \"from operator_profiler.cli import main; main\\(\\)\" -- --help)",
+      "Bash(cat)",
+      "Bash(chmod +x /tmp/run_op_profiler.sh)",
+      "Bash(/tmp/run_op_profiler.sh profile:*)",
+      "Bash(PYTHONPATH=/home/ubuntu/Profiler python3:*)",
+      "Bash(/tmp/run_op_profiler.sh map:*)"
     ]
   }
 }

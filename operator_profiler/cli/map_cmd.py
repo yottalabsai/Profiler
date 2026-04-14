@@ -23,7 +23,7 @@ def add_parser(subparsers) -> None:
     )
     p.add_argument("manifest", help="Path to mapping_manifest.json")
     p.add_argument("--script", required=True, help="Replay script (same as capture)")
-    p.add_argument("--script-args", nargs="*", default=[])
+    p.add_argument("--script-args", nargs=argparse.REMAINDER, default=[])
     p.add_argument("--output", default="profile.json", help="Output profile JSON path")
     p.add_argument("--ncu-executable", default="ncu")
     p.add_argument(

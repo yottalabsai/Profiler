@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.fx as fx
 from torch._dynamo import register_backend
-from torch._inductor import compile_fx
+from torch._inductor.compile_fx import compile_fx
 from torch.fx.subgraph_rewriter import replace_pattern
 
 # Import baseline workload to copy model structure

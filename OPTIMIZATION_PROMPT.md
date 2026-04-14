@@ -71,7 +71,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.fx as fx
 from torch._dynamo import register_backend
-from torch._inductor import compile_fx
+from torch._inductor.compile_fx import compile_fx   # import the function, not the module
 from torch.fx.subgraph_rewriter import replace_pattern
 
 # Import baseline workload
@@ -368,6 +368,39 @@ gm.recompile()
 - **FX pass:** `pass_fuse_ln_linear()` — detection only
 - **Status:** Stub; full implementation requires custom Triton kernel
 - **Log:** "LN-Linear fusion detected but not applied — requires custom Triton kernel"
+
+## Known Implementation Notes
+
+### compile_fx import
+`from torch._inductor import compile_fx` imports the **module** `torch._inductor.compile_fx`, not the callable function. This causes `TypeError: 'module' object is not callable` at compile time. Always import from the submodule:
+```python
+# WRONG — imports the module, not the function
+from torch._inductor import compile_fx
+
+# CORRECT
+from torch._inductor.compile_fx import compile_fx
+```
+
+### operator-profiler map --script-args
+`--script-args` in the `map` command uses `nargs=argparse.REMAINDER`, which means it must be the **last** flag on the command line. Any option-style arguments (e.g. `--workload`, `--compile-backend`) must follow it without interruption, otherwise argparse misinterprets them as flags for the `map` command itself.
+
+```bash
+# WRONG — --ncu-env after --script-args causes parse error
+operator-profiler map manifest.json \
+    --script scripts/run_workload.py \
+    --script-args --workload scripts/workload_optimized.py \
+    --ncu-env PYTHONPATH=/repo   # ← this breaks --script-args parsing
+
+# CORRECT — all map flags before --script-args
+operator-profiler map manifest.json \
+    --script scripts/run_workload.py \
+    --ncu-sudo \
+    --ncu-env PYTHONPATH=/repo \
+    --script-args --workload scripts/workload_optimized.py \
+                  --compile-backend transformer_opt
+```
+
+---
 
 ## Testing Strategy
 
