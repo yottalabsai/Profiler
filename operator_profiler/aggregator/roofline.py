@@ -58,14 +58,3 @@ def roofline_efficiency(achieved_gflops: float, ceiling_gflops: float) -> float:
     return min(100.0, 100.0 * achieved_gflops / ceiling_gflops)
 
 
-# Common GPU peak specs — users should override with device-specific values
-KNOWN_GPU_SPECS: dict[str, dict[str, float]] = {
-    "A100 SXM4 80GB": {"peak_compute_gflops": 312_000.0,   "peak_bandwidth_gbs": 2_000.0},
-    "A100 PCIe 80GB": {"peak_compute_gflops": 312_000.0,   "peak_bandwidth_gbs": 1_935.0},
-    "H100 SXM5 80GB": {"peak_compute_gflops": 1_979_000.0, "peak_bandwidth_gbs": 3_350.0},
-    "RTX 5090":              {"peak_compute_gflops": 838_600.0, "peak_bandwidth_gbs": 1_792.0},
-    "RTX 5070 Laptop GPU":   {"peak_compute_gflops": 198_200.0, "peak_bandwidth_gbs": 448.0},
-    "RTX 5070":              {"peak_compute_gflops": 243_600.0, "peak_bandwidth_gbs": 672.0},
-    "RTX 4090":              {"peak_compute_gflops": 82_580.0,  "peak_bandwidth_gbs": 1_008.0},
-    "RTX 3090":              {"peak_compute_gflops": 35_580.0,  "peak_bandwidth_gbs": 936.0},
-}

@@ -3,6 +3,53 @@ Metrics schema helpers — aggregation policies and metric name constants.
 
 This module is the single source of truth for ncu metric names used across
 ncu_parser.py and metric_aggregator.py.
+
+Architecture compatibility
+--------------------------
+Each MetricPolicy carries an optional ``ncu_name_fallbacks`` tuple of
+alternative counter names for GPUs where the primary counter is renamed.
+All names (primary + fallbacks) are passed to ``ncu --metrics`` at
+collection time; ncu silently omits names that don't exist on the current
+GPU.  ``get_raw_value()`` returns the first numeric match, so the correct
+value surfaces regardless of which architecture's counter fired.
+
+Verified architecture coverage per metric (20 total):
+
+  Works on Ampere + Hopper + Blackwell (12 metrics — no fallbacks needed):
+    gpu__time_duration.sum
+    gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed
+    dram__throughput.avg.pct_of_peak_sustained_elapsed
+    l1tex__throughput.avg.pct_of_peak_sustained_active
+    sm__throughput.avg.pct_of_peak_sustained_elapsed
+    smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active
+    sm__warps_active.avg.pct_of_peak_sustained_active
+    smsp__issue_active.avg.pct_of_peak_sustained_active
+    smsp__inst_executed.sum
+    smsp__inst_executed.avg.per_cycle_active
+    launch__registers_per_thread
+    launch__shared_mem_per_block_dynamic
+
+  Primary name works on Ampere + Hopper; Blackwell uses renamed counter (7 metrics):
+    dram__bytes_read.sum        → dram__bytes_op_read.sum / fbpa__dram_read_bytes.sum
+    dram__bytes_written.sum     → dram__bytes_op_write.sum / fbpa__dram_write_bytes.sum
+    l1tex__t_hit_rate.pct       → l1tex__t_sector_hit_rate.pct
+    lts__t_hit_rate.pct         → lts__t_request_hit_rate.pct / lts__t_sector_hit_rate.pct
+    smsp__average_threads_executed_per_instruction.ratio
+                                → smsp__average_thread_inst_executed_per_inst_executed.ratio
+    l1tex__data_pipe_lsu_wavefronts_mem_local.sum
+                                → l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum
+    sm__active_cycles_elapsed.sum
+                                → sm__cycles_active.sum
+
+  Primary name works on Ampere + Hopper; NO Blackwell equivalent (1 metric):
+    smsp__warp_cycles_per_issued_instruction.ratio
+      Blackwell removed this counter. smsp__amortized_warp_latency and
+      smsp__average_warp_latency measure cycles/warp (different denominator)
+      and cannot substitute.  warp_cycles_per_instruction will be None on
+      Blackwell.
+
+Note: Hopper (GH100) uses the same counter namespace as Ampere (A100) for
+all 20 metrics tracked here.  No Hopper-specific fallbacks are needed.
 """
 from __future__ import annotations
 
@@ -18,10 +65,16 @@ class AggregationOp(str, Enum):
 
 
 class MetricPolicy(NamedTuple):
-    ncu_name: str          # exact ncu CSV column name
-    profile_field: str     # field name in KernelMetrics
+    ncu_name: str          # primary counter name (preferred; usually Ampere)
+    profile_field: str     # logical field name in KernelMetrics
     aggregation: AggregationOp
     description: str
+    ncu_name_fallbacks: tuple[str, ...] = ()  # alternative names for other architectures
+
+    @property
+    def ncu_names(self) -> list[str]:
+        """All counter name variants for this metric (primary first)."""
+        return [self.ncu_name, *self.ncu_name_fallbacks]
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +85,11 @@ class MetricPolicy(NamedTuple):
 # utilization, occupancy, latency, instruction throughput, and register
 # pressure.  They replace --set full (~90 metrics) to keep profile.json small
 # enough for LLM context.
+#
+# ncu_name_fallbacks lists alternative counter names for architectures where
+# the primary name does not exist (e.g. Blackwell GB202 renames several
+# Ampere/Hopper paths).  ncu ignores unknown counter names in --metrics, so
+# passing all variants is safe across all supported GPUs.
 # ---------------------------------------------------------------------------
 METRIC_POLICIES: list[MetricPolicy] = [
     # --- Time ---
@@ -47,12 +105,20 @@ METRIC_POLICIES: list[MetricPolicy] = [
         "dram_bytes_read",
         AggregationOp.SUM,
         "Total DRAM bytes read",
+        ncu_name_fallbacks=(
+            "dram__bytes_op_read.sum",    # Blackwell GB202
+            "fbpa__dram_read_bytes.sum",  # Blackwell alternative path
+        ),
     ),
     MetricPolicy(
         "dram__bytes_written.sum",
         "dram_bytes_written",
         AggregationOp.SUM,
         "Total DRAM bytes written",
+        ncu_name_fallbacks=(
+            "dram__bytes_op_write.sum",    # Blackwell GB202
+            "fbpa__dram_write_bytes.sum",  # Blackwell alternative path
+        ),
     ),
     # --- Memory subsystem throughput ---
     MetricPolicy(
@@ -79,12 +145,19 @@ METRIC_POLICIES: list[MetricPolicy] = [
         "l1_hit_rate",
         AggregationOp.MEAN,
         "L1 cache hit rate (ratio — use mean)",
+        ncu_name_fallbacks=(
+            "l1tex__t_sector_hit_rate.pct",  # Blackwell GB202
+        ),
     ),
     MetricPolicy(
         "lts__t_hit_rate.pct",
         "l2_hit_rate",
         AggregationOp.MEAN,
         "L2 cache hit rate (ratio — use mean)",
+        ncu_name_fallbacks=(
+            "lts__t_request_hit_rate.pct",   # Blackwell GB202 — request-level (same denominator as lts__t_hit_rate.pct)
+            "lts__t_sector_hit_rate.pct",    # Blackwell GB202 — sector-level fallback
+        ),
     ),
     # --- Compute utilization ---
     MetricPolicy(
@@ -105,6 +178,9 @@ METRIC_POLICIES: list[MetricPolicy] = [
         "sm_active_cycles",
         AggregationOp.SUM,
         "SM active cycles (total across kernels)",
+        ncu_name_fallbacks=(
+            "sm__cycles_active.sum",  # Blackwell GB202
+        ),
     ),
     # --- Occupancy ---
     MetricPolicy(
@@ -119,6 +195,8 @@ METRIC_POLICIES: list[MetricPolicy] = [
         "warp_cycles_per_instruction",
         AggregationOp.MEAN,
         "Avg cycles per issued instruction — high values indicate latency-bound (use mean)",
+        # No direct Blackwell equivalent with matching units (cycles/instruction).
+        # smsp__amortized_warp_latency measures cycles/warp — different denominator.
     ),
     MetricPolicy(
         "smsp__issue_active.avg.pct_of_peak_sustained_active",
@@ -145,6 +223,10 @@ METRIC_POLICIES: list[MetricPolicy] = [
         "avg_threads_per_warp",
         AggregationOp.MEAN,
         "Avg active threads per warp — values below 32 indicate control-flow divergence (use mean)",
+        ncu_name_fallbacks=(
+            # Blackwell GB202: renamed with slightly different path
+            "smsp__average_thread_inst_executed_per_inst_executed.ratio",
+        ),
     ),
     # --- Register / shared memory pressure ---
     MetricPolicy(
@@ -158,6 +240,9 @@ METRIC_POLICIES: list[MetricPolicy] = [
         "local_memory_spills",
         AggregationOp.SUM,
         "Register spills to local (DRAM-backed) memory — nonzero is costly",
+        ncu_name_fallbacks=(
+            "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum",  # Blackwell GB202
+        ),
     ),
     MetricPolicy(
         "launch__shared_mem_per_block_dynamic",
@@ -167,8 +252,11 @@ METRIC_POLICIES: list[MetricPolicy] = [
     ),
 ]
 
-# Map ncu column name → MetricPolicy for fast lookup
-NCU_NAME_TO_POLICY: dict[str, MetricPolicy] = {p.ncu_name: p for p in METRIC_POLICIES}
+# Map ncu column name → MetricPolicy for fast lookup (all variants registered)
+NCU_NAME_TO_POLICY: dict[str, MetricPolicy] = {}
+for _p in METRIC_POLICIES:
+    for _name in _p.ncu_names:
+        NCU_NAME_TO_POLICY[_name] = _p
 
 # Human-readable aliases emitted by `ncu --set` (default/full) instead of raw
 # counter names.  These are NOT added to METRIC_POLICIES (and thus not to
@@ -285,9 +373,11 @@ NCU_NAME_TO_POLICY.update({p.ncu_name: p for p in _HUMAN_READABLE_ALIASES})
 
 # Reverse lookup: logical profile_field → all NCU names (raw counters + aliases)
 # Used by get_raw_value() to find a metric regardless of which name NCU used.
+# Iterates .items() so fallback names (dict keys) are used, not _p.ncu_name
+# (which always returns the primary name).
 PROFILE_FIELD_TO_NCU_NAMES: dict[str, list[str]] = {}
-for _p in NCU_NAME_TO_POLICY.values():
-    PROFILE_FIELD_TO_NCU_NAMES.setdefault(_p.profile_field, []).append(_p.ncu_name)
+for _ncu_name, _p in NCU_NAME_TO_POLICY.items():
+    PROFILE_FIELD_TO_NCU_NAMES.setdefault(_p.profile_field, []).append(_ncu_name)
 
 
 def get_raw_value(
@@ -308,10 +398,17 @@ def get_raw_value(
 
 
 # Explicit metric list passed to `ncu --metrics` when ncu_metric_set is empty.
-# Derived from METRIC_POLICIES — covers all 20 counters needed for bottleneck
-# classification at the operator level.  Replaces --set full (~90 metrics) to
-# keep KernelMetrics.raw small enough for LLM context.
+# Derived from METRIC_POLICIES — includes all architecture-specific fallback
+# names so the same list works on Ampere, Hopper, and Blackwell.
+# ncu silently ignores counter names that do not exist on the current GPU.
 #
 # NOTE: smsp__sass_thread_inst_executed.sum is NOT supported in
 # --replay-mode range (ncu restriction); omitted intentionally.
-AGGREGATE_NCU_METRICS: list[str] = [p.ncu_name for p in METRIC_POLICIES]
+_seen_ncu_names: set[str] = set()
+AGGREGATE_NCU_METRICS: list[str] = []
+for _p in METRIC_POLICIES:
+    for _name in _p.ncu_names:
+        if _name not in _seen_ncu_names:
+            AGGREGATE_NCU_METRICS.append(_name)
+            _seen_ncu_names.add(_name)
+del _seen_ncu_names

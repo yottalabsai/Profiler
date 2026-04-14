@@ -184,10 +184,6 @@ class AggregatedMetrics(BaseModel):
     local_memory_spills: int | None = None       # nonzero → costly DRAM spills
     dynamic_smem_per_block: float | None = None  # bytes; high → limits occupancy
 
-    # ------------------------------------------------------------------
-    # Set by DiagnosisAgent when present; None otherwise
-    # ------------------------------------------------------------------
-    bottleneck_classification: str | None = None
 
 
 # ---------------------------------------------------------------------------

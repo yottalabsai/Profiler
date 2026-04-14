@@ -85,7 +85,6 @@ class TestSchemaRoundtrip:
         assert agg is not None
         assert agg.total_duration_ns == 210
         assert agg.kernel_count == 1
-        assert agg.bottleneck_classification == "compute_bound"
 
     def test_capture_metadata_preserved(self):
         profile = load_sample_profile()

@@ -21,8 +21,8 @@ Bottleneck profile expected (inductor):
 
 This workload is useful for showing that operator choice within the same
 layer type (activation functions) can meaningfully change the memory-to-
-compute ratio of a block. The DiagnosisAgent will classify all Linear layers
-identically (compute-bound) and surface the activation spread.
+compute ratio of a block. All Linear layers are compute-bound while
+activation functions span from trivial (ReLU) to expensive (Tanh).
 
 Profile size estimate: ~20–25 operators, ~200 KB, ~3–5 min ncu time.
 

@@ -5,7 +5,6 @@ from .roofline import (
     compute_arithmetic_intensity,
     classify_roofline,
     roofline_efficiency,
-    KNOWN_GPU_SPECS,
 )
 
 __all__ = [
@@ -16,5 +15,4 @@ __all__ = [
     "compute_arithmetic_intensity",
     "classify_roofline",
     "roofline_efficiency",
-    "KNOWN_GPU_SPECS",
 ]

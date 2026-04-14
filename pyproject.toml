@@ -5,15 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "operator-profiler"
 version = "0.1.0"
-description = "GPU profiler: attribute hardware metrics to PyTorch operators and get LLM-powered optimization feedback"
+description = "GPU profiler: attribute hardware metrics to PyTorch operators"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
-]
-
-[project.optional-dependencies]
-llm = [
-    "anthropic",
 ]
 
 [project.scripts]

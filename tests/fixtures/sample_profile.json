@@ -62,9 +62,8 @@
         "kernel_count": 1,
         "total_dram_bytes_read": 8192,
         "total_dram_bytes_written": 2048,
-        "mean_achieved_occupancy": 62.3,
-        "mean_tensor_core_active_pct": 45.1,
-        "bottleneck_classification": "compute_bound"
+        "achieved_occupancy": 62.3,
+        "tensor_core_active_pct": 45.1
       }
     }
   ],

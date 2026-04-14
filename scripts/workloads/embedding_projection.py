@@ -30,8 +30,7 @@ Bottleneck profile expected (inductor):
 
 This workload is the canonical example of extreme imbalance: one operator
 (embedding) is pure bandwidth with zero compute, while the logit projection
-dominates FLOPs. The DiagnosisAgent will classify them at opposite ends of
-the bottleneck spectrum within the same model.
+dominates FLOPs — opposite ends of the roofline within the same model.
 
 Profile size estimate: ~20–30 operators, ~200–300 KB, ~3–5 min ncu time.
 

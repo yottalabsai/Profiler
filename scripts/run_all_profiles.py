@@ -14,7 +14,6 @@ Options:
     --workloads     Subset of workload names to run (default: all)
     --compile-mode  eager | inductor | cudagraphs (default: inductor)
     --warmup-iters  Number of warm-up iterations (default: 2)
-    --no-diagnose   Skip DiagnosisAgent (skips Anthropic API call)
     --ncu           Path to ncu binary (default: /opt/nvidia/nsight-compute/2025.4.1/ncu)
     --nsys          Path to nsys binary (default: nsys)
     --no-sudo       Do not prefix ncu with sudo (if perf counters are unrestricted)
@@ -59,7 +58,6 @@ def profile_one(
     ncu_executable: str,
     nsys_executable: str,
     ncu_sudo: bool,
-    diagnose: bool,
 ) -> Path:
     """Run the full pipeline for a single workload. Returns path to profile.json."""
     script = REPO_ROOT / "scripts" / "workloads" / f"{name}.py"
@@ -141,15 +139,6 @@ def profile_one(
     orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()
 
-    diagnosis_agent = None
-    if diagnose:
-        try:
-            from operator_profiler.agents.diagnosis import DiagnosisAgent
-            diagnosis_agent = DiagnosisAgent()
-            log.info("DiagnosisAgent enabled")
-        except Exception as exc:
-            log.warning("DiagnosisAgent unavailable (%s); using roofline heuristics", exc)
-
     profile = build_profile(
         manifest=manifest,
         operator_records=operator_records,
@@ -158,7 +147,6 @@ def profile_one(
         torch_version=torch_version,
         device_name=None,   # auto-detected from manifest
         ncu_report_path=str(ncu_output_dir),
-        diagnosis_agent=diagnosis_agent,
     )
 
     profile_path = output_prefix.with_name(f"{name}_profile.json")
@@ -189,10 +177,6 @@ def main() -> None:
         "--no-sudo", action="store_true",
         help="Do not run ncu under sudo (use if perf counters are unrestricted)",
     )
-    parser.add_argument(
-        "--no-diagnose", action="store_true",
-        help="Skip DiagnosisAgent LLM bottleneck classification",
-    )
     args = parser.parse_args()
 
     unknown = [w for w in args.workloads if w not in WORKLOADS]
@@ -209,7 +193,6 @@ def main() -> None:
                 ncu_executable=args.ncu,
                 nsys_executable=args.nsys,
                 ncu_sudo=not args.no_sudo,
-                diagnose=not args.no_diagnose,
             )
             results[name] = str(path)
         except Exception:

@@ -99,11 +99,18 @@ def parse_ncu_csv_by_id(
 
 
 def _build_metrics(raw_dict: dict[str, str]) -> KernelMetrics:
-    """Convert a flat {metric_name: value_str} dict → KernelMetrics."""
+    """Convert a flat {metric_name: value_str} dict → KernelMetrics.
+
+    Non-numeric values (e.g. "n/a") are dropped so that KernelMetrics.raw
+    contains only counters that actually fired on this GPU.  This prevents
+    architecture-specific fallback names from cluttering profile.json with
+    redundant "n/a" entries alongside the counter that produced a real value.
+    """
     raw: dict[str, float | int | str] = {}
     for metric_name, value_str in raw_dict.items():
         parsed = _try_parse_numeric(value_str)
-        raw[metric_name] = parsed if parsed is not None else value_str
+        if parsed is not None:
+            raw[metric_name] = parsed
     return KernelMetrics(raw=raw)
 
 

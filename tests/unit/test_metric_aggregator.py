@@ -144,7 +144,7 @@ class TestBuildAggregatedMetrics:
         assert agg.total_dram_bytes_read == 3000
         assert agg.total_dram_bytes_written == 1300
         # Duration-weighted mean: (60*200 + 80*300) / 500 = 36000/500 = 72.0
-        assert agg.mean_achieved_occupancy == pytest.approx(72.0)
+        assert agg.achieved_occupancy == pytest.approx(72.0)
 
     def test_empty_metrics(self):
         agg = build_aggregated_metrics([])
@@ -157,20 +157,14 @@ class TestBuildAggregatedMetrics:
         assert agg.kernel_count == 1
         assert agg.total_duration_ns == 100
         assert agg.total_dram_bytes_read == 512
-        assert agg.mean_achieved_occupancy == pytest.approx(45.0)
+        assert agg.achieved_occupancy == pytest.approx(45.0)
 
     def test_missing_metrics_are_none(self):
         """Kernels with no metrics should yield None for rate fields."""
         kernels = [kr(duration_ns=100), kr(duration_ns=200)]
         agg = build_aggregated_metrics(kernels)
         assert agg.total_dram_bytes_read is None
-        assert agg.mean_achieved_occupancy is None
-
-    def test_bottleneck_classification_not_set_by_aggregator(self):
-        """bottleneck_classification is set by DiagnosisAgent, not the aggregator."""
-        kernels = [kr(duration_ns=100, achieved_occupancy=65.0)]
-        agg = build_aggregated_metrics(kernels)
-        assert agg.bottleneck_classification is None
+        assert agg.achieved_occupancy is None
 
     def test_dominant_kernel_id(self):
         kernels = [

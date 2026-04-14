@@ -54,4 +54,3 @@ Two tiers (provenance sidecar was removed — it did not work reliably):
 1. **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range pushed by `emit_nvtx`
 2. **Name heuristic** (`low` confidence) — Triton kernel name parsed to infer the fused aten ops
 
-`bottleneck_classification` on `AggregatedMetrics` is `None` unless `DiagnosisAgent` is passed to `build_profile`.

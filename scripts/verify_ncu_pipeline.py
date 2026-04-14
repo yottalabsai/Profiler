@@ -339,15 +339,13 @@ def main(argv: list[str] | None = None) -> int:
     total_ns = sum(o.aggregated.total_duration_ns for o in ops_with_agg) or 1
 
     # Check which fields are actually populated
-    occ_count    = sum(1 for o in ops_with_agg if o.aggregated.mean_achieved_occupancy is not None)
-    tc_count     = sum(1 for o in ops_with_agg if o.aggregated.mean_tensor_core_active_pct is not None)
-    dram_count   = sum(1 for o in ops_with_agg if o.aggregated.total_dram_bytes_read > 0)
-    bottleneck_c = Counter(o.aggregated.bottleneck_classification for o in ops_with_agg)
+    occ_count    = sum(1 for o in ops_with_agg if o.aggregated.achieved_occupancy is not None)
+    tc_count     = sum(1 for o in ops_with_agg if o.aggregated.tensor_core_active_pct is not None)
+    dram_count   = sum(1 for o in ops_with_agg if (o.aggregated.total_dram_bytes_read or 0) > 0)
 
     _info(f"Operators with occupancy:    {occ_count}/{len(ops_with_agg)}")
     _info(f"Operators with tensor core:  {tc_count}/{len(ops_with_agg)}")
     _info(f"Operators with DRAM reads:   {dram_count}/{len(ops_with_agg)}")
-    _info(f"Bottleneck classification:   {dict(bottleneck_c)}")
 
     metrics_ok = occ_count > 0 or dram_count > 0
     if metrics_ok:
@@ -359,18 +357,17 @@ def main(argv: list[str] | None = None) -> int:
     top10 = sorted(ops_with_agg, key=lambda o: o.aggregated.total_duration_ns, reverse=True)[:10]
     _info("\n  Top-10 operators by GPU time:")
     _info(f"  {'Operator':<45} {'Duration µs':>12} {'%':>6} {'Kernels':>8} "
-          f"{'Occupancy':>10} {'TC%':>6} {'Bottleneck'}")
-    _info("  " + "-" * 105)
+          f"{'Occupancy':>10} {'TC%':>6}")
+    _info("  " + "-" * 95)
     for op in top10:
         agg = op.aggregated
         dur_us = agg.total_duration_ns / 1e3
         pct = 100.0 * agg.total_duration_ns / total_ns
-        occ_str = f"{agg.mean_achieved_occupancy:.1f}" if agg.mean_achieved_occupancy is not None else "n/a"
-        tc_str  = f"{agg.mean_tensor_core_active_pct:.1f}" if agg.mean_tensor_core_active_pct is not None else "n/a"
+        occ_str = f"{agg.achieved_occupancy:.1f}" if agg.achieved_occupancy is not None else "n/a"
+        tc_str  = f"{agg.tensor_core_active_pct:.1f}" if agg.tensor_core_active_pct is not None else "n/a"
         conf = op.kernels[0].confidence.value if op.kernels else "n/a"
         _info(f"  {op.operator_name[:45]:<45} {dur_us:>12.1f} {pct:>6.1f}% "
-              f"{agg.kernel_count:>8} {occ_str:>10} {tc_str:>6} "
-              f"{agg.bottleneck_classification}  [{conf}]")
+              f"{agg.kernel_count:>8} {occ_str:>10} {tc_str:>6}  [{conf}]")
 
     overall.append(("metrics_quality", metrics_ok))
 

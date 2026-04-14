@@ -85,7 +85,12 @@
       "Bash(operator-profiler --help)",
       "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --import /tmp/op_profiler_ncu_14a_aubw/triton_per_fused_native_layer_norm_0.ncu-rep --csv)",
       "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --import /tmp/op_profiler_ncu_14a_aubw/gemmSN_TN_kernel.ncu-rep --csv)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader)",
+      "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --query-metrics)",
+      "Bash(/opt/nvidia/nsight-compute/2025.4.1/ncu --help)",
+      "Bash(sudo -E /opt/nvidia/nsight-compute/2025.4.1/ncu --query-metrics)",
+      "Bash(tee /tmp/profiling_run.log)"
     ]
   }
 }

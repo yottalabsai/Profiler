@@ -25,7 +25,7 @@ Bottleneck profile expected (inductor):
 
 This is a classic roofline teaching example: the depthwise and pointwise
 convolutions in the same block land on opposite sides of the ridge point.
-The profiler will surface this contrast in bottleneck_classification.
+The profiler will surface this contrast via hardware metrics.
 
 Profile size estimate: ~30–40 operators, ~300–400 KB, ~5–8 min ncu time.
 
