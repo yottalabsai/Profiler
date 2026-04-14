@@ -75,7 +75,7 @@ from torch._inductor.compile_fx import compile_fx   # import the function, not t
 from torch.fx.subgraph_rewriter import replace_pattern
 
 # Import baseline workload
-from scripts.workload import [BaselineModel or get_model_and_input]
+from scripts.workload import get_model_and_input as get_baseline_model_and_input
 
 DEVICE = "cuda"
 # Preserve original constants
@@ -150,20 +150,29 @@ def get_model_and_input() -> tuple:
     """
     Workload interface for run_workload.py.
     
-    Applies [list of optimizations applied here]:
-    - [Optimization X]
-    - [Optimization Y]
+    Applies complementary optimizations on top of the baseline:
+    - [Optimization X] — only if not already applied by baseline
+    - [Optimization Y] — only if not already applied by baseline
     
     Note: [Any shape/dtype changes compared to baseline]
     """
     assert torch.cuda.is_available(), "CUDA required"
     
-    # Import baseline model
-    model = BaselineModel().to(DEVICE).eval()
-    x = torch.randn(..., device=DEVICE)
+    # Start from the baseline — it may already have some optimizations applied
+    model, x = get_baseline_model_and_input()
     
-    # Apply optimizations that happen outside FX graph
-    # (e.g., dtype casting, padding, etc.)
+    # Apply only complementary optimizations not already present in the baseline.
+    # Check first before applying to avoid redundant or conflicting transforms.
+    
+    # Example: BF16 casting — skip if baseline already cast to BF16
+    if next(model.parameters()).dtype != torch.bfloat16:
+        model = model.to(torch.bfloat16)
+        x = x.to(torch.bfloat16)
+    
+    # Example: Token padding — skip if input batch dim already meets tile size
+    if x.shape[0] < 64:
+        pad = 64 - x.shape[0]
+        x = torch.nn.functional.pad(x, (0, 0, 0, pad))
     
     return model, x
 
@@ -182,7 +191,7 @@ if __name__ == "__main__":
 3. **Approximate pattern matching** — Passes degrade gracefully if patterns don't match exactly
 4. **Logging** — All major operations logged at INFO level for observability
 5. **Model-agnostic** — FX passes work at Aten IR level, not hardcoded to specific modules
-6. **Dtype/shape outside graph** — BF16 casting, padding, etc. applied in `get_model_and_input()`
+6. **Complementary dtype/shape** — Non-graph optimizations (BF16, padding) applied in `get_model_and_input()` only when not already present in the baseline; always inspect baseline state before applying
 
 ### 2. test_workload_optimized.py
 **Requirements:**
@@ -319,7 +328,8 @@ gm.recompile()
 
 ### 1. BF16 Precision Casting
 - **Location:** `get_model_and_input()`
-- **Implementation:** `model.to(torch.bfloat16)` + `x.to(torch.bfloat16)`
+- **Implementation:** Check `next(model.parameters()).dtype` first; apply `model.to(torch.bfloat16)` + `x.to(torch.bfloat16)` only if not already BF16
+- **Why check:** Baseline may already cast; idempotent but wasteful and could mask intent
 - **Not in FX pass** because dtype is tensor property, not graph operation
 - **Effect:** Routes all GEMMs to BF16 Tensor Core path
 
@@ -360,7 +370,9 @@ gm.recompile()
 
 ### 6. Token Padding
 - **Location:** `get_model_and_input()`
-- **Implementation:** Pad input `[B, D]` → `[64, D]`
+- **Implementation:** Check `x.shape[0] < 64` before padding; only pad if batch dim is below tile size
+- **Why check:** Baseline may already pad or use a batch size ≥ 64
+- **Detail:** Pad input `[B, D]` → `[64, D]`
 - **Effect:** Waves/SM 0.01 → 0.17 for elementwise kernels
 
 ### 7. LayerNorm-Linear Fusion (Stub)
