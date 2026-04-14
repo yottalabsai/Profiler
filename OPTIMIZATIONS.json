@@ -1,0 +1,46 @@
+{
+  "Operator-Level Optimizations": [
+    {
+      "Operators": "aten::mm (op_id 7, 8, 27)",
+      "Bottleneck": "→ gemmSN_TN_kernel [16×512 × 512×512] cuBLAS selects gemmSN_TN (small-N path): grid=[64,2,1]=128 blocks, Waves/SM=0.11, Achieved Occupancy≈8.4% (theoretical 50%). mean_tensor_core_active_pct=null → FP32 scalar SIMT path. Tensor Cores completely idle.",
+      "Transformation": "Cast weight and input to torch.float16 / torch.bfloat16 via inserted aten::_to_copy nodes before each aten::mm. On Blackwell, this routes to the BF16 TC path (gemmEx WMMA tiles), delivering ~2× arithmetic throughput over FP32 SIMT. Use model.half() + torch.set_default_dtype(torch.bfloat16) or inject cast ops into the FX graph with a ShapeProp-aware pass.",
+      "Impact": "Throughput: ~2× on all GEMM kernels. Memory bandwidth pressure halved (FP16 moves half the bytes). Duration drops from ~4928ns → ~2400ns per QKV projection. No accuracy regression for inference at BF16.",
+      "Confidence": "High"
+    },
+    {
+      "Operators": "aten::mm (op_id 7), aten::mm (op_id 8), aten::mm (op_id 27)",
+      "Bottleneck": "Three separate gemmSN_TN_kernel launches for Q/K/V projections, each [16×512 × 512×512]. Three independent 4928ns kernel launches. Each occupies 128 CTAs on a 188-SM GPU. Kernel launch overhead + scheduling gap between each launch wastes ~15µs of wall time. W_q, W_k, W_v are loaded from L2 independently for each matmul despite sharing the same activation input x.",
+      "Transformation": "In the FX graph, identify the three mm(x, W_q), mm(x, W_k), mm(x, W_v) nodes that share a common x input. Replace with a single mm(x, cat([W_q, W_k, W_v], dim=1)) → chunk(3, dim=1) pattern. This produces a [16×512 × 512×1536] GEMM — grid scales to [384,2]=768 CTAs, Waves/SM≈0.68 (up from 0.11×3). Implement as a custom FX graph pass: match on identical input node + consecutive mm nodes, fold weights at graph construction time.",
+      "Impact": "Latency: 3× launch overhead eliminated (~10–15µs). Weight cache reuse: x loaded once into registers vs. three times. Waves/SM 0.11→0.68 — scheduler starvation reduced ~6×. Net kernel duration ~40% lower than sum of three separate calls.",
+      "Confidence": "High"
+    },
+    {
+      "Operators": "aten::mm (op_id 12), triton_per_fused__softmax_amax_div_mul_sub_2, aten::mm (attention output AV)",
+      "Bottleneck": "→ gemmSN_NN_kernel [16×16 × 16×512]. Attention score matmul [16×16]×[16×512]: M=K=16 → gemmSN_NN, only 32 CTAs, Waves/SM≈0.0. Softmax kernel launches with 128 total threads across 2 blocks on a 188-SM GPU — 186 SMs completely idle. Three separate kernel launches materialize the [B, H, S, S] attention matrix to DRAM between each step.",
+      "Transformation": "Replace the subgraph mm(Q,K^T) → mul(1/sqrt(d_k)) → _softmax_amax_div_mul_sub → mm(attn_weights, V) with torch.nn.functional.scaled_dot_product_attention(Q, K, V). Under torch.compile, Inductor will lower this to a FlashAttention-2 Triton kernel (tiled fused kernel, O(N) memory). Match these three FX nodes by pattern (check for the triton_per_fused__softmax_amax_div_mul_sub_2 kernel name in the graph or use torch.fx.subgraph_rewriter.replace_pattern).",
+      "Impact": "Latency: 3 launches → 1. Eliminates full [B×H×S×S] HBM round-trip for attention matrix. At seq=16, total attention DRAM traffic drops ~60%. Softmax occupancy crisis (Achieved=3.95%) resolved. Flash kernel tile size will be tunable for this small S.",
+      "Confidence": "High"
+    },
+    {
+      "Operators": "aten::layer_norm",
+      "Bottleneck": "→ triton_per_fused_native_layer_norm_0 grid=[16,1,1], block=[128,1,1]. 16 CTAs assigned to 188 SMs → 0.01 Waves/SM. Achieved Occupancy=8.1–8.3% (theoretical 100%). No Eligible scheduler cycles: 95.7–95.9%. 6 kernel invocations aggregated under this operator (total 6336ns). L1 hit rate = 0%, L2 hit rate ≈ 62% — gamma/beta params re-fetched from L2 per invocation. Each invocation performs 2 passes (mean, then variance) over the 512-element row, forcing 2 global reads per token.",
+      "Transformation": "Two-part transformation: (1) Fuse post-norm with the immediately following aten::mm via a custom Triton kernel: after computing the normalized output per-row in registers/shared memory, directly issue the first GEMM row without writing normalized activations back to DRAM. This eliminates one global write + one global read of shape [16, 512]. (2) For each of the 6 LN calls, check if pairs are adjacent in the FX graph (pre-attn LN + pre-FFN LN); if so, batch them into a single kernel launch using a 2× grid. Transformation: match layer_norm → mm patterns in the FX graph and substitute with a fused torch.ops.custom.layer_norm_linear op backed by a Triton kernel.",
+      "Impact": "Latency: ~30–40% reduction per LN-mm pair (one DRAM round-trip eliminated per pair). Kernel launch count 6 → 3. L2 pressure reduced. Wave starvation is irreducible at batch=16 without increasing batch size.",
+      "Confidence": "Medium"
+    },
+    {
+      "Operators": "aten::mm (op_id 59)",
+      "Bottleneck": "→ gemmSN_TN_kernel [16×2048 × 2048×512]. Slowest kernel: 14880ns — 2× longer than the up-projection [16×512×512×2048] at 7392ns despite being a smaller output. Grid=[64,2,1]=128 CTAs, Waves/SM=0.11, Achieved Occupancy=8.25%. Compute (SM) Throughput=16.41% vs 45.34% for op_id 57. The TN transpose layout causes worse L2 tiling behavior for M=16, K=2048.",
+      "Transformation": "In the FX graph, replace mm(x, W_down) where W_down shape is [2048, 512] with mm(x, W_down_T.t()) using a pre-transposed weight buffer W_down_T = W_down.T.contiguous(). This switches cuBLAS from gemmSN_TN to gemmSN_NN (or TT) path. Alternatively, annotate node with torch.compile hint assume_contiguous=True. Additionally: combine up+down projections into a single [16,512] × [512, 2560] GEMM if architecture allows.",
+      "Impact": "Latency: 14880ns → estimated 7000–9000ns. Eliminating transpose layout mismatch improves tiling efficiency. Combining projections reduces FFN to 1 launch.",
+      "Confidence": "Medium"
+    },
+    {
+      "Operators": "triton_poi_fused_addmm_relu_3, triton_poi_fused_add_addmm_gelu_4",
+      "Bottleneck": "FFN elementwise fusions already fused by Inductor. Grid=[32,1,1]=32 blocks, 4096 threads. Achieved Occupancy=7.9–9.6%, Waves/SM=0.01. Compute Throughput ≤ 0.35% — memory-bound. Issue: activation mismatch (ReLU vs GELU).",
+      "Transformation": "Force a single activation type (nn.GELU(approximate='tanh')) and re-run torch.compile. Ensures faster GELU Triton kernel. For wave starvation: pad tokens to M=64 in FX graph input preprocessing.",
+      "Impact": "Latency reduction: 10–15% from GELU fix. Padding raises Waves/SM from 0.01→0.17 (~3× occupancy improvement). Memory bandwidth unchanged.",
+      "Confidence": "Medium (GELU fix); Low (padding, requires caller change)"
+    }
+  ]
+}
