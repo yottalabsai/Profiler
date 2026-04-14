@@ -1,14 +1,14 @@
 # Operator Profiler
 
-**Know exactly why your GPU workload is slow — and what to do about it.**
+**Know exactly why your GPU workload is slow.**
 
-Operator Profiler captures real NVIDIA hardware counter data (`nsys` + `ncu`) and attributes it to individual PyTorch operators. It then applies LLM-powered analysis (via Claude) to reason about your workload's bottlenecks *relative to itself*, giving you workload-aware, actionable optimization guidance instead of generic threshold checks.
+Operator Profiler captures real NVIDIA hardware counter data (`nsys` + `ncu`) and attributes it to individual PyTorch operators, giving you per-operator metrics: DRAM throughput, cache efficiency, occupancy, compute utilization, and more. Use these metrics to identify and optimize bottlenecks instead of guessing.
 
 ---
 
 ## Quick Start
 
-For a complete walkthrough — baseline capture, bottleneck diagnosis, FX graph optimizations, and before/after comparison with real measured numbers — see **[example.md](example.md)**.
+For a complete walkthrough — baseline capture, hardware metric analysis, FX graph optimizations, and before/after comparison with real measured numbers — see **[example.md](example.md)**.
 
 The example walks through a TransformerBlock workload on an NVIDIA RTX PRO 6000 Blackwell GPU, achieving a **6.3× per-sample speedup** purely from profiler-guided changes.
 
@@ -28,21 +28,10 @@ Rather than relying on PyTorch's built-in timing hooks, Operator Profiler:
    - **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range emitted by `emit_nvtx`
    - **Kernel name heuristic** (`low` confidence) — Triton kernel name parsed to infer fused aten ops
 
-### Roofline analysis
+### Roofline utilities
 
-For each operator, Operator Profiler computes arithmetic intensity and positions it against your GPU's roofline model — classifying whether it's **compute-bound**, **memory-bound**, or **latency-bound** using real GPU specs (A100, H100, RTX 4090/5090, and more).
+The tool includes built-in roofline model specs for multiple GPUs (A100, H100, RTX 4090/5090, and more). You can use these to compute arithmetic intensity and reason about compute vs. memory bandwidth limits in your operators using the Python API.
 
-### LLM-powered diagnosis
-
-The `DiagnosisAgent` goes beyond static thresholds. It uses Claude to reason about each operator's metrics *relative to the rest of the workload*:
-
-- An operator at 40% occupancy is alarming if the model median is 75%, unremarkable if the median is 35%
-- Bottleneck labels reflect how each operator compares to its peers — not generic rules
-- Produces a `bottleneck_classification` field (`compute_bound`, `memory_bound`, `latency_bound`, `unknown`) with full reasoning in the agent's internal trace
-
-This prompt-engineered analysis runs as a post-pass over all operators after hardware metrics are collected, so it has global context across the entire workload before making any call.
-
-After diagnosis, use `prompt.md` as a reusable template to ask Claude for operator-level optimization recommendations based on your `profile.json`. The resulting structured recommendations (like those in `OPTIMIZATIONS.json`) map hardware evidence to concrete code transformations, ready to implement as FX graph passes or dtype/shape changes. See **[example.md](example.md)** for the full optimization workflow in action.
 
 ---
 
@@ -52,12 +41,11 @@ After diagnosis, use `prompt.md` as a reusable template to ask Claude for operat
 [Capture]          [Map]              [Output]
   nsys    ──────►  ncu replay  ──────►  profile.json
   NVTX             attribution          per-operator hardware
-  annotation       + DiagnosisAgent     metrics + bottleneck
-                   (Claude)             classification
+  annotation       (kernel→aten op)     metrics
 ```
 
 1. **`profile`** — runs the target script under `nsys` and builds a mapping manifest (kernel → NVTX ranges)
-2. **`map`** — replays each NVTX range under `ncu` to collect hardware counters, attributes kernels to operators, and runs DiagnosisAgent to produce the final `profile.json`
+2. **`map`** — replays each NVTX range under `ncu` to collect hardware counters, attributes kernels to operators, and produces the final `profile.json`
 
 ---
 
@@ -70,24 +58,13 @@ After diagnosis, use `prompt.md` as a reusable template to ask Claude for operat
 | NVIDIA Nsight Systems (`nsys`) | On `PATH` for capture |
 | NVIDIA Nsight Compute (`ncu`) | On `PATH` for range replay; **requires sudo** on most systems |
 | CUDA GPU | Required for capture and replay |
-| `anthropic` Python SDK | Required for LLM-powered diagnosis (optional — falls back to roofline heuristics) |
 
 ---
 
 ## Installation
 
 ```bash
-# Core install
 pip install -e .
-
-# With LLM diagnosis (recommended)
-pip install -e ".[llm]"
-```
-
-Set your Anthropic API key to enable LLM-powered bottleneck analysis:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 `torch` must be installed separately with the correct CUDA variant for your driver. See [pytorch.org](https://pytorch.org) for the appropriate install command.
@@ -120,9 +97,9 @@ Outputs: `<output>.nsys-rep`, `<output>.manifest.json`
 
 ---
 
-### `map` — ncu range replay + LLM diagnosis
+### `map` — ncu range replay + attribution
 
-Replays each NVTX range under `ncu`, attributes kernels to operators, and produces an operator-attributed profile. Runs DiagnosisAgent by default if `ANTHROPIC_API_KEY` is set.
+Replays each NVTX range under `ncu`, attributes kernels to operators, and produces an operator-attributed profile with hardware metrics.
 
 ```bash
 operator-profiler map runs/my_run.manifest.json \
@@ -141,9 +118,8 @@ operator-profiler map runs/my_run.manifest.json \
 | `--ncu-sudo` | disabled | Prefix `ncu` with `sudo -E`; required on most Linux systems to access GPU performance counters |
 | `--ncu-env KEY=VAL` | `[]` | Extra env vars forwarded under `sudo` (e.g. `PYTHONPATH=/path/to/repo`); needed because `sudo` drops the environment |
 | `--device-name` | auto | GPU name (used for roofline specs lookup) |
-| `--diagnose` / `--no-diagnose` | enabled | Run DiagnosisAgent for LLM-powered bottleneck classification |
 
-Output: `profile.json` — an `OperatorAttributedProfile` with per-operator hardware metrics and bottleneck classifications.
+Output: `profile.json` — an `OperatorAttributedProfile` with per-operator hardware metrics.
 
 ---
 
@@ -189,29 +165,38 @@ All data is serialized as JSON using Pydantic v2 models.
       "operator_id": "aten::mm_0",
       "operator_name": "aten::mm",
       "call_index": 0,
-      "attribution_confidence": "medium",
+      "is_fused": false,
       "kernels": [
         {
+          "kernel_id": "k_0_0",
           "kernel_name": "ampere_sgemm_128x64_tn",
+          "stream_id": 0,
+          "device_id": 0,
+          "start_ns": 1000000,
+          "end_ns": 15321000,
+          "duration_ns": 14321000,
           "metrics": {
-            "duration_ns": 14321000,
-            "dram_bytes_read": 1073741824,
-            "dram_bytes_write": 67108864,
-            "achieved_occupancy": 0.87,
-            "tensor_core_active_pct": 91.2,
-            "arithmetic_intensity": 42.3,
-            "l1_hit_rate": 0.34,
-            "l2_hit_rate": 0.71
+            "raw": {
+              "dram_bytes_read": 1073741824,
+              "dram_bytes_written": 67108864,
+              "achieved_occupancy": 0.87,
+              "tensor_core_active_pct": 91.2,
+              "l1_hit_rate": 0.34,
+              "l2_hit_rate": 0.71
+            }
           }
         }
       ],
       "aggregated": {
         "total_duration_ns": 14321000,
         "kernel_count": 1,
+        "dominant_kernel_id": "k_0_0",
         "total_dram_bytes_read": 1073741824,
-        "mean_achieved_occupancy": 0.87,
-        "mean_tensor_core_active_pct": 91.2,
-        "bottleneck_classification": "compute_bound"
+        "total_dram_bytes_written": 67108864,
+        "achieved_occupancy": 0.87,
+        "tensor_core_active_pct": 91.2,
+        "l1_hit_rate": 0.34,
+        "l2_hit_rate": 0.71
       }
     }
   ],
@@ -220,7 +205,7 @@ All data is serialized as JSON using Pydantic v2 models.
 }
 ```
 
-The `bottleneck_classification` field is set by the DiagnosisAgent when available, or by the roofline heuristic as a fallback. The agent has access to the full model-wide metric distribution (median arithmetic intensity, median occupancy, GPU ridge point) before classifying any single operator.
+The profile contains hardware metrics for every operator: DRAM throughput, cache hit rates, occupancy, compute utilization (Tensor Cores), and instruction throughput. You can then use these metrics to reason about bottlenecks and optimization strategies — either manually, or by passing the profile to Claude or another tool for analysis.
 
 ---
 
@@ -236,25 +221,6 @@ with NvtxCapture(warmup_iters=2, warmup_fn=lambda: model(x)):
     output = model(x)
 ```
 
-### DiagnosisAgent
-
-```python
-from operator_profiler.agents import DiagnosisAgent
-from operator_profiler.aggregator.profile_builder import build_profile
-
-# Pass to build_profile for LLM-powered bottleneck classification
-agent = DiagnosisAgent()
-profile = build_profile(
-    manifest=manifest,
-    operator_records=operator_records,
-    unattributed_kernels=unattributed,
-    model_name="MyModel",
-    torch_version="2.3.0",
-    device_name="A100 SXM4 80GB",
-    diagnosis_agent=agent,
-)
-```
-
 ### Loading a profile
 
 ```python
@@ -264,15 +230,18 @@ profile = OperatorAttributedProfile.model_validate_json(
     open("runs/profile.json").read()
 )
 
-# Find the worst bottlenecks
-memory_bound = [
-    op for op in profile.operators
-    if op.aggregated and op.aggregated.bottleneck_classification == "memory_bound"
-]
-memory_bound.sort(key=lambda op: op.aggregated.total_duration_ns, reverse=True)
+# Find the slowest operators
+operators_by_duration = sorted(
+    (op for op in profile.operators if op.aggregated),
+    key=lambda op: op.aggregated.total_duration_ns,
+    reverse=True
+)
 
-for op in memory_bound[:5]:
-    print(f"{op.operator_id}: {op.aggregated.total_duration_ns / 1e6:.2f} ms")
+for op in operators_by_duration[:5]:
+    agg = op.aggregated
+    print(f"{op.operator_name}: {agg.total_duration_ns / 1e6:.2f} ms, "
+          f"occupancy={agg.achieved_occupancy or 'N/A':.1%}, "
+          f"dram_read={agg.total_dram_bytes_read / 1e9 or 0:.1f} GB")
 ```
 
 ---
@@ -293,14 +262,6 @@ Roofline specs are built in for:
 | RTX 5070 Laptop | 198 | 448 |
 
 Custom specs can be added to `operator_profiler/aggregator/roofline.py:KNOWN_GPU_SPECS`.
-
----
-
-## Environment Variables
-
-| Variable | Description |
-|---|---|
-| `ANTHROPIC_API_KEY` | Anthropic API key for `DiagnosisAgent` LLM-powered bottleneck classification |
 
 ---
 
