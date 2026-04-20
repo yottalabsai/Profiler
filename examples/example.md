@@ -130,7 +130,7 @@ The three biggest opportunities jump out immediately:
 
 ## Step 3: Optimization Recommendations (OPTIMIZATIONS.json)
 
-After generating `profile.json`, an analysis step (automated via the DiagnosisAgent or manual review) produces `OPTIMIZATIONS.json` — a structured list of operator-level transformations tied directly to the hardware evidence.
+After generating `profile.json`, use `optimization_proposal_prompt.md` to analyze the profile and produce `OPTIMIZATIONS.json` — a structured list of operator-level transformations tied directly to the hardware evidence.
 
 ```json
 {

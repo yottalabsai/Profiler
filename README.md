@@ -8,7 +8,7 @@ Operator Profiler captures real NVIDIA hardware counter data (`nsys` + `ncu`) an
 
 ## Quick Start
 
-For a complete walkthrough — baseline capture, hardware metric analysis, FX graph optimizations, and before/after comparison with real measured numbers — see **[example.md](example.md)**.
+For a complete walkthrough — baseline capture, hardware metric analysis, FX graph optimizations, and before/after comparison with real measured numbers — see **[examples/example.md](examples/example.md)**.
 
 The example walks through a TransformerBlock workload on an NVIDIA RTX PRO 6000 Blackwell GPU, achieving a **6.3× per-sample speedup** purely from profiler-guided changes.
 
@@ -124,7 +124,7 @@ Six ready-to-run workloads are in `scripts/workloads/`. Each exposes a `get_mode
 
 | Workload | What it covers |
 |---|---|
-| `transformer_block` | Attention + FFN + LayerNorm — the reference workload for `example.md` |
+| `transformer_block` | Attention + FFN + LayerNorm — the reference workload for `examples/example.md` |
 | `conv_block` | Conv2d + BatchNorm + ReLU |
 | `mlp_activations` | Deep MLP with multiple activation types |
 | `sdpa_attention` | Multi-head SDPA (routes to FlashAttention-2 under Inductor) |
@@ -259,7 +259,7 @@ Pass the optimization recommendations and your workload to this prompt. It gener
 - A test script to verify the optimized workload
 - Before/after documentation
 
-See **[example.md](example.md)** for a full walkthrough of this workflow with real measured improvements (6.3× speedup on a TransformerBlock).
+See **[examples/example.md](examples/example.md)** for a full walkthrough of this workflow with real measured improvements (6.3× speedup on a TransformerBlock).
 
 ---
 
