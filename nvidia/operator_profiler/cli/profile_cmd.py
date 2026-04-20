@@ -31,6 +31,16 @@ def add_parser(subparsers) -> None:
     p.add_argument("--compile-mode", choices=["eager", "inductor", "cudagraphs"], default="eager")
     p.add_argument("--warmup-iters", type=int, default=2)
     p.add_argument("--nsys-executable", default="nsys")
+    p.add_argument(
+        "--correlation-pass",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the script once outside nsys before capture to build a HIGH-confidence "
+            "CUPTI correlation map.  The script must support --correlation-pass and "
+            "--output-prefix (e.g. run_workload.py)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -38,8 +48,21 @@ def _run(args) -> None:
     from nvidia.operator_profiler.capture.nsys_runner import NsysRunConfig, run_nsys_profile
     from nvidia.operator_profiler.mapper.manifest_builder import ManifestBuilder
     from nvidia.operator_profiler.schema.manifest import CaptureManifestMetadata
+    from nvidia.operator_profiler.utils.subprocess_utils import run_subprocess
 
     output_prefix = Path(args.output)
+
+    # ── Optional: correlation pass (must run outside nsys — nsys holds CUPTI) ──
+    if getattr(args, "correlation_pass", False):
+        log.info("Running correlation pass (outside nsys) ...")
+        corr_cmd = [
+            sys.executable, args.script,
+            "--correlation-pass",
+            "--output-prefix", str(output_prefix),
+            *[a for a in args.script_args if a not in ("--correlation-pass",)],
+        ]
+        run_subprocess(corr_cmd, description="correlation pass")
+        log.info("Correlation pass complete.")
 
     extra_env: dict[str, str] = {}
 
@@ -60,6 +83,22 @@ def _run(args) -> None:
     except ImportError:
         torch_version = "unknown"
 
+    # Load correlation sidecar if present (written by run_workload --correlation-pass)
+    correlation_map: dict[tuple[str, int], str] | None = None
+    corr_sidecar = output_prefix.with_suffix(".corr.json")
+    if corr_sidecar.exists():
+        import json
+        data = json.loads(corr_sidecar.read_text())
+        correlation_map = {
+            (e["kernel_name"], e["invocation"]): e["op_name"]
+            for e in data.get("entries", [])
+        }
+        log.info(
+            "Loaded correlation map: %d entries from %s",
+            len(correlation_map),
+            corr_sidecar,
+        )
+
     metadata = CaptureManifestMetadata(
         model_name=args.model_name,
         torch_version=torch_version,
@@ -71,6 +110,7 @@ def _run(args) -> None:
     builder = ManifestBuilder(
         nsys_rep_path=rep_path,
         metadata=metadata,
+        correlation_map=correlation_map,
     )
     manifest = builder.build()
 

@@ -73,6 +73,7 @@ class TestManifestBuilder:
         self,
         kernel_rows: list[KernelRow],
         nvtx_rows: list[NvtxRow],
+        correlation_map: dict | None = None,
     ):
         """Helper: run ManifestBuilder with mocked nsys I/O functions only."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,15 +82,16 @@ class TestManifestBuilder:
             builder = ManifestBuilder(
                 nsys_rep_path=tmp_path / "fake.nsys-rep",
                 metadata=metadata,
+                correlation_map=correlation_map,
             )
 
             # Mock only the I/O boundary — let _build_forest and _attribute run normally
             with (
-                patch("operator_profiler.mapper.manifest_builder.export_to_sqlite",
+                patch("nvidia.operator_profiler.mapper.manifest_builder.export_to_sqlite",
                       return_value=tmp_path / "fake.sqlite"),
-                patch("operator_profiler.mapper.manifest_builder.query_kernels",
+                patch("nvidia.operator_profiler.mapper.manifest_builder.query_kernels",
                       return_value=kernel_rows),
-                patch("operator_profiler.mapper.manifest_builder.query_nvtx_events",
+                patch("nvidia.operator_profiler.mapper.manifest_builder.query_nvtx_events",
                       return_value=nvtx_rows),
             ):
                 manifest = builder.build()
@@ -174,3 +176,59 @@ class TestManifestBuilder:
         texts = [r.text for r in entry.attribution.all_enclosing_ranges]
         assert "outer_op" in texts
         assert "aten::linear" in texts
+
+    # --- torch.profiler HIGH confidence tier ---
+
+    def test_torch_profiler_high_confidence(self):
+        kernel = make_kernel_row(kernel_name="triton_mm_0")
+        corr_map = {("triton_mm_0", 0): "aten::mm"}
+        manifest = self._build([kernel], [], correlation_map=corr_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.TORCH_PROFILER
+        assert entry.attribution.confidence == Confidence.HIGH
+        assert entry.attribution.source_operators == ["aten::mm"]
+
+    def test_torch_profiler_falls_through_to_nvtx(self):
+        """No correlation map entry → falls through to NVTX MEDIUM."""
+        kernel = make_kernel_row(kernel_name="triton_mm_0")
+        nvtx = make_nvtx_row(text="aten::mm", start_ns=900, end_ns=1300, nesting_level=2)
+        corr_map = {("other_kernel", 0): "aten::relu"}  # doesn't match triton_mm_0
+        manifest = self._build([kernel], [nvtx], correlation_map=corr_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NVTX
+        assert entry.attribution.confidence == Confidence.MEDIUM
+
+    def test_torch_profiler_beats_nvtx(self):
+        """When both correlation map and NVTX match, HIGH confidence wins."""
+        kernel = make_kernel_row(kernel_name="triton_mm_0")
+        nvtx = make_nvtx_row(text="aten::addmm", start_ns=900, end_ns=1300, nesting_level=2)
+        corr_map = {("triton_mm_0", 0): "aten::mm"}
+        manifest = self._build([kernel], [nvtx], correlation_map=corr_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.TORCH_PROFILER
+        assert entry.attribution.confidence == Confidence.HIGH
+        assert entry.attribution.source_operators == ["aten::mm"]
+
+    def test_invocation_counter_increments(self):
+        """Same kernel name twice uses indices 0 and 1 correctly."""
+        kernels = [
+            make_kernel_row(kernel_name="triton_mm_0", correlation_id=1),
+            make_kernel_row(kernel_name="triton_mm_0", correlation_id=2),
+        ]
+        corr_map = {
+            ("triton_mm_0", 0): "aten::mm",
+            ("triton_mm_0", 1): "aten::linear",
+        }
+        manifest = self._build(kernels, [], correlation_map=corr_map)
+        assert manifest.kernels[0].attribution.source_operators == ["aten::mm"]
+        assert manifest.kernels[1].attribution.source_operators == ["aten::linear"]
+        assert manifest.kernels[0].attribution.confidence == Confidence.HIGH
+        assert manifest.kernels[1].attribution.confidence == Confidence.HIGH
+
+    def test_no_correlation_map_unchanged_behavior(self):
+        """Without correlation_map, existing NVTX logic is unaffected."""
+        kernel = make_kernel_row(kernel_name="volta_gemm_fp32_nn_128x128")
+        manifest = self._build([kernel], [])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
+        assert entry.attribution.confidence == Confidence.LOW

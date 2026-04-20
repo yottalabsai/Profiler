@@ -124,6 +124,10 @@ class ManifestBuilder:
         Path to the .nsys-rep file (will be exported to SQLite).
     metadata:
         CaptureManifestMetadata for the manifest header.
+    correlation_map:
+        Optional {(kernel_name, nth_occurrence): aten_op_name} produced by
+        torch_profiler_correlator.build_correlation_map().  When present, kernels
+        are attributed at HIGH confidence before the NVTX and name-heuristic tiers.
     """
 
     def __init__(
@@ -131,10 +135,12 @@ class ManifestBuilder:
         nsys_rep_path: str | Path,
         metadata: CaptureManifestMetadata,
         sqlite_cache_dir: str | Path | None = None,
+        correlation_map: dict[tuple[str, int], str] | None = None,
     ) -> None:
         self.nsys_rep_path = Path(nsys_rep_path)
         self.metadata = metadata
         self.sqlite_cache_dir = sqlite_cache_dir
+        self._correlation_map: dict[tuple[str, int], str] = correlation_map or {}
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -163,10 +169,29 @@ class ManifestBuilder:
         # Step 4: Build kernel entries via two-way join
         entries: list[KernelManifestEntry] = []
         warnings: list[str] = []
+        # Per-name invocation counter for correlation_map lookup (same join
+        # strategy as ncu replay — stable across runs for the same compiled model).
+        name_counter: dict[str, int] = {}
 
         for i, kr in enumerate(kernel_rows):
             kernel_id = f"k_{i:05d}"
-            attribution = self._attribute(kr, forest)
+
+            # --- Priority 0: torch.profiler invocation-order join (HIGH) ---
+            attribution = None
+            if self._correlation_map:
+                count = name_counter.get(kr.kernel_name, 0)
+                op_name = self._correlation_map.get((kr.kernel_name, count))
+                if op_name:
+                    attribution = KernelAttribution(
+                        method=AttributionMethod.TORCH_PROFILER,
+                        source_operators=[op_name],
+                        confidence=Confidence.HIGH,
+                    )
+            name_counter[kr.kernel_name] = name_counter.get(kr.kernel_name, 0) + 1
+
+            if attribution is None:
+                attribution = self._attribute(kr, forest)
+
             is_warmup = kernel_id in outlier_ids
 
             if is_warmup:
@@ -189,9 +214,13 @@ class ManifestBuilder:
                 )
             )
 
+        high_count = sum(
+            1 for e in entries if e.attribution.confidence == Confidence.HIGH
+        )
         log.info(
-            "Manifest: %d kernels, %d warnings",
+            "Manifest: %d kernels — HIGH=%d, warnings=%d",
             len(entries),
+            high_count,
             len(warnings),
         )
         return MappingManifest(

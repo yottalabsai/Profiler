@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -75,6 +76,18 @@ def main() -> None:
         "--measure-iters", type=int, default=10,
         help="Number of capture iterations under emit_nvtx (default: 10).",
     )
+    parser.add_argument(
+        "--correlation-pass", action="store_true", default=False,
+        help=(
+            "Run a torch.profiler pass after warmup to build a HIGH-confidence "
+            "kernel→op attribution map.  Writes <output-prefix>.corr.json alongside "
+            "the nsys report.  n_iters matches --measure-iters."
+        ),
+    )
+    parser.add_argument(
+        "--output-prefix", default="profile",
+        help="Prefix used to name sidecar files (default: 'profile').",
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -93,6 +106,27 @@ def main() -> None:
         for _ in range(args.warmup_iters):
             model(x)
     torch.cuda.synchronize()
+
+    if args.correlation_pass:
+        from nvidia.operator_profiler.capture.torch_profiler_correlator import build_correlation_map
+        print(
+            f"[run_workload] torch.profiler correlation pass ({args.measure_iters} iters)...",
+            flush=True,
+        )
+        corr_map = build_correlation_map(lambda: model(x), n_iters=args.measure_iters)
+        corr_path = Path(args.output_prefix + ".corr.json")
+        corr_path.write_text(json.dumps({
+            "schema_version": "1.0",
+            "entries": [
+                {"kernel_name": k[0], "invocation": k[1], "op_name": v}
+                for k, v in corr_map.items()
+            ],
+        }))
+        print(
+            f"[run_workload] Correlation map → {corr_path} ({len(corr_map)} entries)",
+            flush=True,
+        )
+        torch.cuda.synchronize()
 
     print(f"[run_workload] Capture ({args.measure_iters} iters with emit_nvtx)...", flush=True)
     with torch.no_grad():
