@@ -61,7 +61,11 @@ class NvtxRow:
     device_id: int
 
 
-def export_to_sqlite(nsys_rep_path: str | Path, output_dir: str | Path | None = None) -> Path:
+def export_to_sqlite(
+    nsys_rep_path: str | Path,
+    output_dir: str | Path | None = None,
+    nsys_executable: str = "nsys",
+) -> Path:
     """
     Run `nsys export --type sqlite` on *nsys_rep_path* and return the
     path to the resulting .sqlite file.
@@ -73,7 +77,7 @@ def export_to_sqlite(nsys_rep_path: str | Path, output_dir: str | Path | None = 
     output_path = output_dir / nsys_rep_path.with_suffix(".sqlite").name
 
     cmd = [
-        "nsys", "export",
+        nsys_executable, "export",
         "--type", "sqlite",
         "--output", str(output_path),
         "--force-overwrite", "true",

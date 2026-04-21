@@ -91,9 +91,15 @@ def run_kernel_profile(config: NcuKernelProfileConfig) -> Path:
         ncu_cmd += ["--kernel-name", config.kernel_name_filter]
     ncu_cmd += [*script_cmd, *config.script_args]
 
-    # Prepend sudo -E to preserve the environment when root access is needed
-    # for GPU performance counters (ERR_NVGPUCTRPERM).
-    cmd = (["sudo", "-E"] + ncu_cmd) if config.use_sudo else ncu_cmd
+    # Prepend sudo + explicit env injection when root access is needed.
+    # We can't rely on sudo -E alone because sudoers env_reset strips vars
+    # like PYTHONPATH even with -E. Using `sudo env KEY=VAL ...` forces them
+    # through regardless of the sudoers env_keep list.
+    if config.use_sudo:
+        env_pairs = [f"{k}={v}" for k, v in (config.extra_env or {}).items()]
+        cmd = ["sudo", "env"] + env_pairs + ncu_cmd
+    else:
+        cmd = ncu_cmd
 
     log.info(
         "Running ncu kernel profile for '%s': %s",

@@ -136,11 +136,13 @@ class ManifestBuilder:
         metadata: CaptureManifestMetadata,
         sqlite_cache_dir: str | Path | None = None,
         correlation_map: dict[tuple[str, int], str] | None = None,
+        nsys_executable: str = "nsys",
     ) -> None:
         self.nsys_rep_path = Path(nsys_rep_path)
         self.metadata = metadata
         self.sqlite_cache_dir = sqlite_cache_dir
         self._correlation_map: dict[tuple[str, int], str] = correlation_map or {}
+        self.nsys_executable = nsys_executable
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -148,7 +150,7 @@ class ManifestBuilder:
 
     def build(self) -> MappingManifest:
         # Step 1: Export nsys → SQLite and query
-        db_path = export_to_sqlite(self.nsys_rep_path, self.sqlite_cache_dir)
+        db_path = export_to_sqlite(self.nsys_rep_path, self.sqlite_cache_dir, self.nsys_executable)
         kernel_rows = query_kernels(db_path)
         nvtx_rows = query_nvtx_events(db_path)
 
