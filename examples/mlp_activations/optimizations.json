@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "model": "MlpActivations",
+    "torch_version": "2.11.0+cu128",
+    "compile_mode": "inductor",
+    "profiled_at": "2026-04-13T23:01:54.000710+00:00",
+    "total_attributed_kernel_duration_ms": 3.555,
+    "gemm_fraction_of_total": 0.983
+  },
+  "optimizations": [
+    {
+      "id": "OPT-001",
+      "priority": 1,
+      "operators": [
+        "aten::mm (all 40 instances, kernel=Kernel2, k_00017–k_00096)"
+      ],
+      "bottleneck": {
+        "description": "Zero tensor core utilization across all 40 aten::mm kernels. smsp__pipe_tensor_cycles_active = 0.0 on every instance. Kernel2 is cuBLAS FP32 SGEMM — Blackwell WGMMA/Tensor Cores only activate on BF16/FP16/TF32 inputs.",
+        "affected_duration_ms": 3.495,
+        "pct_of_total_time": 98.3,
+        "key_metrics": {
+          "tensor_core_active_pct": 0.0,
+          "avg_achieved_occupancy_pct": 12.5,
+          "avg_sm_throughput_pct": 17.1
+        }
+      },
+      "transformation": {
+        "type": "kernel_substitution",
+        "description": "Cast all nn.Linear weights and activations to torch.bfloat16 to force cuBLAS dispatch to sm90_xmma_gemm_bf16bf16 / Blackwell WGMMA path.",
+        "fx_graph_change": "Inject aten._to_copy.default(x, dtype=torch.bfloat16) upstream of every aten::mm node. Alternatively: model.to(torch.bfloat16) before torch.compile().",
+        "code_example": "model = model.to(torch.bfloat16); x = x.to(torch.bfloat16)"
+      },
+      "estimated_impact": {
+        "latency": "5–15x speedup on all mm kernels; total forward pass ~3.5ms → ~0.3–0.7ms",
+        "throughput": "SM throughput 17% → 60–80% estimated",
+        "memory": "BF16 halves activation memory footprint"
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-003", "OPT-005"]
+    },
+    {
+      "id": "OPT-002",
+      "priority": 2,
+      "operators": [
+        "aten::mm [256,512]x[512,2048] (10 instances, k_00017 + 9 repeats)",
+        "aten::mm [256,2048]x[2048,512] down-proj (10 instances)"
+      ],
+      "bottleneck": {
+        "description": "Wave starvation. Grid [16,2,6]x128 = 192 warps total. On Blackwell 132 SMs this is ~0.36 waves — SMs spend >90% of cycles idle waiting for the next wave.",
+        "affected_duration_ms": 1.479,
+        "key_metrics": {
+          "small_mm_avg_occupancy_pct": 8.4,
+          "down_proj_avg_occupancy_pct": 8.3,
+          "small_mm_avg_sm_throughput_pct": 15.4,
+          "down_proj_avg_sm_throughput_pct": 6.4
+        }
+      },
+      "transformation": {
+        "type": "reordering_and_batching",
+        "description": "Batch the 10 repeated same-shape mm calls into a single batched GEMM to expand wave count, or increase batch size to M>=2048 to fill SM waves.",
+        "fx_graph_change": "Replace sequence of 10 aten::mm nodes of identical shape with aten::bmm on a [10,256,512] input tensor. At batch*M=2560 the grid expands to ~3.6 waves. Alternatively: torch.compile(mode='max-autotune') will select tile sizes that fill available SMs at M=256.",
+        "code_example": "torch.compile(model, mode='max-autotune', fullgraph=True)"
+      },
+      "estimated_impact": {
+        "latency": "3–6x on small/down-proj mm; ~1ms saved across 20 affected kernels",
+        "throughput": "Occupancy 8% → 40–60%",
+        "memory": "No significant change"
+      },
+      "confidence": "high",
+      "prerequisite_for": []
+    },
+    {
+      "id": "OPT-003",
+      "priority": 3,
+      "operators": [
+        "aten::mm (Kernel2)",
+        "aten::addmm (triton_poi_fused_addmm_{relu,gelu,silu,tanh})"
+      ],
+      "bottleneck": {
+        "description": "Unfused GEMM epilogue. Kernel2 writes matmul output to HBM; separate Triton elementwise kernel reads it back for bias-add + activation. Two kernel launches and one full intermediate tensor materialization per MLP layer. 40 redundant kernel launches total.",
+        "affected_duration_ms": 0.06,
+        "key_metrics": {
+          "elementwise_kernel_avg_duration_us": 1.5,
+          "elementwise_kernel_count": 40,
+          "estimated_hbm_round_trips": 40
+        }
+      },
+      "transformation": {
+        "type": "operator_fusion",
+        "description": "Fuse aten::mm → aten::add (bias) → activation into a single kernel with GEMM epilogue. Collapse two kernels into one, eliminating one HBM write+read per layer.",
+        "fx_graph_change": "Match pattern: aten::mm → aten::add → aten::{relu,gelu,silu,tanh}. Replace with torch.nn.functional.linear (which emits aten::addmm) and ensure torch.compile inductor epilogue fusion is active. For full control, use a Triton GEMM kernel with epilogue_fn parameter.",
+        "code_example": "# Ensure nn.Linear is used (not manual mm + add) so inductor can fuse the epilogue\n# torch.compile will emit triton_mm_with_epilogue when activation follows addmm"
+      },
+      "estimated_impact": {
+        "latency": "~40 kernel launches eliminated; 5–10% end-to-end reduction",
+        "throughput": "Minor improvement from reduced dispatch overhead",
+        "memory": "Saves ~80MB HBM traffic (one output tensor read per layer x 40 layers)"
+      },
+      "confidence": "medium",
+      "prerequisite_for": []
+    },
+    {
+      "id": "OPT-004",
+      "priority": 4,
+      "operators": [
+        "aten::tanh (triton_poi_fused_addmm_tanh_3, 10 instances: k_00024, k_00032, k_00040, k_00048, k_00056, k_00064, k_00072, k_00080, k_00088, k_00096)"
+      ],
+      "bottleneck": {
+        "description": "tanh kernels show lowest SM throughput (1.4–1.5%) and lowest occupancy (6.8–8.2%) of all activation kernels. smsp__inst_executed.avg.per_cycle_active = 0.05 vs 0.10–0.22 for relu/gelu/silu — the SFU pipeline (__tanhf special function) serializes warp issue, stalling the scheduler. DRAM read anomaly: 531–532 units vs 2.11 for peers (likely profiling normalization artifact for high-SFU-stall kernels).",
+        "affected_duration_ms": 0.015,
+        "key_metrics": {
+          "tanh_avg_sm_throughput_pct": 1.47,
+          "tanh_avg_occupancy_pct": 7.6,
+          "tanh_ipc_active": 0.05,
+          "relu_ipc_active_for_reference": 0.11
+        }
+      },
+      "transformation": {
+        "type": "kernel_substitution",
+        "description": "Replace aten::tanh with aten::gelu(approximate='tanh') which uses a degree-3 polynomial approximation via ALU instead of SFU __tanhf, avoiding special function pipeline serialization.",
+        "fx_graph_change": "Pattern match aten.tanh.default nodes in FX graph. Replace with aten.gelu.default(x, approximate='tanh'). If exact tanh semantics required, write a Triton kernel using tl.math.tanh which compiles to vectorized polynomial on Blackwell.",
+        "code_example": "# In model definition, replace nn.Tanh() with:\nnn.GELU(approximate='tanh')\n# Or in FX pass:\nfor node in graph.nodes:\n    if node.target == torch.ops.aten.tanh.default:\n        node.target = lambda x: torch.nn.functional.gelu(x, approximate='tanh')"
+      },
+      "estimated_impact": {
+        "latency": "2–3x speedup on tanh kernels; occupancy 7% → 20–30%",
+        "throughput": "IPC from 0.05 → ~0.15 estimated",
+        "memory": "Negligible change in actual HBM traffic"
+      },
+      "confidence": "medium",
+      "notes": "Assumption: 531MB DRAM read metric on tanh vs 2.11MB on peers reflects NCU normalization window distortion under high SFU stall latency, not actual 250x more HBM traffic. SM throughput evidence (1.4% vs 5–11%) is metric-independent and confirms SFU bottleneck regardless.",
+      "prerequisite_for": []
+    },
+    {
+      "id": "OPT-005",
+      "priority": 5,
+      "operators": [
+        "aten::mm [256,2048]x[2048,2048] (20 instances, avg 100.9us, kernel=Kernel2)"
+      ],
+      "bottleneck": {
+        "description": "Suboptimal GEMM tile configuration from inductor default (non-autotuned) mode. dynamic_smem_per_block = 32.77KB allocated but L1 hit rate only 25.6% and smsp__issue_active = 23% — tile blocking is insufficient for M=256. Without autotuning, cuBLAS selects a generic tile that leaves occupancy at 16.6%.",
+        "affected_duration_ms": 2.018,
+        "key_metrics": {
+          "avg_occupancy_pct": 16.6,
+          "avg_sm_throughput_pct": 23.4,
+          "l1_hit_rate_pct": 25.6,
+          "dynamic_smem_per_block_kb": 32.77
+        }
+      },
+      "transformation": {
+        "type": "kernel_substitution",
+        "description": "Enable torch.compile max-autotune mode to benchmark GEMM tile configs for the [256,2048]x[2048,2048] shape. Expected winning config: 256x128 or 128x256 Triton tiles with BF16 Tensor Core path. Fallback without BF16: set torch.backends.cuda.matmul.allow_tf32=True to enable TF32 on FP32 inputs.",
+        "fx_graph_change": "No FX graph change required. Change compilation invocation: torch.compile(model, mode='max-autotune', fullgraph=True). Inductor will emit a shape-specific autotuned kernel replacing the generic Kernel2.",
+        "code_example": "torch.backends.cuda.matmul.allow_tf32 = True  # TF32 fallback if staying FP32\nmodel = torch.compile(model, mode='max-autotune', fullgraph=True)"
+      },
+      "estimated_impact": {
+        "latency": "20–40% reduction on large mm kernels after autotuning",
+        "throughput": "Occupancy 16% → 35–50% expected",
+        "memory": "No change"
+      },
+      "confidence": "medium",
+      "notes": "Impact is conditional on OPT-001 (BF16 cast) being applied first. TF32 provides ~8x theoretical throughput vs SGEMM at cost of 3 mantissa bits precision loss.",
+      "prerequisite_for": []
+    }
+  ],
+  "global_notes": [
+    "All tensor core metrics are zero without exception — smsp__pipe_tensor_cycles_active = 0 on every kernel. OPT-001 (BF16 dtype) is a prerequisite for all GEMM-level throughput improvements.",
+    "Kernel2 identity: cuBLAS opaque name for FP32 SGEMM on Blackwell. Does not map to WMMA/WGMMA. Confirmed by smsp__pipe_tensor_cycles_active = 0.",
+    "aten::addmm attribution confidence is LOW (name_heuristic, no NVTX range). The 40-kernel aggregation under call_index=0 is a profiler-side limitation from inductor not emitting NVTX markers in default mode.",
+    "Recommended fix order: OPT-001 → OPT-005 → OPT-002 → OPT-003 → OPT-004"
+  ]
+}

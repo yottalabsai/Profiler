@@ -1,0 +1,187 @@
+{
+  "analysis": "EmbeddingProjection model on torch 2.11+inductor. 32 operators profiled. aten::mm dominates at 91.6% of total attributed time (~44ms of 48ms). Universal tensor_core_active_pct = 0% across all GEMM operators is the single most critical finding. cuBLAS fallback kernel 'Kernel2' with 210-212 registers/thread produces 16.7% occupancy on all matrix multiply ops.",
+  "metadata": {
+    "model_name": "EmbeddingProjection",
+    "torch_version": "2.11.0+cu128",
+    "compile_mode": "inductor",
+    "total_attributed_time_ms": 48.06,
+    "capture_timestamp_utc": "2026-04-13T23:06:15.159955+00:00"
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "operators": [
+        "aten::mm [8192,512]x[512,32000] (Kernel2, op_ids 10,20,30,40,50,60,70,80,90,100)"
+      ],
+      "bottleneck": {
+        "summary": "Zero tensor core utilization (0%) + register pressure-induced wave starvation",
+        "details": "launch__registers_per_thread=212 x 256 threads/block = 54,272 regs/block, fitting at most 1 block/SM on a GPU with 65,536 regs/SM. Explains achieved_occupancy=16.7%. Kernel2 is a cuBLAS opaque non-TC code path confirmed by smsp__pipe_tensor_cycles_active=0.",
+        "pct_total_time": 85.5,
+        "total_time_ms": 41.1,
+        "key_metrics": {
+          "tensor_core_active_pct": 0.0,
+          "achieved_occupancy_pct": 16.7,
+          "registers_per_thread": 212,
+          "dram_throughput_pct": 12.8,
+          "sm_throughput_pct": 63.7,
+          "l2_hit_rate_pct": 84.6
+        }
+      },
+      "transformation": {
+        "summary": "Dtype cast to BF16 + torch.compile(mode='max-autotune')",
+        "description": "Cast input activations and weight matrix to torch.bfloat16 before the projection layer. Forces cuBLAS to select a tensor-core HMMA path and halves register pressure (expected drop from ~212 to ~80 regs/thread), raising theoretical occupancy to >=50%. In the FX graph, insert aten.to.dtype nodes on both mm inputs via torch.fx.Transformer prior to the aten::mm call_function node.",
+        "type": "kernel_substitution",
+        "fx_graph_action": "Insert aten.to(torch.bfloat16) on both mm input nodes; re-lower through inductor with max-autotune to replace Kernel2 with Triton HMMA GEMM.",
+        "code_hint": "torch.compile(model, mode='max-autotune'); model = model.to(torch.bfloat16)"
+      },
+      "impact": {
+        "latency": "4-8x reduction on these nodes (HMMA throughput vs FP32 FFMA + occupancy recovery)",
+        "throughput": "85% of pipeline wall time freed",
+        "memory": "Halved activation memory footprint as a side effect of BF16"
+      },
+      "confidence": "high",
+      "assumptions": ["Model is running in FP32 (device_name was null so GPU generation unconfirmed)"]
+    },
+    {
+      "id": "OPT-2",
+      "operators": [
+        "aten::mm [8192,512]x[512,2048] (Kernel2, op_ids 7,17,27,37,47,57,67,77,87,97)"
+      ],
+      "bottleneck": {
+        "summary": "Same Kernel2 cuBLAS fallback + register pressure (210 regs/thread, occupancy 16.6%, tensor_core 0%). DRAM throughput is only 5.3% — bottleneck is entirely arithmetic/occupancy, not bandwidth.",
+        "details": "The 512->2048 projection is a more square GEMM and especially benefits from tensor core tiling (128x128x32 WMMA tiles map cleanly onto [8192,512]x[512,2048]). Near-zero DRAM utilization confirms the kernel is SM-bound, not memory-bound.",
+        "pct_total_time": 6.2,
+        "total_time_ms": 3.0,
+        "key_metrics": {
+          "tensor_core_active_pct": 0.0,
+          "achieved_occupancy_pct": 16.6,
+          "registers_per_thread": 210,
+          "dram_throughput_pct": 5.3,
+          "sm_throughput_pct": 56.8,
+          "l2_hit_rate_pct": 81.9
+        }
+      },
+      "transformation": {
+        "summary": "BF16 cast + inductor tile-config annotation",
+        "description": "Same BF16 cast as OPT-1. Additionally, since [8192,512]x[512,2048] has shapes divisible by 64, ensure the autotuner's GEMM tile search includes BLOCK_M=128, BLOCK_N=128, BLOCK_K=32 (standard BF16 Triton GEMM config). Set torch._inductor.config.force_disable_caches=False to allow cached autotuned configs.",
+        "type": "kernel_substitution",
+        "fx_graph_action": "Insert aten.to(torch.bfloat16) on both mm input nodes; annotate with triton config hints for 128x128x32 tiling.",
+        "code_hint": "torch.compile(model, mode='max-autotune'); model = model.to(torch.bfloat16)"
+      },
+      "impact": {
+        "latency": "~3ms freed per 10 iterations (estimated ~300us to ~50us per call with TC)",
+        "throughput": "Occupancy recovery from 16.6% to 50%+",
+        "memory": "Halved activation size"
+      },
+      "confidence": "high",
+      "assumptions": ["Same FP32 assumption as OPT-1"]
+    },
+    {
+      "id": "OPT-3",
+      "operators": [
+        "aten::mm [8192,512]x[512,32000] (10 sequential dispatches)",
+        "aten::mm [8192,512]x[512,2048] (10 sequential dispatches)"
+      ],
+      "bottleneck": {
+        "summary": "Kernel dispatch overhead from loop unrolling in the FX graph. 10 structurally identical Kernel2 instances per shape dispatched sequentially from stream_id=7.",
+        "details": "Each dispatch carries full host-side scheduling cost (~3-5us per launch). If these correspond to 10 sequential transformer layers sharing the same projection weight, the FX graph has unrolled the loop, producing 20 total GEMM launches where fewer would suffice.",
+        "pct_total_time": null,
+        "total_time_ms": null,
+        "key_metrics": {
+          "sequential_launches_per_shape": 10,
+          "estimated_dispatch_overhead_us_per_launch": 5,
+          "estimated_total_overhead_us": 45
+        }
+      },
+      "transformation": {
+        "summary": "Batch sequential mm dispatches into a single call",
+        "description": "In the FX graph, replace the sequence of aten::mm(x_i, W) for i in 0..9 with a single aten::mm(torch.stack([x_0,...,x_9]), W) emitting [10,8192,32000], then split. This converts 10 launches into 1, eliminating 9x host-side kernel scheduling round trips. Alternatively use torch.vmap if x_i are independent.",
+        "type": "reordering",
+        "fx_graph_action": "Identify repeated aten::mm nodes with identical weight node; insert aten.stack on activation inputs, replace with single batched mm, insert aten.unbind on output.",
+        "code_hint": "# If layers share weight W:\nout = torch.stack(inputs) @ W  # [10, 8192, 512] @ [512, 32000]"
+      },
+      "impact": {
+        "latency": "30-50us from dispatch elimination; additional benefit from better SM wave-count on single large GEMM",
+        "throughput": "Minor but free optimization layered on top of OPT-1/2",
+        "memory": "Neutral — stack creates a temporary tensor but can be done in-place"
+      },
+      "confidence": "medium",
+      "assumptions": ["Assumes the 10 instances share the same weight tensor (e.g. tied output projection or single-layer repeated inference). If weights differ per layer, batching is not applicable."]
+    },
+    {
+      "id": "OPT-4",
+      "operators": [
+        "aten::addmm fused with aten::gelu (triton_poi_fused_addmm_gelu_view_1, 10 instances)"
+      ],
+      "bottleneck": {
+        "summary": "DRAM bandwidth saturation at 90.3% of peak. Kernel is memory-bound: reads 67MB, writes 13MB per 10 invocations.",
+        "details": "sm_throughput=33.4% and ipc_active=0.39 confirm arithmetic units are starved waiting on memory. L2 hit rate is only 50.8% — activation tensor too large to reside in L2. This is an inductor-fused bias-add + GELU pointwise kernel (correct, not a GEMM), but FP32 element size doubles required DRAM traffic.",
+        "pct_total_time": 8.2,
+        "total_time_ms": 3.96,
+        "key_metrics": {
+          "tensor_core_active_pct": 0.0,
+          "achieved_occupancy_pct": 87.0,
+          "dram_throughput_pct": 90.3,
+          "sm_throughput_pct": 33.4,
+          "l2_hit_rate_pct": 50.8,
+          "dram_read_bytes_per_10_invocations_mb": 67,
+          "dram_write_bytes_per_10_invocations_mb": 13
+        }
+      },
+      "transformation": {
+        "summary": "BF16 activation dtype propagation (free side-effect of OPT-1/2)",
+        "description": "If upstream aten::mm is converted to BF16 (OPT-1/2), inductor will regenerate triton_poi_fused_addmm_gelu_view_1 with BF16 loads/stores automatically — no manual transformation required. This halves DRAM read traffic from ~67MB to ~33MB per 10 invocations. If staying FP32, annotate the Triton kernel with eviction_policy='evict_last' and increase vectorization width to 8-byte loads.",
+        "type": "elimination",
+        "fx_graph_action": "Automatic if OPT-1/2 applied; dtype propagation through inductor lowers this kernel to BF16 loads/stores.",
+        "code_hint": "# No additional code needed — follows from model.to(torch.bfloat16)"
+      },
+      "impact": {
+        "latency": "~50% reduction on this kernel (208us -> ~104us), contingent on BF16 adoption",
+        "throughput": "DRAM traffic halved",
+        "memory": "Halved intermediate activation buffer"
+      },
+      "confidence": "medium",
+      "assumptions": ["Contingent on BF16 adoption from OPT-1/2. Standalone impact is ~16us net pipeline savings if BF16 is adopted."]
+    },
+    {
+      "id": "OPT-5",
+      "operators": [
+        "aten::embedding fused with aten::layer_norm (triton_red_fused_embedding_native_layer_norm_0, 10 instances)"
+      ],
+      "bottleneck": {
+        "summary": "L2 cache thrash from embedding table scatter-reads. lts__t_sector_hit_rate=11.2% (near-zero L2 reuse). Random-access reads into large vocabulary embedding table defeat L2 caching.",
+        "details": "l1tex__t_sector_hit_rate=48.6% shows moderate L1 reuse within a block. Operator is only 0.2% of total time (87.8us) — not a latency target but relevant if memory-capacity-bound.",
+        "pct_total_time": 0.2,
+        "total_time_ms": 0.088,
+        "key_metrics": {
+          "tensor_core_active_pct": 0.0,
+          "achieved_occupancy_pct": 81.8,
+          "dram_throughput_pct": 54.6,
+          "l1_hit_rate_pct": 48.6,
+          "l2_hit_rate_pct": 11.3
+        }
+      },
+      "transformation": {
+        "summary": "Embedding table INT8 weight quantization with on-the-fly dequant",
+        "description": "Replace the embedding weight with INT8 and dequantize on-the-fly in the Triton kernel. Insert a aten::to(float32) dequant node immediately after the aten::embedding call_function node in the FX graph, then re-fuse with layer_norm via torch._inductor.fx_passes.fuse. Halves DRAM bytes read for the embedding table (100% of reads are weights).",
+        "type": "kernel_substitution",
+        "fx_graph_action": "Quantize nn.Embedding weight to int8; implement custom torch.ops dequant kernel; register via torch.library; re-fuse embedding+dequant+layer_norm.",
+        "code_hint": "# Quantize embedding weight\nembedding.weight.data = embedding.weight.data.to(torch.int8)"
+      },
+      "impact": {
+        "latency": "~4us savings (0.2% share — deprioritize unless memory-capacity-bound)",
+        "throughput": "Negligible pipeline impact",
+        "memory": "~50% reduction in embedding table size — meaningful for large vocabulary (32000 tokens shown in output projection)"
+      },
+      "confidence": "low",
+      "assumptions": ["Prioritize only if model is memory-capacity-constrained. Accuracy impact of INT8 embedding quantization should be validated."]
+    }
+  ],
+  "priority_order": ["OPT-1", "OPT-2", "OPT-3", "OPT-4", "OPT-5"],
+  "notes": [
+    "CRITICAL ASSUMPTION: tensor_core_active_pct=0% on all GEMM operators with device_name=null strongly implies FP32 execution. If model is already in BF16 and TCs are still 0%, suspect an inductor codegen bug — force Triton GEMM via torch._inductor.config.use_mixed_mm=True.",
+    "Kernel2 is an opaque cuBLAS internal kernel (demangled_name=null, attribution_method=nvtx). torch.compile with mode='max-autotune' should replace it with a profiled Triton GEMM with transparent register allocation.",
+    "11 kernels (k_00000-k_00010) were flagged as initialization kernels and excluded from aggregated metrics per standard practice.",
+    "aten::addmm_0 (fused, no NVTX stamp) maps to the bias-add+gelu pointwise pass post-GEMM, not the GEMM itself. The GEMM for these layers is the Kernel2 instances attributed via NVTX ranges."
+  ]
+}

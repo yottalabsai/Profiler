@@ -1,0 +1,165 @@
+{
+  "metadata": {
+    "model": "SdpaAttention",
+    "torch_version": "2.11.0+cu128",
+    "compile_mode": "inductor",
+    "total_attributed_kernel_time_ms": 3.607,
+    "generated_from": "profile.json"
+  },
+  "optimizations": [
+    {
+      "id": "OPT-001",
+      "operators": [
+        "aten::mm (op_ids 7–249, x40 calls, shape [4096,512]x[512,512])"
+      ],
+      "bottleneck": {
+        "description": "0% tensor core utilization on FP32 GEMMs. cuBLAS dispatches Kernel2 (scalar SGEMM path) because allow_tf32 is disabled. 210 registers/thread causes 16.6% achieved occupancy. All 40 mm nodes have is_fused=false.",
+        "metrics": {
+          "tensor_core_active_pct": 0.0,
+          "achieved_occupancy_pct": 16.6,
+          "registers_per_thread": 210,
+          "sm_throughput_pct": 36.3,
+          "dram_throughput_pct": 7.6,
+          "kernel": "Kernel2 (cuBLAS scalar GEMM)"
+        }
+      },
+      "transformation": {
+        "type": "dtype_cast + kernel_substitution",
+        "description": "Insert .to(torch.bfloat16) cast nodes immediately before each aten::mm call_function node in the FX graph, and .to(torch.float32) on each output. This forces cuBLAS to dispatch the BF16 HMMA tensor core path. Alternatively enable TF32 globally via torch.backends.cuda.matmul.allow_tf32=True to route FP32 mm nodes to TF32 tensor core tiles without graph edits.",
+        "fx_graph_action": "Insert torch.ops.prims.convert_element_type.default nodes wrapping each aten.mm.default node's inputs and output, or set torch.backends.cuda.matmul.allow_tf32=True at model init.",
+        "code_example": "torch.backends.cuda.matmul.allow_tf32 = True  # zero-edit option\n# or in FX graph pass:\n# x_bf16 = x.to(torch.bfloat16)\n# w_bf16 = w.to(torch.bfloat16)\n# out = torch.mm(x_bf16, w_bf16).to(torch.float32)"
+      },
+      "impact": {
+        "latency": "50–60% reduction on aten::mm group (66.6% of total runtime). BF16 HMMA peak throughput is 8x over FP32 SGEMM on sm80-class hardware.",
+        "memory": "BF16 halves activation memory for mm inputs; register count drops to ~64–80/thread.",
+        "throughput": "Occupancy increases to ~40–50% from 16.6%."
+      },
+      "confidence": "high"
+    },
+    {
+      "id": "OPT-002",
+      "operators": [
+        "aten::mm (x40 calls, all shape [4096,512]x[512,512], serialized independent launches)"
+      ],
+      "bottleneck": {
+        "description": "40 serialized kernel launches for structurally batchable or horizontally fusable GEMMs. Each carries full kernel dispatch overhead (~5–10µs). cuBLAS cannot pipeline across separate calls. At N=512 the tile alignment is marginal for cuBLAS's 256-wide tile preference.",
+        "metrics": {
+          "kernel_count": 40,
+          "total_duration_ms": 2.403,
+          "per_kernel_duration_us": 60.1
+        }
+      },
+      "transformation": {
+        "type": "operator_fusion + horizontal_gemm_fusion",
+        "description": "In the FX graph, locate contiguous call_function nodes for aten::mm sharing the same LHS activation tensor (e.g., Q/K/V projections). Fuse by concatenating weight tensors: replace 3x aten::mm([4096,512], [512,512]) with one aten::mm([4096,512], [512,1536]) followed by aten::split(1536, dim=1). For non-QKV chains, stack batch dims and use aten::bmm. Reduces 40 launches to ~13–14.",
+        "fx_graph_action": "Introduce a graph-level pass that pattern-matches (mm, mm, mm) triplets on the same input node, inserts a cat node over the weight nodes on dim=1, replaces the three mm nodes with a single mm, and inserts chunk/split nodes on the output.",
+        "code_example": "# Fused QKV projection\nW_qkv = torch.cat([W_q, W_k, W_v], dim=0)  # [1536, 512]\nqkv = F.linear(x, W_qkv)                    # [4096, 1536]\nq, k, v = qkv.chunk(3, dim=-1)"
+      },
+      "impact": {
+        "latency": "10–20% reduction on mm group (6–13% overall). Reduces kernel launches from 40 to ~13–14.",
+        "memory": "Neutral; weight tensors are concatenated views, no extra allocation required.",
+        "throughput": "Wider N tile (1536 vs 512) improves cuBLAS tiling efficiency and reduces wave-quantization loss."
+      },
+      "confidence": "medium"
+    },
+    {
+      "id": "OPT-003",
+      "operators": [
+        "aten::_efficient_attention_forward (x10 calls, Q/K/V shape [8,512,8,64])"
+      ],
+      "bottleneck": {
+        "description": "FP32 FMHA path via fmha_cutlassF_f32_aligned_64x64_rf_sm80. 168 registers/thread causes 757,760 local memory spill accesses per kernel call (7.57M total across 10 calls). Spills serialize warp execution through L1 local-memory pipeline. dram throughput only 11.1% despite spilling — bottleneck is register-file <-> local memory round-trips, not off-chip bandwidth.",
+        "metrics": {
+          "tensor_core_active_pct": 58.7,
+          "achieved_occupancy_pct": 14.1,
+          "registers_per_thread": 168,
+          "local_memory_spills_per_call": 757760,
+          "total_spill_accesses": 7577600,
+          "dram_throughput_pct": 11.1,
+          "sm_throughput_pct": 51.4,
+          "kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80 (FP32 xformers path)"
+        }
+      },
+      "transformation": {
+        "type": "kernel_substitution + dtype_cast",
+        "description": "Replace aten::_efficient_attention_forward in the FX graph with torch.nn.functional.scaled_dot_product_attention, which dispatches to FlashAttention-2 via SDPBackend.FLASH_ATTENTION. Cast Q/K/V inputs to BF16 before the node. FA2 BF16 kernel uses ~96 regs/thread vs 168, fully eliminating local memory spills. Guard with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False).",
+        "fx_graph_action": "In the FX graph pass, replace the call_function node for aten._efficient_attention_forward with a call to torch.nn.functional.scaled_dot_product_attention, prepend convert_element_type nodes for q/k/v inputs to bfloat16, and append a convert_element_type node on the output back to float32 if needed.",
+        "code_example": "import torch.nn.functional as F\nfrom torch.backends.cuda import sdp_kernel\n\nwith sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):\n    q_bf16, k_bf16, v_bf16 = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)\n    out = F.scaled_dot_product_attention(q_bf16, k_bf16, v_bf16).to(torch.float32)"
+      },
+      "impact": {
+        "latency": "30–40% reduction on attention kernels (9–12% overall). Spill elimination removes 7.57M L1 local-memory transactions per forward pass.",
+        "memory": "FA2 has O(N) memory vs O(N^2) for this xformers path — ~4x reduction in attention intermediates at seq=512. BF16 also halves Q/K/V tensor memory.",
+        "throughput": "Register count reduction from 168 to ~96/thread increases theoretical occupancy from 14.1% to ~25–30%."
+      },
+      "confidence": "high"
+    },
+    {
+      "id": "OPT-004",
+      "operators": [
+        "aten::layer_norm (x10 kernels, triton_per_fused_native_layer_norm_0, grid=[2048,1,1], block=[32,1,1])"
+      ],
+      "bottleneck": {
+        "description": "Single-warp per CTA (32 threads/block) reduction over dim=512. SM throughput 4.79%, IPC_active=0.05, L2 hit rate 5.84% — every access goes to DRAM. 2048 CTAs x 1 warp = 2048 active warps, wave-starved across SMs. Zero dynamic shared memory means no collaborative reduction; each warp serially reduces its 16-element slice.",
+        "metrics": {
+          "sm_throughput_pct": 4.79,
+          "ipc_active": 0.05,
+          "l2_hit_rate_pct": 5.84,
+          "achieved_occupancy_pct": 20.3,
+          "tensor_core_active_pct": 0.0,
+          "dynamic_smem_per_block_kb": 0.0,
+          "grid": [2048, 1, 1],
+          "block": [32, 1, 1],
+          "kernel": "triton_per_fused_native_layer_norm_0"
+        }
+      },
+      "transformation": {
+        "type": "kernel_substitution + block_size_retiling",
+        "description": "Register a custom Triton kernel replacement for aten::layer_norm that uses BLOCK_SIZE=512 with one CTA per row, enabling warp-shuffle based parallel prefix reduction over the full row in shared memory. Reduces 2048-block dispatch to 512 CTAs with 512 threads each (4096/512 = 8 rows per wave vs 64 currently). Alternatively, apply torch.compile(mode='max-autotune') to trigger Inductor's tiling search — current 32-thread config is a known suboptimal default for dim=512.",
+        "fx_graph_action": "Register a custom torch library op wrapping a Triton layer_norm kernel with BLOCK_SIZE=512. In the FX graph pass, replace aten.native_layer_norm.default nodes with the custom op. Inductor will lower it to the custom Triton kernel.",
+        "code_example": "# Force max-autotune to retile\nmodel = torch.compile(model, mode='max-autotune')\n\n# Or register custom Triton kernel with BLOCK_SIZE=512\n# @triton.jit\n# def layer_norm_kernel(X, W, B, Y, N, eps, BLOCK_SIZE: tl.constexpr):\n#     row = tl.program_id(0)\n#     cols = tl.arange(0, BLOCK_SIZE)  # 512\n#     ..."
+      },
+      "impact": {
+        "latency": "15–25% reduction on layer_norm kernel (0.2–0.3% overall; low absolute impact).",
+        "memory": "Neutral on DRAM; shared memory usage increases per-CTA but fewer CTAs in flight reduces total SRAM pressure.",
+        "throughput": "With 512 threads/CTA, 4096/512 = 8 CTAs per wave vs 64 currently, improving SM wave utilization."
+      },
+      "confidence": "medium"
+    },
+    {
+      "id": "OPT-005",
+      "operators": [
+        "aten::add + aten::layer_norm (fused, triton_per_fused__unsafe_view_add_native_layer_norm_1)"
+      ],
+      "bottleneck": {
+        "description": "Already fused by Inductor (is_fused=true, fused_with=['aten::layer_norm']). Memory-bound at 68.2% dram throughput, expected for elementwise+reduction. No independent action needed. However, BF16 adoption from OPT-001 will halve DRAM bytes for this kernel automatically.",
+        "metrics": {
+          "dram_throughput_pct": 68.2,
+          "l2_hit_rate_pct": 36.0,
+          "tensor_core_active_pct": 0.0,
+          "is_fused": true,
+          "fused_with": ["aten::layer_norm"],
+          "kernel": "triton_per_fused__unsafe_view_add_native_layer_norm_1"
+        }
+      },
+      "transformation": {
+        "type": "dtype_inheritance (no direct graph action)",
+        "description": "No standalone transformation required. If BF16 is adopted globally (OPT-001), this kernel inherits BF16 I/O paths automatically via Inductor's dtype propagation, halving DRAM bytes read from 8 to 4 bytes/element and pushing throughput toward saturation.",
+        "fx_graph_action": "None required. Monitor after applying OPT-001 dtype changes — Inductor will retrace and regenerate this fused kernel in BF16.",
+        "code_example": "# No action needed beyond OPT-001 dtype changes.\n# Inductor will re-fuse and re-generate the kernel in BF16 on next torch.compile() call."
+      },
+      "impact": {
+        "latency": "40–50% reduction on this kernel if BF16 adopted via OPT-001 (0.6% overall).",
+        "memory": "50% reduction in DRAM traffic for this kernel (BF16 halves element size).",
+        "throughput": "dram_throughput_pct increases toward 90%+ as fewer bytes are transferred."
+      },
+      "confidence": "medium"
+    }
+  ],
+  "assumptions": [
+    "Device name is null in capture metadata. Kernel suffix _sm80 in fmha_cutlassF_f32_aligned_64x64_rf_sm80 suggests profiling on A100 (sm80) or xformers compiled for sm80 compat mode. If running on Blackwell (sm120, RTX PRO 6000), recompile xformers and PyTorch extensions targeting sm120 to avoid sm80 compatibility fallback — this is a separate regression from the issues identified above.",
+    "40 aten::mm calls with identical shape [4096,512]x[512,512] are assumed to be Q/K/V + output projections across 10 transformer layers (4 projections x 10 layers = 40). Exact graph topology should be verified before applying OPT-002 horizontal fusion.",
+    "BF16 numerical impact on model accuracy is assumed acceptable. Validate on your task metric before deploying OPT-001/OPT-003 in production."
+  ],
+  "priority_order": ["OPT-001", "OPT-003", "OPT-002", "OPT-004", "OPT-005"],
+  "estimated_total_latency_reduction_pct": "55–70% (dominated by OPT-001 tensor core activation on aten::mm)"
+}

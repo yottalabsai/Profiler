@@ -1,0 +1,149 @@
+{
+  "model": "DepthwiseSeparableConv",
+  "compile_mode": "inductor",
+  "profiling_summary": {
+    "total_wall_time_ms": 3.39,
+    "total_kernel_exec_ms": 1.63,
+    "total_gap_time_ms": 1.75,
+    "gpu_idle_fraction_pct": 51.8,
+    "total_kernel_launches": 130,
+    "avg_gap_per_launch_us": 13.5
+  },
+  "optimizations": [
+    {
+      "id": "OPT-001",
+      "priority": 1,
+      "fx_nodes": [
+        "all aten::cudnn_convolution",
+        "all aten::batch_norm",
+        "all triton_poi_fused_* kernels"
+      ],
+      "kernel_names": ["all 130 kernel launches"],
+      "bottleneck": "Kernel launch overhead: 51.8% GPU idle time (1.75ms gaps vs 1.63ms execution across 130 launches, avg 13.5us gap/launch). CPU dispatch serializes every CUDA API call, creating per-kernel synchronization bubbles.",
+      "transformation": "Enable CUDA Graphs via torch.cuda.make_graphed_callables() or torch.compile(model, mode='reduce-overhead'). Replaces 130 discrete CUDA API calls with a single graph replay, eliminating all CPU-GPU dispatch latency. Requires static shapes and no Python control flow in the captured region — satisfied by this model at batch=16, spatial=56x56.",
+      "impact": {
+        "latency_reduction_pct": "40-50",
+        "memory_delta": "none",
+        "throughput_gain": "proportional to latency reduction",
+        "absolute_est_ms": "~1.75ms wall time recovered"
+      },
+      "confidence": "high"
+    },
+    {
+      "id": "OPT-002",
+      "priority": 2,
+      "fx_nodes": [
+        "aten::cudnn_convolution [weight.shape = [64,32,1,1]]",
+        "aten::cudnn_convolution [weight.shape = [128,64,1,1]]",
+        "aten::cudnn_convolution [weight.shape = [256,128,1,1]]"
+      ],
+      "kernel_names": ["Kernel2"],
+      "observed_metrics": {
+        "achieved_occupancy_pct": "8.1-8.6",
+        "tensor_core_utilization_pct": "18.7-45.3",
+        "registers_per_thread": "140-228",
+        "shared_mem_per_block_kb": 73.7,
+        "warps_per_block": 4,
+        "kernel_time_share_pct": 44.1,
+        "kernel_time_ms": 0.72,
+        "instances": 30
+      },
+      "bottleneck": "Shared-memory-induced wave starvation: Kernel2 allocates 73.7 KB shmem/block with only 4 warps/block (block_dim=[128,1,1]). On Blackwell (~192 KB shmem/SM) only 1-2 blocks fit per SM, yielding 4-8 active warps vs 64 max. Occupancy locked at 8.1-8.6% across all 30 instances. This kernel is 44.1% of total kernel execution time.",
+      "transformation": "Force Inductor to emit a Triton GEMM instead of falling back to cuDNN for 1x1 convolutions. Set torch._inductor.config.conv_1x1_as_mm = True, or in the FX graph replace aten::cudnn_convolution nodes where weight.shape[-2:] == (1,1) with aten::mm after reshaping activations to [N*H*W, C_in]. Triton tiles to 64x64 or 128x128 with configurable shmem, avoiding the 73 KB per-block cuDNN allocation and enabling multiple concurrent blocks per SM. Alternatively, torch.compile(mode='max-autotune') will autotune tile configs.",
+      "impact": {
+        "latency_reduction_pct": "25-35 on 1x1 conv kernels",
+        "net_wall_time_reduction_pct": "~15",
+        "occupancy_target_pct": "50+",
+        "tc_utilization_target_pct": "60+"
+      },
+      "confidence": "high"
+    },
+    {
+      "id": "OPT-003",
+      "priority": 3,
+      "fx_nodes": [
+        "aten::cudnn_convolution [weight.shape = [32,1,3,3], groups=32]",
+        "aten::cudnn_convolution [weight.shape = [64,1,3,3], groups=64]",
+        "aten::cudnn_convolution [weight.shape = [128,1,3,3], groups=128]"
+      ],
+      "kernel_names": ["conv2d_c1_k1_nhwc"],
+      "observed_metrics": {
+        "tensor_core_utilization_pct": 0.0,
+        "achieved_occupancy_pct": "70.8-86.5",
+        "dram_throughput_pct_of_peak": "47.8-73.3",
+        "registers_per_thread": 40,
+        "instances": 30,
+        "kernel_time_share_pct": 15.9,
+        "kernel_time_ms": 0.26
+      },
+      "bottleneck": "Zero tensor core utilization across all 30 depthwise instances. cuDNN's depthwise path (groups=C_in) does not decompose into a GEMM and never engages Blackwell tensor cores. Kernels are memory-bound at 47-73% DRAM peak with no arithmetic intensity to hide latency.",
+      "transformation": "Replace cuDNN depthwise dispatch with a custom Triton kernel: intercept aten::convolution[groups==in_channels] in the FX graph via a custom lowering and dispatch to a Triton kernel using float4 vectorized loads (128-bit transactions per thread). The Triton kernel can also fuse the BN+HardTanh epilog (see OPT-004), eliminating the DRAM round-trip at the conv-BN boundary. TC cannot be engaged structurally for depthwise (no large GEMM), but vectorized loads reduce effective memory latency.",
+      "impact": {
+        "memory_throughput_gain_pct": "30-40",
+        "latency_reduction_pct_on_depthwise": "~20",
+        "note": "TC utilization remains 0 (depthwise GEMM is structurally rank-deficient); gains are purely from memory access efficiency"
+      },
+      "confidence": "medium"
+    },
+    {
+      "id": "OPT-004",
+      "priority": 4,
+      "fx_nodes": [
+        "aten::convolution → aten::native_batch_norm → aten::hardtanh (all DSC block stages)"
+      ],
+      "kernel_names": [
+        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_1",
+        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2",
+        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3",
+        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_4"
+      ],
+      "observed_metrics": {
+        "bn_act_kernel_time_share_pct": 34.0,
+        "bn_act_kernel_time_ms": 0.55,
+        "l1_hit_rate_pct": "59.4-82.8",
+        "lts_hit_rate_pct": "47.9-51.4",
+        "instances": 60,
+        "fusion_status": "BN+hardtanh already fused by Inductor; conv output NOT fused"
+      },
+      "bottleneck": "Redundant DRAM round-trip at conv-BN boundary: Inductor correctly fused BN+hardtanh into single Triton kernels, but the conv output is written to global memory, then immediately read back by the BN kernel. At [16,C,56,56] fp32, each intermediate tensor is 3-13 MB. Across 30 blocks this generates significant avoidable DRAM traffic.",
+      "transformation": "Register a custom Inductor fusion pass that pattern-matches convolution + native_batch_norm_legit_no_training + hardtanh in the post-lowering FX graph and emits a single Triton kernel with BN/clip as the conv epilog. For the cuDNN Kernel2 path: after applying OPT-002 (Triton GEMM), the epilog fusion is straightforward via a tl.store with inline BN scaling and tl.clamp. For the depthwise path: combine with OPT-003's custom Triton kernel. If hardtanh(min=0, max=6), aten::cudnn_convolution_with_bias_and_relu is also a candidate for the pointwise path.",
+      "impact": {
+        "dram_traffic_reduction_pct": "30-40",
+        "latency_reduction_pct_on_bn_act_kernels": "~10",
+        "note": "Eliminates one full activation read + write per DSC block at the conv-BN boundary"
+      },
+      "confidence": "medium"
+    },
+    {
+      "id": "OPT-005",
+      "priority": 5,
+      "fx_nodes": [
+        "all aten::cudnn_convolution (1x1 pointwise)",
+        "all aten::cudnn_convolution (depthwise)"
+      ],
+      "kernel_names": ["Kernel2", "conv2d_c1_k1_nhwc"],
+      "observed_metrics": {
+        "dtype": "fp32 (inferred: no fp16/bf16 kernels appear in profile)",
+        "kernel2_tc_utilization_pct": "18.7-45.3 (FP32 TC rate)",
+        "depthwise_tc_utilization_pct": 0.0,
+        "depthwise_dram_throughput_pct": "47.8-73.3"
+      },
+      "bottleneck": "FP32 arithmetic throughout: Blackwell tensor cores deliver 2x higher throughput on BF16 vs FP32. Kernel2 TC utilization of 18-45% reflects FP32 TC rate, not the higher BF16 rate. conv2d_c1_k1_nhwc is memory-bound; halving dtype width from FP32 to BF16 directly halves DRAM pressure.",
+      "transformation": "Cast model weights and activations to BF16: model.to(torch.bfloat16) before inference, or wrap the forward pass in torch.autocast('cuda', dtype=torch.bfloat16). BF16 preferred over FP16 on Blackwell (same TC throughput, wider dynamic range, no loss scaling required). In the FX graph, insert to(torch.bfloat16) on all aten::convolution inputs/weights via a torch.fx.passes type promotion pass. Keep BN running_mean/running_var buffers in FP32 — cast only conv inputs and weights.",
+      "impact": {
+        "throughput_gain_on_pointwise_pct": "40-80",
+        "memory_reduction_on_activations_pct": 50,
+        "net_latency_reduction_pct": "25-35 on total kernel time",
+        "note": "Highest arithmetic impact item; should be combined with OPT-002 for maximum effect on Kernel2"
+      },
+      "confidence": "high"
+    }
+  ],
+  "assumptions": [
+    "device_name is null in capture metadata; GPU assumed to be RTX PRO 6000 Blackwell (GB202) with ~170 SMs and ~192 KB shmem/SM. Occupancy estimates will shift if SM count differs, but the root cause is independent of SM count.",
+    "Most kernel attributions use name_heuristic (confidence: low). Kernel2 entries use NVTX (confidence: medium). Install torch.profiler NVTX markers (with torch.autograd.profiler.emit_nvtx()) for high-confidence operator-to-kernel mapping.",
+    "CUDA Graphs (OPT-001) requires static shapes and no Python control flow inside the captured region. The profiled model at batch=16, spatial=56x56 satisfies this constraint.",
+    "BF16 cast (OPT-005) assumes inference mode. For training, BF16 mixed-precision requires GradScaler and careful handling of BN statistics accumulation.",
+    "hardtanh bounds not confirmed from profiling data. If min=0 and max=6, the ReLU6 path via cudnn_convolution_with_bias_and_relu is available as an alternative epilog fusion strategy in OPT-004."
+  ]
+}
