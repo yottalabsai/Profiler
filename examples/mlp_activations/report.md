@@ -2,7 +2,7 @@
 
 This document walks through the full lifecycle of using the Operator Profiler to go from an unoptimized deep MLP with heterogeneous activations to a hardware-informed, optimized implementation — with real measured numbers at every step.
 
-**Hardware:** NVIDIA RTX PRO 6000 Blackwell Server Edition  
+**Hardware:** NVIDIA H100 SXM5 80GB  
 **Framework:** PyTorch 2.11 + torch.compile (Inductor backend)
 
 ---
@@ -57,7 +57,7 @@ operator-profiler profile mlp_activations.py \
 operator-profiler map baseline.manifest.json \
     --script mlp_activations.py \
     --output profile.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler
@@ -85,7 +85,7 @@ All durations are per forward pass (total / 10). B=256.
 ### Reading the Metrics
 
 **Zero Tensor Core utilization across all 40 mm kernels:**  
-`smsp__pipe_tensor_cycles_active = 0.0` on every instance without exception. This is `Kernel2` — cuBLAS's internal name for the FP32 SGEMM path, which does not engage Blackwell's WGMMA units. The GEMM shapes ([256, 2048] × [2048, 2048]) are large enough to fill a Tensor Core tile (128×128×32 WMMA tiles map cleanly), but FP32 scalar SIMT is selected instead because BF16/TF32 is not enabled.
+`smsp__pipe_tensor_cycles_active = 0.0` on every instance without exception. This is `Kernel2` — cuBLAS's internal name for the FP32 SGEMM path, which does not engage H100's WGMMA units. The GEMM shapes ([256, 2048] × [2048, 2048]) are large enough to fill a Tensor Core tile (128×128×32 WMMA tiles map cleanly), but FP32 scalar SIMT is selected instead because BF16/TF32 is not enabled.
 
 **Wave starvation on fc1 and fc4:**  
 `aten::mm` fc1 (`[256, 512] × [512, 2048]`, grid=[16, 2, 6] = 192 warps) places only **0.36 waves** on a 132-SM GPU (192 warps / 128 warps_per_wave / 132 SMs ≈ 0.01). SMs spend >90% of cycles idle waiting for the next wave. Similarly, fc4 (`[256, 2048] × [2048, 512]`) shows only 6.4% SM throughput. These are scheduler starvation signals: the tensors are simply too small at B=256 to fill the GPU.
@@ -116,7 +116,7 @@ The `__tanhf` special function routes through the SFU pipeline, which serializes
       "priority": 1,
       "bottleneck": "Zero TC utilization across all 40 mm kernels. Kernel2 = FP32 SGEMM,
                      smsp__pipe_tensor_cycles_active = 0. 98.3% of total time.",
-      "transformation": "model.to(torch.bfloat16). Routes all GEMMs to Blackwell WGMMA
+      "transformation": "model.to(torch.bfloat16). Routes all GEMMs to H100 WGMMA
                          path (sm90_xmma_gemm_bf16bf16). Expected TC utilization 0% → 60–80%.",
       "impact": "5–15× speedup on all mm kernels; 3.5ms → 0.3–0.7ms total.",
       "confidence": "high"
@@ -182,7 +182,7 @@ The `__tanhf` special function routes through the SFU pipeline, which serializes
 def get_model_and_input():
     model, x = _baseline_get_model_and_input()
 
-    # OPT-001: BF16 — routes all GEMMs to Blackwell WGMMA path
+    # OPT-001: BF16 — routes all GEMMs to H100 WGMMA path
     if next(model.parameters()).dtype != torch.bfloat16:
         model = model.to(torch.bfloat16)
         x = x.to(torch.bfloat16)
@@ -211,7 +211,7 @@ def pass_substitute_tanh(gm: fx.GraphModule) -> fx.GraphModule:
 
 `GELU(approximate='tanh')` computes the same function as `tanh` for large |x| and closely approximates it overall, using a degree-3 polynomial that executes entirely on the ALU pipeline. This eliminates the SFU bottleneck that reduced IPC to 0.05 and occupancy to 7.6%.
 
-> **Note on semantics:** The output range of `tanh` is (-1, 1) while `GELU(tanh)` is not strictly bounded. If the model was trained with exact `tanh` semantics, validate numerical output before deploying this substitution. For a drop-in replacement that preserves semantics exactly, a custom Triton kernel using `tl.math.tanh` (which compiles to vectorized polynomial on Blackwell) is the safer option.
+> **Note on semantics:** The output range of `tanh` is (-1, 1) while `GELU(tanh)` is not strictly bounded. If the model was trained with exact `tanh` semantics, validate numerical output before deploying this substitution. For a drop-in replacement that preserves semantics exactly, a custom Triton kernel using `tl.math.tanh` (which compiles to vectorized polynomial on H100) is the safer option.
 
 ### Optimization 3 — GEMM Epilogue Fusion (FX pass)
 
@@ -286,7 +286,7 @@ operator-profiler map runs/mlp_activations_optimized/optimized.manifest.json \
     --script run_workload.py \
     --output profile_optimized.json \
     --model-name "MLPActivations-Optimized" \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler \
@@ -316,7 +316,7 @@ The measured fc1 kernel (`triton_tem_fused_addmm_relu_t_0`, 7,136 ns) confirms *
 ### What Drove Each Speedup
 
 **BF16 (OPT-001) — the foundational change:**  
-Moving from FP32 to BF16 activates Blackwell's WGMMA units. The measured `triton_tem_fused_addmm_relu_t_0` kernel shows TC active at 38.96% — up from 0.0% in baseline Kernel2. This alone drives 3–4× of the per-GEMM speedup. The remaining factor comes from epilogue fusion eliminating the HBM round-trip between GEMM and activation.
+Moving from FP32 to BF16 activates H100's WGMMA units. The measured `triton_tem_fused_addmm_relu_t_0` kernel shows TC active at 38.96% — up from 0.0% in baseline Kernel2. This alone drives 3–4× of the per-GEMM speedup. The remaining factor comes from epilogue fusion eliminating the HBM round-trip between GEMM and activation.
 
 **Epilogue fusion (OPT-003) — eliminates 40 kernel launches:**  
 The baseline materializes every GEMM output to HBM before the activation kernel reads it back. By rewriting `mm+add → addmm` in the FX graph, Inductor fuses bias-add and activation into the GEMM epilogue. At [256, 2048] in BF16, each intermediate is 1 MB — eliminating the write+read saves 2 MB per layer × 4 layers = 8 MB of HBM traffic per forward pass. The 40 separate activation kernels collapse to zero.
@@ -343,7 +343,7 @@ Effective throughput gain: 6.2× more samples/second
 
 ### 1. `smsp__pipe_tensor_cycles_active = 0` is a red flag for any GEMM workload
 
-When this metric is zero across every matrix multiply, no Tensor Core work is happening — the GPU is using scalar FP32 SIMT for all matrix operations. On Blackwell, this leaves the highest-throughput execution units completely idle. The fix is almost always a dtype change: BF16 (or TF32 via `allow_tf32=True`) is sufficient to trigger the HMMA path. This is the highest-priority signal to look for when opening a new profile.
+When this metric is zero across every matrix multiply, no Tensor Core work is happening — the GPU is using scalar FP32 SIMT for all matrix operations. On H100, this leaves the highest-throughput execution units completely idle. The fix is almost always a dtype change: BF16 (or TF32 via `allow_tf32=True`) is sufficient to trigger the HMMA path. This is the highest-priority signal to look for when opening a new profile.
 
 ### 2. Activation function choice has measurable hardware impact
 

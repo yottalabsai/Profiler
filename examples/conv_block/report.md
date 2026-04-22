@@ -2,7 +2,7 @@
 
 This document walks through the full lifecycle of using the Operator Profiler to go from an unoptimized PyTorch VGG-style convolutional pipeline to a hardware-informed, optimized implementation — with real measured numbers at every step.
 
-**Hardware:** NVIDIA RTX PRO 6000 Blackwell Server Edition  
+**Hardware:** NVIDIA H100 SXM5 80GB  
 **Framework:** PyTorch 2.11 + torch.compile (Inductor backend)
 
 ---
@@ -69,7 +69,7 @@ This runs the workload under `nsys profile --trace=cuda,nvtx`, records every CUD
 operator-profiler map baseline.manifest.json \
     --script conv_block.py \
     --output profile.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler
@@ -91,7 +91,7 @@ The profile JSON captures 10 iterations. All durations below are **per forward p
 |---|---|---|---|---|---|
 | `aten::cudnn_convolution` × 3 (all stages) | **174,032 ns** | 9 | 8.3% (stgs 2–3) | 0% | convertTensor overhead + Kernel2 register pressure |
 | `aten::batch_norm` × 3 (+ MaxPool, AvgPool) | **33,094 ns** | 7 | variable | 0% | 7-kernel Triton decomp with redundant reduction passes |
-| `aten::addmm` (classifier 256→10) | **2,902 ns** | 1 | 8.2% | 0% | gemmSN_TN, 4 CTAs on 188-SM GPU |
+| `aten::addmm` (classifier 256→10) | **2,902 ns** | 1 | 8.2% | 0% | gemmSN_TN, 4 CTAs on 132-SM GPU |
 | `aten::conv2d` bias scatter | **2,352 ns** | 2 | 9.8% | 0% | one kernel reads only 12 bytes from DRAM |
 | **Total (one forward pass)** | **~212,380 ns** | ~20 | — | — | **212 µs at B=16** |
 
@@ -101,13 +101,13 @@ The profile JSON captures 10 iterations. All durations below are **per forward p
 cuDNN's HMMA path requires NHWC TF32 layout. When the model runs in FP32 NCHW, two `convertTensor_kernel` launches fire per convolution call — one for the input, one for the weight — before the actual GEMM executes. Over 10 iterations × 3 conv calls = 30 launches × 2 = 60 total `convertTensor` invocations, consuming **222,176 ns** (22.2 µs per forward pass, 10.5% of total). These kernels do zero arithmetic: they are pure format conversion with 0% Tensor Core activity.
 
 **Kernel2 register pressure at stages 2–3:**  
-For the 64→128 and 128→256 convolutions, cuDNN selects its implicit GEMM kernel (`Kernel2`) with **150 registers/thread**. With 128 threads per block, each block consumes 150 × 128 = 19,200 registers. A Blackwell SM has 65,536 registers, so at most `floor(65536 / 19200) = 3` blocks fit per SM — yielding **8.3% warp occupancy** (theoretical 100%). Tensor Core utilization is 67–73% within the few active warps, but SM throughput is only 54–60% because there are too few in-flight warps to hide memory latency. Stages 2–3 account for **44.1% of total kernel execution time** (72 µs/forward pass).
+For the 64→128 and 128→256 convolutions, cuDNN selects its implicit GEMM kernel (`Kernel2`) with **150 registers/thread**. With 128 threads per block, each block consumes 150 × 128 = 19,200 registers. An H100 SM has 65,536 registers, so at most `floor(65536 / 19200) = 3` blocks fit per SM — yielding **8.3% warp occupancy** (theoretical 100%). Tensor Core utilization is 67–73% within the few active warps, but SM throughput is only 54–60% because there are too few in-flight warps to hide memory latency. Stages 2–3 account for **44.1% of total kernel execution time** (72 µs/forward pass).
 
 **BatchNorm 7-kernel decomposition:**  
 Inductor decomposes inference-mode `_native_batch_norm_legit_no_training` into 7 Triton kernels, including two reduction passes (`triton_red` and `triton_per`) that re-read the activation tensor to accumulate channel means. At inference with frozen `running_mean` / `running_var`, these reductions are mathematically unnecessary — the statistics are constant. DRAM throughput at **67.6%** confirms the kernel is bandwidth-bound from extra passes. Total BN time: 33 µs (15.6% of wall time).
 
 **Degenerate addmm for the classifier head:**  
-`Linear(256, 10)` dispatches to `gemmSN_TN_kernel` with a grid of [2, 2, 1] = 4 thread blocks. On a 188-SM GPU this is **0.2% SM throughput** — the kernel finishes before a second wave can be scheduled. Both output dimension (N=10) and the need for tensor-core tiling (N must be ≥16 for FP16 TC) disqualify the fast path.
+`Linear(256, 10)` dispatches to `gemmSN_TN_kernel` with a grid of [2, 2, 1] = 4 thread blocks. On a 132-SM GPU this is **0.2% SM throughput** — the kernel finishes before a second wave can be scheduled. Both output dimension (N=10) and the need for tensor-core tiling (N must be ≥16 for FP16 TC) disqualify the fast path.
 
 The three biggest opportunities are clear:
 1. **BatchNorm expansion** (7-kernel → reducible to 1) — 15.6% of total
@@ -203,7 +203,7 @@ def get_model_and_input():
     return model, x
 ```
 
-FP16 is the single highest-leverage change: it eliminates all 60 `convertTensor` launches (22.2 µs) and activates cuDNN's HMMA path natively, delivering ~2× arithmetic throughput over FP32 SIMT on Blackwell hardware.
+FP16 is the single highest-leverage change: it eliminates all 60 `convertTensor` launches (22.2 µs) and activates cuDNN's HMMA path natively, delivering ~2× arithmetic throughput over FP32 SIMT on H100 hardware.
 
 ### Optimization 3 — BatchNorm Constant Folding (FX pass)
 
@@ -286,7 +286,7 @@ operator-profiler map runs/conv_block_optimized/optimized.manifest.json \
     --script run_workload.py \
     --output profile_optimized.json \
     --model-name "ConvBlock-Optimized" \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler \
@@ -394,7 +394,7 @@ operator-profiler profile conv_block.py \
 operator-profiler map runs/conv_block/baseline.manifest.json \
     --script conv_block.py \
     --output profile.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/repo

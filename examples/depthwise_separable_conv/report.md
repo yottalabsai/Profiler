@@ -2,7 +2,7 @@
 
 This document walks through the full lifecycle of using the Operator Profiler to go from an unoptimized MobileNet-style depthwise-separable convolutional network to a hardware-informed, optimized implementation — with real measured numbers at every step.
 
-**Hardware:** NVIDIA RTX PRO 6000 Blackwell Server Edition  
+**Hardware:** NVIDIA H100 SXM5 80GB  
 **Framework:** PyTorch 2.11 + torch.compile (Inductor backend)
 
 ---
@@ -63,7 +63,7 @@ operator-profiler profile depthwise_separable_conv.py \
 operator-profiler map baseline.manifest.json \
     --script depthwise_separable_conv.py \
     --output profile.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler
@@ -105,7 +105,7 @@ All durations are per forward pass (total / 10). "Wall time" includes CPU-side d
 With 130 kernel launches across 13 per-iteration and an average gap of 13.5 µs between kernels, the GPU is idle for more time than it is executing. This is a CPU-side dispatch bottleneck: each `cudaLaunchKernel` call on the host serializes through the CUDA API, and the GPU must wait for the next dispatch before the stream can continue. This is the highest-priority target because it affects *every* kernel in the pipeline.
 
 **Pointwise 1×1 conv (Kernel2) — shared memory wave starvation:**  
-The cuDNN implicit GEMM kernel for 1×1 convolutions allocates **73.7 KB of shared memory per block** with only 4 warps per block (`block_dim=[128,1,1]`). On a Blackwell GPU with ~192 KB shared memory per SM, only 1–2 blocks fit simultaneously, yielding **4–8 active warps vs. 64 maximum** — 8.1–8.6% occupancy. This kernel accounts for **44.1% of total kernel execution time** (72 µs per forward pass). The tensor core utilization of 18.7–45.3% reflects the FP32 TC rate; Blackwell delivers 2× more throughput on BF16 for the same TC operations.
+The cuDNN implicit GEMM kernel for 1×1 convolutions allocates **73.7 KB of shared memory per block** with only 4 warps per block (`block_dim=[128,1,1]`). On an H100 GPU with ~228 KB shared memory per SM, only 1–2 blocks fit simultaneously, yielding **4–8 active warps vs. 64 maximum** — 8.1–8.6% occupancy. This kernel accounts for **44.1% of total kernel execution time** (72 µs per forward pass). The tensor core utilization of 18.7–45.3% reflects the FP32 TC rate; H100 delivers 2× more throughput on BF16 for the same TC operations.
 
 **Depthwise 3×3 conv — zero Tensor Core utilization:**  
 cuDNN's depthwise path (`conv2d_c1_k1_nhwc`) does not decompose the computation into a GEMM and therefore **never engages Tensor Cores** (0% across all 30 depthwise instances). The operation is structurally memory-bound: a 3×3 depthwise kernel with groups=C_in has arithmetic intensity of only ≈9 FLOPs/element. The kernels achieve 47–73% DRAM peak, which is reasonable for a streaming kernel but cannot be improved via Tensor Core engagement. DRAM traffic pressure (FP32 = 4 bytes/element) is the lever.
@@ -163,11 +163,11 @@ Inductor correctly fuses `_native_batch_norm_legit_no_training + hardtanh` into 
     },
     {
       "id": "OPT-005",
-      "bottleneck": "FP32 throughout. Blackwell TCs deliver 2× more throughput on BF16.
+      "bottleneck": "FP32 throughout. H100 TCs deliver 2× more throughput on BF16.
                      Kernel2 TC utilization 18–45% is FP32 TC rate, not BF16 rate.
                      Depthwise memory-bound: BF16 halves bytes/element directly.",
       "transformation": "model.to(torch.bfloat16) before torch.compile(). BF16 preferred
-                         over FP16 on Blackwell (same throughput, wider dynamic range).",
+                         over FP16 on H100 (same throughput, wider dynamic range).",
       "impact": "40–80% throughput gain on pointwise; 50% memory reduction on depthwise;
                  25–35% net kernel-time reduction.",
       "confidence": "high"
@@ -274,7 +274,7 @@ operator-profiler map runs/dsc_optimized/optimized.manifest.json \
     --script run_workload.py \
     --output profile_optimized.json \
     --model-name "DepthwiseSeparableConv-Optimized" \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler \

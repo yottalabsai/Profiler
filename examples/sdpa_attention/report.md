@@ -2,7 +2,7 @@
 
 This document walks through the full lifecycle of using the Operator Profiler to go from an unoptimized PyTorch workload to a hardware-informed, optimized implementation — with real measured numbers at every step.
 
-**Hardware:** NVIDIA RTX PRO 6000 Blackwell Server Edition (188 SMs, 96 GB HBM3e)  
+**Hardware:** NVIDIA H100 SXM5 80GB (132 SMs, 80 GB HBM3)  
 **Framework:** PyTorch 2.11 + torch.compile (Inductor backend)
 
 ---
@@ -79,7 +79,7 @@ This runs the script under `nsys profile --trace=cuda,nvtx`, records every CUDA 
 operator-profiler map baseline.manifest.json \
     --script scripts/run_workload.py \
     --output profile.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler
@@ -214,7 +214,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 ```
 
-Setting `allow_tf32=True` routes all FP32 `aten::mm` nodes through cuBLAS's TF32 HMMA path without any graph-level changes. TF32 uses the same matrix dimensions as FP32 but executes with Tensor Core tiles (1.19 bits of mantissa precision vs FP32's 10 — but within the 0.4% error budget of most attention workloads). On Ampere/Blackwell, peak TF32 throughput is 8× over the FP32 SGEMM path.
+Setting `allow_tf32=True` routes all FP32 `aten::mm` nodes through cuBLAS's TF32 HMMA path without any graph-level changes. TF32 uses the same matrix dimensions as FP32 but executes with Tensor Core tiles (1.19 bits of mantissa precision vs FP32's 10 — but within the 0.4% error budget of most attention workloads). On Ampere/H100, peak TF32 throughput is 8× over the FP32 SGEMM path.
 
 For explicit BF16 (higher speedup, lower precision than TF32), the graph pass inserts dtype cast nodes:
 
@@ -274,7 +274,7 @@ def pass_replace_sdpa(gm: fx.GraphModule) -> fx.GraphModule:
     return gm
 ```
 
-This pass targets `aten._efficient_attention_forward` — the xformers FP32 FMHA op that Inductor selected for the baseline. It replaces it with `F.scaled_dot_product_attention` with BF16-cast Q/K/V inputs, which SDPA dispatches to FlashAttention-2 on Ampere/Blackwell. FA2 BF16 uses approximately 96 registers per thread (vs 168 for the xformers FP32 path), completely eliminating the 757,760 local-memory spill accesses per call. FA2 also uses O(N) memory instead of the xformers O(N²) approach, cutting attention intermediate memory by ~4× at seq=512.
+This pass targets `aten._efficient_attention_forward` — the xformers FP32 FMHA op that Inductor selected for the baseline. It replaces it with `F.scaled_dot_product_attention` with BF16-cast Q/K/V inputs, which SDPA dispatches to FlashAttention-2 on Ampere/H100. FA2 BF16 uses approximately 96 registers per thread (vs 168 for the xformers FP32 path), completely eliminating the 757,760 local-memory spill accesses per call. FA2 also uses O(N) memory instead of the xformers O(N²) approach, cutting attention intermediate memory by ~4× at seq=512.
 
 Note: `pass_replace_sdpa` runs **before** `pass_fuse_qkv` in the backend. The SDPA node may be connected to Q/K/V mm outputs; restructuring the attention first ensures the QKV fusion pass sees a clean graph.
 
@@ -425,7 +425,7 @@ operator-profiler profile scripts/run_workload.py \
 operator-profiler map runs/sdpa_attention_opt/opt.manifest.json \
     --script scripts/run_workload.py \
     --output profile_optimized.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler \

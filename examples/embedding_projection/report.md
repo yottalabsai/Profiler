@@ -2,7 +2,7 @@
 
 This document walks through the full lifecycle of using the Operator Profiler to go from an unoptimized embedding + projection head to a hardware-informed, optimized implementation — with real measured numbers at every step.
 
-**Hardware:** NVIDIA RTX PRO 6000 Blackwell Server Edition  
+**Hardware:** NVIDIA H100 SXM5 80GB  
 **Framework:** PyTorch 2.11 + torch.compile (Inductor backend)
 
 ---
@@ -65,7 +65,7 @@ operator-profiler profile embedding_projection.py \
 operator-profiler map baseline.manifest.json \
     --script embedding_projection.py \
     --output profile.json \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler
@@ -92,7 +92,7 @@ All durations are per forward pass (total / 10). B×T = 64 × 128 = 8,192 tokens
 ### Reading the Metrics
 
 **Zero Tensor Core utilization across all GEMM operators:**  
-Every `aten::mm` instance reports `smsp__pipe_tensor_cycles_active = 0.0`. This is the most critical single finding in the profile. `Kernel2` — cuBLAS's opaque internal name for its FP32 SGEMM path — is selected because TF32 is not enabled (`torch.backends.cuda.matmul.allow_tf32 = False` by default). Blackwell's WGMMA (Warp Group Matrix Multiply Accumulate) units, which deliver ~2× higher throughput over FP32 scalar SIMT, sit completely idle for the entire forward pass.
+Every `aten::mm` instance reports `smsp__pipe_tensor_cycles_active = 0.0`. This is the most critical single finding in the profile. `Kernel2` — cuBLAS's opaque internal name for its FP32 SGEMM path — is selected because TF32 is not enabled (`torch.backends.cuda.matmul.allow_tf32 = False` by default). H100's WGMMA (Warp Group Matrix Multiply Accumulate) units, which deliver ~2× higher throughput over FP32 scalar SIMT, sit completely idle for the entire forward pass.
 
 **Register pressure locks occupancy at 16.7%:**  
 `Kernel2` allocates **212 registers per thread** with 256 threads per block = 54,272 registers per block. A GPU with 65,536 registers per SM can fit at most `floor(65536 / 54272) = 1` block per SM. Theoretical occupancy ceiling: `1 block × 8 warps / 64 max warps = 12.5%`. Measured achieved occupancy: 16.7% — the SM can schedule a second block on some SMs but not all. The scheduler runs out of warps to issue 83% of the time.
@@ -290,7 +290,7 @@ operator-profiler map runs/embedding_projection_optimized/optimized.manifest.jso
     --script run_workload.py \
     --output profile_optimized.json \
     --model-name "EmbeddingProjection-Optimized" \
-    --device-name "NVIDIA RTX PRO 6000 Blackwell Server Edition" \
+    --device-name "NVIDIA H100 SXM5 80GB" \
     --ncu-executable /opt/nvidia/nsight-compute/2025.4.1/ncu \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/path/to/Profiler \
