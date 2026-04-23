@@ -87,7 +87,6 @@ def _run(args) -> None:
     correlation_map: dict[tuple[str, int], str] | None = None
     corr_sidecar = output_prefix.with_suffix(".corr.json")
     if corr_sidecar.exists():
-        import json
         data = json.loads(corr_sidecar.read_text())
         correlation_map = {
             (e["kernel_name"], e["invocation"]): e["op_name"]

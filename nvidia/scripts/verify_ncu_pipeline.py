@@ -20,12 +20,10 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
-from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
