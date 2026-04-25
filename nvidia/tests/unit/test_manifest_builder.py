@@ -232,3 +232,81 @@ class TestManifestBuilder:
         entry = manifest.kernels[0]
         assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
         assert entry.attribution.confidence == Confidence.LOW
+
+    # --- quantized:: and torch.library custom op attribution ---
+
+    def test_nvtx_quantized_op_medium_confidence(self):
+        """quantized:: NVTX range is accepted at MEDIUM confidence."""
+        kernel = make_kernel_row(kernel_name="quantized_linear_kernel")
+        nvtx = make_nvtx_row(text="quantized::linear", start_ns=900, end_ns=1300)
+        manifest = self._build([kernel], [nvtx])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NVTX
+        assert entry.attribution.confidence == Confidence.MEDIUM
+        assert entry.attribution.source_operators == ["quantized::linear"]
+
+    def test_nvtx_custom_op_medium_confidence(self):
+        """Arbitrary torch.library namespace NVTX range is accepted at MEDIUM confidence."""
+        kernel = make_kernel_row(kernel_name="flash_attn_fwd_kernel")
+        nvtx = make_nvtx_row(text="flash_attn::fwd", start_ns=900, end_ns=1300)
+        manifest = self._build([kernel], [nvtx])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NVTX
+        assert entry.attribution.confidence == Confidence.MEDIUM
+        assert entry.attribution.source_operators == ["flash_attn::fwd"]
+
+    def test_nvtx_prims_range_skipped_in_favour_of_outer_aten(self):
+        """prims:: is excluded — kernel enclosed by prims:: (inner) and aten::
+        (outer) is attributed to the aten:: range, not prims::."""
+        kernel = make_kernel_row(kernel_name="triton_mm_0", start_ns=500, end_ns=600)
+        outer = make_nvtx_row(text="aten::linear", start_ns=400, end_ns=700, nesting_level=1)
+        inner = make_nvtx_row(text="prims::mm", start_ns=450, end_ns=650, nesting_level=2)
+        manifest = self._build([kernel], [outer, inner])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NVTX
+        assert entry.attribution.source_operators == ["aten::linear"]
+
+    def test_nvtx_non_namespace_text_still_rejected(self):
+        """Non-namespace NVTX text (e.g. ProfilerStep#0) does not produce NVTX attribution."""
+        kernel = make_kernel_row(kernel_name="some_kernel")
+        nvtx = make_nvtx_row(text="ProfilerStep#0", start_ns=900, end_ns=1300)
+        manifest = self._build([kernel], [nvtx])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method != AttributionMethod.NVTX
+
+    def test_name_heuristic_quantized_linear_fragment(self):
+        """quantized_linear substring maps to quantized::linear at LOW confidence."""
+        kernel = make_kernel_row(kernel_name="quantized_linear_kernel_fp16")
+        manifest = self._build([kernel], [])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
+        assert entry.attribution.confidence == Confidence.LOW
+        assert entry.attribution.source_operators == ["quantized::linear"]
+
+    def test_name_heuristic_addmm_not_shadowed_by_add(self):
+        """addmm fragment must not be shadowed by the shorter 'add' fragment."""
+        kernel = make_kernel_row(kernel_name="volta_fp16_s884cudnn_addmm_kernel")
+        manifest = self._build([kernel], [])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
+        assert entry.attribution.source_operators == ["aten::addmm"]
+
+    def test_torch_profiler_quantized_op_high_confidence(self):
+        """quantized:: op in correlation map produces HIGH confidence."""
+        kernel = make_kernel_row(kernel_name="quantized_linear_kernel")
+        corr_map = {("quantized_linear_kernel", 0): "quantized::linear"}
+        manifest = self._build([kernel], [], correlation_map=corr_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.TORCH_PROFILER
+        assert entry.attribution.confidence == Confidence.HIGH
+        assert entry.attribution.source_operators == ["quantized::linear"]
+
+    def test_torch_profiler_custom_library_op_high_confidence(self):
+        """torch.library custom op in correlation map produces HIGH confidence."""
+        kernel = make_kernel_row(kernel_name="flash_attn_fwd_kernel")
+        corr_map = {("flash_attn_fwd_kernel", 0): "flash_attn::fwd"}
+        manifest = self._build([kernel], [], correlation_map=corr_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.TORCH_PROFILER
+        assert entry.attribution.confidence == Confidence.HIGH
+        assert entry.attribution.source_operators == ["flash_attn::fwd"]

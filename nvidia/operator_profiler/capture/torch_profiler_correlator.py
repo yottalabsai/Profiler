@@ -25,6 +25,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
+from nvidia.operator_profiler.utils.op_namespaces import is_attributed_op
+
 log = logging.getLogger(__name__)
 
 # Match "void " or "<type> " prefix, then optional "ns::ns::" namespace prefix
@@ -157,10 +159,10 @@ def _parse_chrome_trace(trace_path: Path) -> dict[tuple[str, int], str]:
         idx = name_counter[kernel_name]
         name_counter[kernel_name] += 1
 
-        # Only store entries where we have a direct aten:: attribution.
-        # Non-aten:: cpu_op names (e.g. Triton kernel names for compiled ops)
-        # fall through to NVTX / name-heuristic tiers in ManifestBuilder.
-        if op_name.startswith("aten::"):
+        # Only store entries for kernel-dispatching op namespaces (aten::,
+        # quantized::, torch.library custom ops).  Non-kernel namespaces and
+        # non-op cpu_op names fall through to NVTX / name-heuristic tiers.
+        if is_attributed_op(op_name):
             result[(kernel_name, idx)] = op_name
 
     log.info(

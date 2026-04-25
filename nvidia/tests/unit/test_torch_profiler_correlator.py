@@ -111,3 +111,43 @@ class TestParseChromeTrace:
             _cpu_op(1, "aten::mm", ts=100, dur=200, ext_id=7),
         ])
         assert _parse_chrome_trace(trace) == {}
+
+    # --- quantized:: and torch.library custom op attribution ---
+
+    def test_quantized_op_stored_in_correlation_map(self):
+        """quantized:: cpu_op is now stored (was previously filtered out)."""
+        trace = _write_trace([
+            _cpu_op(1, "quantized::linear", ts=100, dur=200, ext_id=7),
+            _gpu_kernel("quantized_linear_kernel", ext_id=7, ts=110.0),
+        ])
+        result = _parse_chrome_trace(trace)
+        assert ("quantized_linear_kernel", 0) in result
+        assert result[("quantized_linear_kernel", 0)] == "quantized::linear"
+
+    def test_custom_torch_library_op_stored(self):
+        """Arbitrary torch.library namespace is stored in correlation map."""
+        trace = _write_trace([
+            _cpu_op(1, "flash_attn::fwd", ts=100, dur=200, ext_id=8),
+            _gpu_kernel("flash_attn_fwd_kernel", ext_id=8, ts=110.0),
+        ])
+        result = _parse_chrome_trace(trace)
+        assert ("flash_attn_fwd_kernel", 0) in result
+        assert result[("flash_attn_fwd_kernel", 0)] == "flash_attn::fwd"
+
+    def test_prims_op_still_skipped(self):
+        """prims:: ops do not dispatch kernels directly and are excluded."""
+        trace = _write_trace([
+            _cpu_op(1, "prims::mm", ts=100, dur=200, ext_id=9),
+            _gpu_kernel("triton_mm_0", ext_id=9, ts=110.0),
+        ])
+        result = _parse_chrome_trace(trace)
+        assert ("triton_mm_0", 0) not in result
+
+    def test_non_namespace_cpu_op_still_skipped(self):
+        """Non-namespace cpu_op names (no '::') are still excluded."""
+        trace = _write_trace([
+            _cpu_op(1, "ProfilerStep#0", ts=100, dur=200, ext_id=10),
+            _gpu_kernel("some_kernel", ext_id=10, ts=110.0),
+        ])
+        result = _parse_chrome_trace(trace)
+        assert ("some_kernel", 0) not in result

@@ -53,6 +53,7 @@ from nvidia.operator_profiler.schema.profile import (
     NvtxRangeInfo,
 )
 from nvidia.operator_profiler.mapper.interval_tree import NvtxIntervalForest
+from nvidia.operator_profiler.utils.op_namespaces import is_attributed_op
 from nvidia.operator_profiler.mapper.nsys_export import (
     KernelRow,
     NvtxRow,
@@ -65,33 +66,48 @@ log = logging.getLogger(__name__)
 
 # Heuristics -----------------------------------------------------------
 
-# Known aten:: op name fragments that appear in CUDA/Triton kernel names.
-# Used as a fallback when Triton fused-name parsing yields nothing.
-_OP_NAME_FRAGMENTS: dict[str, str] = {
-    "gemm": "aten::mm",
-    "conv": "aten::conv2d",
-    "batch_norm": "aten::batch_norm",
-    "relu": "aten::relu",
-    "softmax": "aten::softmax",
-    "layer_norm": "aten::layer_norm",
-    "embedding": "aten::embedding",
-    "add": "aten::add",
-    "mul": "aten::mul",
-    "linear": "aten::linear",
-    "gelu": "aten::gelu",
-    "addmm": "aten::addmm",
-    "bmm": "aten::bmm",
-    "mm": "aten::mm",
-}
+# Kernel name substrings → op name, used as a fallback for cuBLAS/cuDNN/custom
+# kernels when Triton fused-name parsing yields nothing.
+# Ordered longest-first so more-specific fragments are matched before shorter
+# ones that are substrings of them (e.g. "addmm" before "add", "layer_norm"
+# before "norm" via batch_norm/layer_norm entries).
+_OP_NAME_FRAGMENTS: list[tuple[str, str]] = [
+    # quantized / int8 kernels
+    ("quantized_linear",      "quantized::linear"),
+    ("quantized_conv",        "quantized::conv2d"),
+    ("dequantize_per_tensor", "quantized::dequantize_per_tensor"),
+    ("quantize_per_tensor",   "quantized::quantize_per_tensor"),
+    ("int8_gemm",             "aten::int_mm"),
+    ("int4_gemm",             "aten::int_mm"),
+    ("int_mm",                "aten::int_mm"),
+    # standard aten:: kernels — longest-first
+    ("batch_norm",  "aten::batch_norm"),
+    ("layer_norm",  "aten::layer_norm"),
+    ("embedding",   "aten::embedding"),
+    ("softmax",     "aten::softmax"),
+    ("addmm",       "aten::addmm"),
+    ("linear",      "aten::linear"),
+    ("gelu",        "aten::gelu"),
+    ("gemm",        "aten::mm"),
+    ("conv",        "aten::conv2d"),
+    ("relu",        "aten::relu"),
+    ("bmm",         "aten::bmm"),
+    ("mul",         "aten::mul"),
+    ("add",         "aten::add"),
+    ("mm",          "aten::mm"),
+]
 
 # Triton inductor kernel prefix pattern:  triton_{kind}_fused_{tokens...}_{index}
 _TRITON_FUSED_RE = re.compile(
     r"^triton_[a-z]+_fused_([a-z0-9_]+?)_\d+$", re.IGNORECASE
 )
 
-# Tokens in the fused section that map directly to aten:: ops.
-# Ordered longest-first so "layer_norm" matches before "norm".
+# Tokens in the fused section that map to op names.
+# Ordered longest-first so longer tokens are matched before shorter prefixes.
 _TRITON_TOKEN_TO_OP: list[tuple[str, str]] = [
+    # quantized ops — longer than any existing entry, so naturally first
+    ("dequantize_per_tensor", "quantized::dequantize_per_tensor"),
+    ("quantize_per_tensor",   "quantized::quantize_per_tensor"),
     ("layer_norm",  "aten::layer_norm"),
     ("batch_norm",  "aten::batch_norm"),
     ("addmm",       "aten::addmm"),
@@ -102,6 +118,7 @@ _TRITON_TOKEN_TO_OP: list[tuple[str, str]] = [
     ("silu",        "aten::silu"),
     ("conv2d",      "aten::conv2d"),
     ("linear",      "aten::linear"),
+    ("int_mm",      "aten::int_mm"),
     ("bmm",         "aten::bmm"),
     ("mm",          "aten::mm"),
     ("add",         "aten::add"),
@@ -272,19 +289,20 @@ class ManifestBuilder:
         nvtx_query_ts = kr.cpu_launch_start_ns if kr.cpu_launch_start_ns else kr.start_ns
 
         # --- Priority 1: NVTX enclosure (medium confidence) ---
-        # Only accept ranges whose text is an aten:: op name. Walk from
-        # innermost outward and take the first aten:: match. Non-aten:: ranges
-        # (inductor graph markers, TorchDynamo internals, etc.) fall through.
+        # Accept any kernel-dispatching op namespace (aten::, quantized::, or
+        # any torch.library custom namespace).  Walk from innermost outward and
+        # take the first matching range.  Non-kernel namespaces (prims::,
+        # torch::) and non-op NVTX text fall through.
         all_ranges = forest.query_enclosing(nvtx_tid, kr.device_id, nvtx_query_ts)
-        aten_range = next(
-            (r for r in reversed(all_ranges) if r.text.startswith("aten::")),
+        op_range = next(
+            (r for r in reversed(all_ranges) if is_attributed_op(r.text)),
             None,
         )
-        if aten_range:
+        if op_range:
             return KernelAttribution(
                 method=AttributionMethod.NVTX,
-                source_operators=[aten_range.text],
-                nvtx_range=aten_range,
+                source_operators=[op_range.text],
+                nvtx_range=op_range,
                 confidence=Confidence.MEDIUM,
                 all_enclosing_ranges=all_ranges,
             )
@@ -344,9 +362,9 @@ class ManifestBuilder:
             if ops:
                 return ops
 
-        # 2. Substring fallback (cuBLAS, cuDNN, custom kernels)
+        # 2. Substring fallback (cuBLAS, cuDNN, quantized, custom kernels)
         lower = kernel_name.lower()
-        for fragment, op in _OP_NAME_FRAGMENTS.items():
+        for fragment, op in _OP_NAME_FRAGMENTS:
             if fragment in lower:
                 return [op]
         return []

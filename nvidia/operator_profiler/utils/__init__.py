@@ -8,6 +8,7 @@ from .clock_sync import (
     gpu_ns_to_ms,
 )
 from .validation import validate_input_shapes, ShapeMismatchError
+from .op_namespaces import is_attributed_op
 
 __all__ = [
     "run_subprocess",
@@ -20,4 +21,5 @@ __all__ = [
     "gpu_ns_to_ms",
     "validate_input_shapes",
     "ShapeMismatchError",
+    "is_attributed_op",
 ]
