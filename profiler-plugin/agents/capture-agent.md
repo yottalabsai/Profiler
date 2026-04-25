@@ -189,8 +189,10 @@ print(f'has_metrics: {has_metrics}')
 if len(ops) == 0:
     print('ERROR: no operators attributed — pipeline likely failed', file=sys.stderr)
     sys.exit(1)
-if len(unattr) > total * 0.5:
-    print('WARNING: >50% kernels unattributed — NVTX ranges may not have been emitted')
+if len(unattr) > total * 0.6:
+    print('WARNING: >60% kernels unattributed — NVTX ranges may not have been emitted')
+elif len(unattr) > total * 0.3:
+    print('INFO: >30% kernels unattributed — normal for Inductor without --correlation-pass (name heuristic tier removed)')
 "
 ```
 

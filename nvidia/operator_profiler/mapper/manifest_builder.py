@@ -8,10 +8,9 @@ Sources joined:
 Produces: MappingManifest
 
 Confidence scoring:
-  NVTX enclosure     → method=nvtx,            confidence=medium
-  name substring     → method=name_heuristic,  confidence=low
-    (includes Triton fused-name parsing: triton_*_fused_op1_op2_N)
-  no match           → method=unattributed,    confidence=unattributed
+  torch.profiler join → method=torch_profiler, confidence=high
+  NVTX enclosure      → method=nvtx,           confidence=medium
+  no match            → method=unattributed,   confidence=unattributed
 
 Edge cases handled here:
   #1  Clock domain  — we never join on absolute timestamps across tools.
@@ -20,24 +19,10 @@ Edge cases handled here:
                       initialization; detected via NVTX time boundary and excluded
                       from the operator-kernel mapping.  Duration-outlier heuristic
                       (>10× median) used as fallback when no NVTX data is present.
-  #7  Fused kernel  — store all enclosing ranges; mark is_fused=True when
-                      provenance reports multiple source_ops.
-
-torch.compile() / Triton note:
-  Inductor-compiled kernels have no Python cpu_parent chain (they launch from
-  C++), so the provenance sidecar approach yields nothing for compiled models.
-  The name heuristic tier handles compiled kernels by parsing the Triton kernel
-  identifier, which encodes fused op names:
-      triton_poi_fused_relu_addmm_0  →  aten::relu, aten::addmm
-  NVTX attribution still works because emit_nvtx() pushes aten:: ranges onto
-  the CPU timeline before handing off to the compiled graph.  Kernels launched
-  during warmup (before emit_nvtx is active) will be unattributed; the outlier
-  detector flags these separately.
 """
 from __future__ import annotations
 
 import logging
-import re
 import statistics
 from pathlib import Path
 
@@ -63,39 +48,6 @@ from nvidia.operator_profiler.mapper.nsys_export import (
 )
 
 log = logging.getLogger(__name__)
-
-# Heuristics -----------------------------------------------------------
-
-
-# Triton inductor kernel prefix pattern:  triton_{kind}_fused_{tokens...}_{index}
-_TRITON_FUSED_RE = re.compile(
-    r"^triton_[a-z]+_fused_([a-z0-9_]+?)_\d+$", re.IGNORECASE
-)
-
-# Tokens in the fused section that map to op names.
-# Ordered longest-first so longer tokens are matched before shorter prefixes.
-_TRITON_TOKEN_TO_OP: list[tuple[str, str]] = [
-    # quantized ops — longer than any existing entry, so naturally first
-    ("dequantize_per_tensor", "quantized::dequantize_per_tensor"),
-    ("quantize_per_tensor",   "quantized::quantize_per_tensor"),
-    ("layer_norm",  "aten::layer_norm"),
-    ("batch_norm",  "aten::batch_norm"),
-    ("addmm",       "aten::addmm"),
-    ("softmax",     "aten::softmax"),
-    ("embedding",   "aten::embedding"),
-    ("relu",        "aten::relu"),
-    ("gelu",        "aten::gelu"),
-    ("silu",        "aten::silu"),
-    ("conv2d",      "aten::conv2d"),
-    ("linear",      "aten::linear"),
-    ("int_mm",      "aten::int_mm"),
-    ("bmm",         "aten::bmm"),
-    ("mm",          "aten::mm"),
-    ("add",         "aten::add"),
-    ("mul",         "aten::mul"),
-    ("sub",         "aten::sub"),
-    ("div",         "aten::div"),
-]
 
 # Ratio above which a kernel duration is flagged as a warm-up outlier
 _WARMUP_OUTLIER_RATIO = 10.0
@@ -277,59 +229,11 @@ class ManifestBuilder:
                 all_enclosing_ranges=all_ranges,
             )
 
-        # --- Priority 2: kernel name heuristic (low confidence) ---
-        # Handles both Triton inductor names (triton_*_fused_op1_op2_N) and
-        # cuBLAS/cuDNN names via substring matching.
-        heuristic_ops = self._name_heuristic(kr.kernel_name)
-        if heuristic_ops:
-            return KernelAttribution(
-                method=AttributionMethod.NAME_HEURISTIC,
-                source_operators=heuristic_ops,
-                confidence=Confidence.LOW,
-                is_fused=len(heuristic_ops) > 1,
-            )
-
         # --- Fallback: unattributed ---
         return KernelAttribution(
             method=AttributionMethod.UNATTRIBUTED,
             confidence=Confidence.UNATTRIBUTED,
         )
-
-    @staticmethod
-    def _name_heuristic(kernel_name: str) -> list[str]:
-        """
-        Return a list of ops inferred from an Inductor Triton kernel name.
-
-        Matches triton_{kind}_fused_{tokens}_{index} and greedily parses the
-        fused token section against _TRITON_TOKEN_TO_OP (longest-first).
-        Non-Triton kernels (cuBLAS, cuDNN, custom CUDA) are attributed by the
-        NVTX tier; if that tier also misses them they become UNATTRIBUTED.
-
-        Returns an empty list if no match is found.
-        """
-        m = _TRITON_FUSED_RE.match(kernel_name)
-        if not m:
-            return []
-
-        token_str = m.group(1)   # e.g. "relu_addmm" or "layer_norm"
-        ops: list[str] = []
-        remaining = token_str
-        while remaining:
-            matched = False
-            for token, op in _TRITON_TOKEN_TO_OP:
-                if remaining == token or remaining.startswith(token + "_"):
-                    if op not in ops:
-                        ops.append(op)
-                    remaining = remaining[len(token):]
-                    if remaining.startswith("_"):
-                        remaining = remaining[1:]
-                    matched = True
-                    break
-            if not matched:
-                # Skip one underscore-delimited token we don't recognise
-                parts = remaining.split("_", 1)
-                remaining = parts[1] if len(parts) > 1 else ""
-        return ops
 
     def _detect_initialization_kernels(
         self, kernel_rows: list[KernelRow], nvtx_rows: list[NvtxRow]

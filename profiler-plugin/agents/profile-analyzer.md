@@ -116,7 +116,7 @@ Check these conditions and add them to `edge_case_flags[]`:
 5. **dynamic_shapes**: High variance in `duration_ns` across kernels with the same `kernel_name` (>50% coefficient of variation) → different input shapes triggered different trace paths
 6. **clock_domain**: If any `start_ns` is negative or absurdly large → timestamp domain issue; trust only `duration_ns`, not absolute times
 7. **ncu_replay_timing**: ALL `duration_ns` values in `profile.json` come from ncu replay, not real execution. They are 2–5× longer than actual wall time. Use them for relative comparison only, never for absolute latency estimates.
-8. **high_unattributed**: `len(unattributed_kernels) > 0.1 * total_kernels` → attribution confidence is reduced
+8. **high_unattributed**: `len(unattributed_kernels) > 0.3 * total_kernels` → attribution confidence is reduced. Note: with the name heuristic tier removed, unattributed rates of 20–40% are normal for Inductor-compiled models without `--correlation-pass`. Rates above 50% indicate NVTX ranges are likely not being emitted.
 
 ## Output Format
 

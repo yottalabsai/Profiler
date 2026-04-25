@@ -79,5 +79,5 @@ Key cuBLAS kernel names and what they indicate:
 | `sm90_xmma_gemm_bf16bf16_*` | BF16 WGMMA (Hopper/Blackwell Tensor Core) | Optimal — no action needed |
 | `sm80_xmma_gemm_f16f16_*` | FP16 HMMA (Ampere Tensor Core) | Optimal for FP16 — no action needed |
 | `convertTensor_kernel` | Memory layout coercion (NCHW ↔ NHWC) | Apply `memory_format=torch.channels_last` at model creation |
-| `triton__*_fused_*` | Fused Triton kernel from Inductor | Check op names in kernel name for attribution |
+| `triton__*_fused_*` | Fused Triton kernel from Inductor | Attribution via NVTX or torch.profiler correlation only; appears in `unattributed_kernels` if neither matched |
 | `volta_fp16_s884*` | Legacy FP16 Tensor Core (Volta/Turing) | Use `torch.compile` with `mode='max-autotune'` |

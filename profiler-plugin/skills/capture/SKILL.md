@@ -144,10 +144,13 @@ The capture is successful when `profile.json`:
 1. Exists and is valid JSON
 2. Has non-empty `operators[]` array
 3. Has `operators[*].aggregated != null` (metrics were collected)
-4. Has `unattributed_kernels` count < 50% of total kernel count
+4. Has `unattributed_kernels` count < 60% of total kernel count
 
-If `unattributed_kernels` is high (> 20%), check:
-- Was `emit_nvtx()` / `--correlation-pass` active during capture?
+**Expected unattributed rates:** With the name heuristic attribution tier removed, kernels that cannot be matched by torch.profiler correlation (HIGH) or NVTX enclosure (MEDIUM) go directly to `unattributed_kernels`. Rates of 20–40% are normal for Inductor-compiled models. To reduce unattributed rate, always pass `--correlation-pass`.
+
+If `unattributed_kernels` exceeds 60%, check:
+- Was `--correlation-pass` used during capture? (provides HIGH confidence matching for most kernels)
+- Were NVTX ranges emitted? (`--trace=cuda,nvtx` must be set in nsys flags)
 - Did torch.compile complete before the measurement window?
 - Is the model using `cudagraphs` mode? (Graph replay kernels have different attribution)
 

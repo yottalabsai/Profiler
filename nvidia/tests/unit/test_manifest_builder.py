@@ -5,9 +5,7 @@ Uses mocked nsys SQLite so no real GPU hardware is needed.
 
 Verifies:
   - NVTX enclosure → method=nvtx, confidence=medium
-  - Name heuristic only → method=name_heuristic, confidence=low
   - No match → method=unattributed, confidence=unattributed
-  - Fused kernel (multiple source_ops from heuristic) → is_fused=True
   - Warm-up outlier detection (edge case #4)
 """
 from __future__ import annotations
@@ -21,7 +19,7 @@ import pytest
 from nvidia.operator_profiler.mapper.manifest_builder import ManifestBuilder, _WARMUP_OUTLIER_RATIO
 from nvidia.operator_profiler.mapper.nsys_export import KernelRow, NvtxRow
 from nvidia.operator_profiler.schema.manifest import CaptureManifestMetadata
-from nvidia.operator_profiler.schema.profile import AttributionMethod, Confidence, NvtxRangeInfo
+from nvidia.operator_profiler.schema.profile import AttributionMethod, Confidence
 
 
 def make_metadata(**kwargs) -> CaptureManifestMetadata:
@@ -117,16 +115,6 @@ class TestManifestBuilder:
         # Should fall back to heuristic or unattributed — not NVTX
         entry = manifest.kernels[0]
         assert entry.attribution.method != AttributionMethod.NVTX
-
-    # --- Name heuristic ---
-
-    def test_name_heuristic_low_confidence(self):
-        kernel = make_kernel_row(kernel_name="triton_poi_fused_relu_0")
-        manifest = self._build([kernel], [])
-        entry = manifest.kernels[0]
-        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
-        assert entry.attribution.confidence == Confidence.LOW
-        assert entry.attribution.source_operators == ["aten::relu"]
 
     # --- Unattributed fallback ---
 

@@ -50,7 +50,9 @@ Use consistent `--warmup-iters` and `--measure-iters` between the nsys capture a
 
 ## Attribution
 
-Two tiers (provenance sidecar was removed — it did not work reliably):
-1. **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range pushed by `emit_nvtx`
-2. **Name heuristic** (`low` confidence) — Triton kernel name parsed to infer the fused aten ops
+Two tiers (provenance sidecar was removed — it did not work reliably; name heuristic tier was also removed):
+1. **torch.profiler correlation** (`high` confidence) — kernel matched via `--correlation-pass` CUPTI data
+2. **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range pushed by `emit_nvtx`
+
+Kernels that cannot be matched by either tier are stored in `unattributed_kernels[]`. With the name heuristic removed, Triton fused kernels that previously received `low` confidence attribution now appear in `unattributed_kernels`. Expect higher unattributed rates (~20–40%) for Inductor-compiled models without `--correlation-pass`.
 
