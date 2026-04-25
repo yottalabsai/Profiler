@@ -121,12 +121,12 @@ class TestManifestBuilder:
     # --- Name heuristic ---
 
     def test_name_heuristic_low_confidence(self):
-        kernel = make_kernel_row(kernel_name="volta_gemm_fp32_nn_128x128")
+        kernel = make_kernel_row(kernel_name="triton_poi_fused_relu_0")
         manifest = self._build([kernel], [])
         entry = manifest.kernels[0]
         assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
         assert entry.attribution.confidence == Confidence.LOW
-        assert entry.attribution.source_operators == ["aten::mm"]
+        assert entry.attribution.source_operators == ["aten::relu"]
 
     # --- Unattributed fallback ---
 
@@ -226,12 +226,12 @@ class TestManifestBuilder:
         assert manifest.kernels[1].attribution.confidence == Confidence.HIGH
 
     def test_no_correlation_map_unchanged_behavior(self):
-        """Without correlation_map, existing NVTX logic is unaffected."""
+        """Without correlation_map, non-Triton kernels with no NVTX are UNATTRIBUTED."""
         kernel = make_kernel_row(kernel_name="volta_gemm_fp32_nn_128x128")
         manifest = self._build([kernel], [])
         entry = manifest.kernels[0]
-        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
-        assert entry.attribution.confidence == Confidence.LOW
+        assert entry.attribution.method == AttributionMethod.UNATTRIBUTED
+        assert entry.attribution.confidence == Confidence.UNATTRIBUTED
 
     # --- quantized:: and torch.library custom op attribution ---
 
@@ -273,23 +273,6 @@ class TestManifestBuilder:
         manifest = self._build([kernel], [nvtx])
         entry = manifest.kernels[0]
         assert entry.attribution.method != AttributionMethod.NVTX
-
-    def test_name_heuristic_quantized_linear_fragment(self):
-        """quantized_linear substring maps to quantized::linear at LOW confidence."""
-        kernel = make_kernel_row(kernel_name="quantized_linear_kernel_fp16")
-        manifest = self._build([kernel], [])
-        entry = manifest.kernels[0]
-        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
-        assert entry.attribution.confidence == Confidence.LOW
-        assert entry.attribution.source_operators == ["quantized::linear"]
-
-    def test_name_heuristic_addmm_not_shadowed_by_add(self):
-        """addmm fragment must not be shadowed by the shorter 'add' fragment."""
-        kernel = make_kernel_row(kernel_name="volta_fp16_s884cudnn_addmm_kernel")
-        manifest = self._build([kernel], [])
-        entry = manifest.kernels[0]
-        assert entry.attribution.method == AttributionMethod.NAME_HEURISTIC
-        assert entry.attribution.source_operators == ["aten::addmm"]
 
     def test_torch_profiler_quantized_op_high_confidence(self):
         """quantized:: op in correlation map produces HIGH confidence."""

@@ -66,36 +66,6 @@ log = logging.getLogger(__name__)
 
 # Heuristics -----------------------------------------------------------
 
-# Kernel name substrings → op name, used as a fallback for cuBLAS/cuDNN/custom
-# kernels when Triton fused-name parsing yields nothing.
-# Ordered longest-first so more-specific fragments are matched before shorter
-# ones that are substrings of them (e.g. "addmm" before "add", "layer_norm"
-# before "norm" via batch_norm/layer_norm entries).
-_OP_NAME_FRAGMENTS: list[tuple[str, str]] = [
-    # quantized / int8 kernels
-    ("quantized_linear",      "quantized::linear"),
-    ("quantized_conv",        "quantized::conv2d"),
-    ("dequantize_per_tensor", "quantized::dequantize_per_tensor"),
-    ("quantize_per_tensor",   "quantized::quantize_per_tensor"),
-    ("int8_gemm",             "aten::int_mm"),
-    ("int4_gemm",             "aten::int_mm"),
-    ("int_mm",                "aten::int_mm"),
-    # standard aten:: kernels — longest-first
-    ("batch_norm",  "aten::batch_norm"),
-    ("layer_norm",  "aten::layer_norm"),
-    ("embedding",   "aten::embedding"),
-    ("softmax",     "aten::softmax"),
-    ("addmm",       "aten::addmm"),
-    ("linear",      "aten::linear"),
-    ("gelu",        "aten::gelu"),
-    ("gemm",        "aten::mm"),
-    ("conv",        "aten::conv2d"),
-    ("relu",        "aten::relu"),
-    ("bmm",         "aten::bmm"),
-    ("mul",         "aten::mul"),
-    ("add",         "aten::add"),
-    ("mm",          "aten::mm"),
-]
 
 # Triton inductor kernel prefix pattern:  triton_{kind}_fused_{tokens...}_{index}
 _TRITON_FUSED_RE = re.compile(
@@ -328,46 +298,38 @@ class ManifestBuilder:
     @staticmethod
     def _name_heuristic(kernel_name: str) -> list[str]:
         """
-        Return a list of aten:: ops inferred from *kernel_name*.
+        Return a list of ops inferred from an Inductor Triton kernel name.
 
-        Strategy (in order):
-        1. Triton inductor fused name: triton_{kind}_fused_{tokens}_{index}
-           Parse the fused token section against _TRITON_TOKEN_TO_OP.
-        2. Substring fallback for cuBLAS/cuDNN/custom CUDA kernels.
+        Matches triton_{kind}_fused_{tokens}_{index} and greedily parses the
+        fused token section against _TRITON_TOKEN_TO_OP (longest-first).
+        Non-Triton kernels (cuBLAS, cuDNN, custom CUDA) are attributed by the
+        NVTX tier; if that tier also misses them they become UNATTRIBUTED.
 
         Returns an empty list if no match is found.
         """
-        # 1. Triton fused name
         m = _TRITON_FUSED_RE.match(kernel_name)
-        if m:
-            token_str = m.group(1)   # e.g. "relu_addmm" or "layer_norm"
-            ops: list[str] = []
-            remaining = token_str
-            # Greedy left-to-right scan: consume the longest matching prefix
-            while remaining:
-                matched = False
-                for token, op in _TRITON_TOKEN_TO_OP:
-                    if remaining == token or remaining.startswith(token + "_"):
-                        if op not in ops:
-                            ops.append(op)
-                        remaining = remaining[len(token):]
-                        if remaining.startswith("_"):
-                            remaining = remaining[1:]
-                        matched = True
-                        break
-                if not matched:
-                    # Skip one underscore-delimited token we don't recognise
-                    parts = remaining.split("_", 1)
-                    remaining = parts[1] if len(parts) > 1 else ""
-            if ops:
-                return ops
+        if not m:
+            return []
 
-        # 2. Substring fallback (cuBLAS, cuDNN, quantized, custom kernels)
-        lower = kernel_name.lower()
-        for fragment, op in _OP_NAME_FRAGMENTS:
-            if fragment in lower:
-                return [op]
-        return []
+        token_str = m.group(1)   # e.g. "relu_addmm" or "layer_norm"
+        ops: list[str] = []
+        remaining = token_str
+        while remaining:
+            matched = False
+            for token, op in _TRITON_TOKEN_TO_OP:
+                if remaining == token or remaining.startswith(token + "_"):
+                    if op not in ops:
+                        ops.append(op)
+                    remaining = remaining[len(token):]
+                    if remaining.startswith("_"):
+                        remaining = remaining[1:]
+                    matched = True
+                    break
+            if not matched:
+                # Skip one underscore-delimited token we don't recognise
+                parts = remaining.split("_", 1)
+                remaining = parts[1] if len(parts) > 1 else ""
+        return ops
 
     def _detect_initialization_kernels(
         self, kernel_rows: list[KernelRow], nvtx_rows: list[NvtxRow]
