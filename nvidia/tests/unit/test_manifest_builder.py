@@ -165,6 +165,31 @@ class TestManifestBuilder:
         assert "outer_op" in texts
         assert "aten::linear" in texts
 
+    def test_nvtx_multi_op_ranges_collected_as_fused(self):
+        """Consecutive op ranges from innermost outward are all collected.
+        aten::addmm (inner) nested inside aten::linear (outer) → both in
+        source_operators, is_fused=True."""
+        kernel = make_kernel_row(kernel_name="gemm_k", start_ns=500, end_ns=600)
+        outer = make_nvtx_row(text="aten::linear", start_ns=400, end_ns=700, nesting_level=1)
+        inner = make_nvtx_row(text="aten::addmm", start_ns=450, end_ns=650, nesting_level=2)
+        manifest = self._build([kernel], [outer, inner])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NVTX
+        assert entry.attribution.confidence == Confidence.MEDIUM
+        assert entry.attribution.is_fused is True
+        assert entry.attribution.source_operators == ["aten::addmm", "aten::linear"]
+
+    def test_nvtx_structural_boundary_stops_collection(self):
+        """Non-namespace text (ProfilerStep#0) stops the walk — only aten:: ranges
+        between the kernel and the boundary are collected."""
+        kernel = make_kernel_row(kernel_name="gemm_k", start_ns=500, end_ns=600)
+        step = make_nvtx_row(text="ProfilerStep#0", start_ns=0, end_ns=2000, nesting_level=0)
+        op = make_nvtx_row(text="aten::mm", start_ns=400, end_ns=700, nesting_level=1)
+        manifest = self._build([kernel], [step, op])
+        entry = manifest.kernels[0]
+        assert entry.attribution.source_operators == ["aten::mm"]
+        assert entry.attribution.is_fused is False
+
     # --- torch.profiler HIGH confidence tier ---
 
     def test_torch_profiler_high_confidence(self):

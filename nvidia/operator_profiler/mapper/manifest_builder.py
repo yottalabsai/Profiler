@@ -211,22 +211,32 @@ class ManifestBuilder:
         nvtx_query_ts = kr.cpu_launch_start_ns if kr.cpu_launch_start_ns else kr.start_ns
 
         # --- Priority 1: NVTX enclosure (medium confidence) ---
-        # Accept any kernel-dispatching op namespace (aten::, quantized::, or
-        # any torch.library custom namespace).  Walk from innermost outward and
-        # take the first matching range.  Non-kernel namespaces (prims::,
-        # torch::) and non-op NVTX text fall through.
+        # Walk from innermost range outward collecting every kernel-dispatching
+        # op namespace (aten::, quantized::, torch.library custom).
+        # Non-kernel namespaces (prims::, torch::) have "::" so we skip them
+        # and keep walking — they sit between an inner and outer aten:: range
+        # in the eager dispatch chain.
+        # Stop at the first structural boundary (no "::" at all — e.g.
+        # ProfilerStep#0, TorchDynamo annotations) since those mark the edge
+        # of the op call stack.
+        # When multiple op ranges are collected the kernel implements all of
+        # them (e.g. aten::addmm nested inside aten::linear in eager mode).
         all_ranges = forest.query_enclosing(nvtx_tid, kr.device_id, nvtx_query_ts)
-        op_range = next(
-            (r for r in reversed(all_ranges) if is_attributed_op(r.text)),
-            None,
-        )
-        if op_range:
+        op_ranges: list[NvtxRangeInfo] = []
+        for r in reversed(all_ranges):
+            if is_attributed_op(r.text):
+                op_ranges.append(r)
+            elif "::" not in r.text:
+                break
+            # else: namespace but not attributed (prims::, torch::) — skip
+        if op_ranges:
             return KernelAttribution(
                 method=AttributionMethod.NVTX,
-                source_operators=[op_range.text],
-                nvtx_range=op_range,
+                source_operators=[r.text for r in op_ranges],
+                nvtx_range=op_ranges[0],
                 confidence=Confidence.MEDIUM,
                 all_enclosing_ranges=all_ranges,
+                is_fused=len(op_ranges) > 1,
             )
 
         # --- Fallback: unattributed ---

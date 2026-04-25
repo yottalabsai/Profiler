@@ -1,0 +1,13 @@
+{
+  "name": "my-plugins",
+  "owner": {
+    "name": "Your Name"
+  },
+  "plugins": [
+    {
+      "name": "profiler-plugin",
+      "source": "./plugins/profiler-plugin",
+      "description": "End-to-end GPU optimization workflow for PyTorch models"
+    }
+  ]
+}
