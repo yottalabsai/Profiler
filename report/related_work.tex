@@ -1,0 +1,52 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{GPU profiling infrastructure.}
+\texttt{torch.profiler} and its Kineto backend \cite{kineto2021} record operator-level wall-clock
+durations and Chrome traces, but expose no hardware performance counters. NVIDIA Nsight
+Systems~\cite{nsightsystems} and Nsight Compute~\cite{nsightcompute} together provide the data
+that \sys consumes---timeline annotations and per-kernel hardware metrics---but provide no
+automatic operator attribution: the bridge between the two tools has historically been manual.
+NVIDIA DCGM and Dynolog \cite{dynolog2023} target cluster-level monitoring rather than
+per-operator hardware attribution. \sys is the first system to \emph{automatically} attribute
+\ncu hardware counters to \texttt{aten::} operators via NVTX enclosure and to close the
+attribution-to-optimization loop within the Torch Dynamo compilation stack.
+
+\paragraph{Deep learning compilers.}
+TorchDynamo and TorchInductor~\cite{pytorch2024} compile PyTorch programs to Triton kernels using
+heuristic fusion rules (pointwise chaining, matmul epilogue fusion), but do not incorporate
+hardware counter feedback in pass selection.  \sys wraps Inductor as a downstream delegate and
+inserts hardware-evidence-motivated FX passes \emph{before} Inductor's lowering step, creating a
+feedback loop that Inductor alone lacks.  TVM~\cite{tvm2018} and Halide~\cite{halide2013} optimize
+tensor programs via measurement-based auto-tuning and schedule/algorithm separation respectively;
+neither uses per-kernel hardware counters to decide which optimization class to apply.
+ONNX Runtime and TensorRT perform layer fusion and quantization but present black-box interfaces
+that cannot be extended for custom architectures or augmented with profiling evidence.
+
+\paragraph{Attention and fused kernel libraries.}
+FlashAttention~\cite{flashattention2022} and FlashAttention-2~\cite{flashattention2023} tile
+attention computation to keep the $[B, H, S, S]$ attention matrix in on-chip SRAM, eliminating
+DRAM round-trips and the register-spill pathology diagnosed by \sys in the SDPA workload.
+\sys's FlashAttention substitution pass identifies when profiling evidence (\texttt{l2\_hit\_rate
+$< 20\%$}, local memory spills $> 0$) warrants the substitution and applies it automatically via
+an FX graph pattern replacement. xFormers~\cite{xformers2022} provides a static library of fused
+attention variants; \sys is complementary: it determines \emph{which} variant is warranted for a
+specific operator's hardware counter profile. Triton~\cite{triton2019} provides the JIT compilation
+framework underlying Inductor kernels; \sys additionally \emph{parses} Triton kernel names to
+recover fused operator identity when NVTX annotation is unavailable.
+
+\paragraph{Profile-guided optimization.}
+Classic PGO in C/C++ compilers (GCC, LLVM) collects branch frequency profiles and uses them to
+guide inlining, unrolling, and layout decisions \cite{autofdo2016}.  Our system is the neural
+network analog: instead of branch counts, we collect hardware performance counter profiles and use
+them to select FX graph transformations.  The roofline model~\cite{williams2009roofline}---the
+theoretical framework underlying our bottleneck taxonomy---has been applied to HPC kernels but not
+previously operationalized for automated operator-level pass selection in a deep learning compiler.
+
+\paragraph{Inference optimization frameworks.}
+vLLM~\cite{vllm2023} and SGLang~\cite{sglang2024} achieve high LLM serving throughput via
+PagedAttention, continuous batching, and memory pooling.  These frameworks operate at the
+scheduling level; their hand-coded kernels (BF16 GEMMs, FA2) represent the operator-level
+optimizations that \sys \emph{discovers automatically} from hardware profiling for arbitrary
+architectures.  The two systems are complementary: \sys can profile a workload running inside
+vLLM to identify residual kernel-level inefficiencies not covered by serving-layer scheduling.

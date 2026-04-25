@@ -1,0 +1,144 @@
+% -------------------------------------------------------
+% PREREQUISITE: Download neurips_2024.sty from
+%   https://neurips.cc/Conferences/2024/PaperInformation/StyleFiles
+% Place neurips_2024.sty in this directory before compiling.
+% To compile: pdflatex main && bibtex main && pdflatex main && pdflatex main
+% -------------------------------------------------------
+
+\documentclass{article}
+
+% NeurIPS 2024 style — preprint mode (remove [preprint] for double-blind submission)
+\usepackage[preprint]{neurips_2024}
+
+% -------------------------------------------------------
+% Core typography and layout
+% -------------------------------------------------------
+\usepackage{microtype}
+\usepackage{times}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[inline]{enumitem}    % \begin{itemize}[...], \begin{enumerate*}
+\usepackage{xspace}      % \xspace for macros
+
+% -------------------------------------------------------
+% Tables
+% -------------------------------------------------------
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{colortbl}
+\usepackage{xcolor}
+
+% -------------------------------------------------------
+% Math
+% -------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+
+% -------------------------------------------------------
+% Algorithms
+% -------------------------------------------------------
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% -------------------------------------------------------
+% Code listings
+% -------------------------------------------------------
+\usepackage{listings}
+\lstdefinestyle{sqlstyle}{
+  language=SQL,
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{red!60!black},
+  breaklines=true,
+  frame=single,
+  numbers=none,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+}
+\lstdefinestyle{pystyle}{
+  language=Python,
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray!70},
+  stringstyle=\color{red!60!black},
+  breaklines=true,
+  frame=single,
+  numbers=none,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+}
+
+% -------------------------------------------------------
+% Graphics
+% -------------------------------------------------------
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage[export]{adjustbox}
+
+% -------------------------------------------------------
+% References and links
+% -------------------------------------------------------
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black}
+\usepackage{cleveref}
+
+% -------------------------------------------------------
+% TODOs (remove before camera-ready)
+% -------------------------------------------------------
+\usepackage[colorinlistoftodos]{todonotes}
+\newcommand{\TODO}[1]{\todo[inline,color=yellow!40]{#1}}
+\newcommand{\MEASURE}[1]{\todo[inline,color=orange!40]{MEASURE: #1}}
+
+% -------------------------------------------------------
+% Convenience macros
+% -------------------------------------------------------
+\newcommand{\sys}{Operator Profiler\xspace}
+\newcommand{\nsys}{\texttt{nsys}\xspace}
+\newcommand{\ncu}{\texttt{ncu}\xspace}
+\newcommand{\aten}[1]{\texttt{aten::#1}}
+\newcommand{\figref}[1]{Figure~\ref{#1}}
+\newcommand{\tabref}[1]{Table~\ref{#1}}
+\newcommand{\secref}[1]{Section~\ref{#1}}
+\newcommand{\algref}[1]{Algorithm~\ref{#1}}
+\newcommand{\equref}[1]{Eq.~(\ref{#1})}
+\newcommand{\etal}{\textit{et~al.}\xspace}
+\newcommand{\eg}{\textit{e.g.,}\xspace}
+\newcommand{\ie}{\textit{i.e.,}\xspace}
+\definecolor{highcol}{HTML}{1f4e79}
+\definecolor{medcol}{HTML}{2e75b6}
+\definecolor{lowcol}{HTML}{9dc3e6}
+\definecolor{ucol}{HTML}{bfbfbf}
+
+% -------------------------------------------------------
+% Document
+% -------------------------------------------------------
+\title{Hardware-Attributed GPU Operator Profiling\\
+       and Profile-Guided Optimization for PyTorch}
+
+\author{%
+  % Double-blind: authors omitted
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\input{abstract}
+\end{abstract}
+
+\input{intro}
+\input{background}
+\input{method}
+\input{main_experiment}
+\input{related_work}
+\input{conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

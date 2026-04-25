@@ -1,0 +1,13 @@
+Framework profilers expose operator timing without hardware counters; GPU profilers expose hardware
+counters without operator attribution. Bridging this gap manually is error-prone and does not scale.
+We present \textbf{\sys}, which automatically links NVIDIA Nsight Compute hardware metrics to
+PyTorch \texttt{aten::} operators via NVTX temporal enclosure with per-stream interval trees and
+invocation-order matching---avoiding timestamp joins across incompatible clock domains. A curated
+20-counter metric set with duration-weighted aggregation covers all hardware bottleneck axes across
+Ampere, Hopper, and Blackwell architectures. Attributed profiles drive a custom Torch Dynamo backend
+that applies hardware-evidence-motivated FX graph passes---BF16 casting, QKV fusion, FlashAttention
+substitution, weight pre-transposition---before Inductor compilation. Across five workloads on two
+production GPUs (RTX PRO 6000 Blackwell, H100 SXM5), \sys achieves \textbf{2.7--6.3$\times$}
+end-to-end speedup, with hardware counters confirming bottleneck elimination in every case: Tensor
+Core utilization rises from 0\% to ${\sim}85\%$, register spills drop from 757,760 to zero, and
+achieved occupancy improves from 8.3\% to ${\sim}50\%$.

@@ -1,0 +1,81 @@
+\section{Introduction}
+\label{sec:intro}
+
+The throughput of a GPU workload is determined by a handful of hardware bottlenecks: memory
+bandwidth saturation, Tensor Core under-utilization, register-pressure-limited occupancy, or wave
+starvation from insufficient parallelism. NVIDIA provides tools to measure each---Nsight Compute
+(\ncu) collects over 90 hardware counters per kernel invocation---yet the dominant optimization
+workflow for PyTorch practitioners remains largely manual: profile timing in \texttt{torch.profiler},
+identify the slow operator, guess at the cause, edit the model, repeat. The bottleneck taxonomy
+(compute-bound vs.\ memory-bound vs.\ occupancy-limited) that Williams \etal
+\cite{williams2009roofline} formalized for HPC remains difficult to apply at the operator level in
+PyTorch, not because the hardware data is absent, but because nothing bridges it to the framework.
+
+\paragraph{The attribution gap.}
+\texttt{torch.profiler} and Kineto \cite{kineto2021} record wall-clock durations for each
+\texttt{aten::} operator, but do not access hardware counters. \ncu collects per-kernel hardware
+metrics---occupancy, DRAM bytes, Tensor Core utilization, cache hit rates---but its output is keyed
+on internal CUDA kernel names such as
+\texttt{ampere\_sgemm\_128x32\_tn} or \texttt{triton\_poi\_fused\_relu\_addmm\_0}, with no awareness
+of which PyTorch operator dispatched them. Bridging the two requires matching records across two
+profiling tools that run in separate passes, use incompatible clock domains (CUPTI GPU timestamps
+vs.\ \ncu injection-mode timestamps), and produce outputs with no shared stable key.
+
+\paragraph{Why existing solutions fall short.}
+The manual bridging workflow---run \nsys to record the kernel timeline, run \ncu for hardware
+counters, manually correlate by kernel name---is $O(\text{operators})$ human effort per model
+variant, breaks completely for Triton-fused kernels (whose names encode fused operations as opaque
+hash suffixes), and does not compose with the feedback loop needed for profile-guided optimization.
+TorchInductor \cite{pytorch2024} applies graph-level fusion heuristically, without hardware counter
+feedback; the question ``did this fusion actually improve Tensor Core utilization?'' has no
+programmatic answer in the standard toolchain.
+
+\paragraph{Our approach.}
+We observe that reliable attribution does not require timestamp matching.  Because \ncu replays
+kernels in the same execution order they appear in the \nsys trace, a kernel's position within a
+\texttt{(kernel\_name, invocation\_index)} sequence is a stable identifier that is clock-immune.
+For operator-level attribution, the NVTX ranges that \texttt{torch.autograd.profiler.emit\_nvtx}
+pushes around every \texttt{aten::} dispatch form a temporal bracket on the host CPU timeline;
+per-stream interval trees over these ranges attribute each kernel to its enclosing operator in
+$O(\log n)$ per query. For Triton-fused kernels with no NVTX bracket, a regex parser extracts the
+constituent operator names from the mangled kernel identifier.
+
+\paragraph{Contributions.}
+We present \textbf{\sys}, a hardware-attributed GPU profiling and profile-guided optimization
+system for PyTorch. Our contributions are:
+
+\begin{enumerate}
+
+\item \textbf{Two-tier attribution pipeline (\secref{sec:attribution}).}  A
+  \texttt{StreamIntervalTree} keyed on \texttt{(stream\_id, device\_id)} pairs attributes each
+  CUDA kernel to an \texttt{aten::} operator via NVTX temporal enclosure (MEDIUM confidence) or
+  Triton kernel name heuristics (LOW confidence). A torch.profiler invocation-order join provides
+  HIGH-confidence attribution for registered operators. Invocation-order matching between \nsys and
+  \ncu avoids clock-domain joins. Eight edge cases---multi-stream execution, CUDA Graph replay, JIT
+  warm-up kernels, async launches, dynamic shapes, and fused kernels---are handled explicitly.
+
+\item \textbf{20-counter curated metric set (\secref{sec:metrics}).}  Twenty hardware counters
+  spanning all bottleneck axes are collected with architecture-specific name fallbacks for Ampere,
+  Hopper, and Blackwell. Duration-weighted aggregation ensures that long-running kernels dominate
+  operator-level summaries when multiple kernels are attributed to one operator.
+
+\item \textbf{Custom Torch Dynamo PGO backend (\secref{sec:pgo}).}  A \texttt{@register\_backend}
+  hook inserts six hardware-evidence-motivated FX graph passes at the Aten IR level before Inductor
+  lowering: BF16 casting, QKV projection fusion, FlashAttention substitution, weight
+  pre-transposition, activation normalization, and batch padding.  Each pass is triggered only when
+  the profiler diagnoses the specific counter symptom that motivates it.
+
+\item \textbf{Closed-loop validation (\secref{sec:experiments}).}  A four-step protocol---profile
+  $\to$ diagnose $\to$ transform $\to$ re-profile---verifies that hardware bottlenecks are
+  eliminated, not merely shifted.  Per-operator hardware counter deltas confirm systematic
+  improvement across all five evaluated workloads.
+
+\end{enumerate}
+
+\paragraph{Results.}
+On a TransformerBlock (hidden dim 512, 8 heads, FFN ratio $4\times$) running on an NVIDIA RTX PRO
+6000 Blackwell, \sys achieves \textbf{6.3$\times$} per-sample speedup over the eager-mode FP32
+baseline. Tensor Core utilization rises from 0\% to ${\sim}85\%$; register spills from the FMHA
+kernel drop from 757,760 to zero; Waves/SM on the Q/K/V projections rises from 0.11 to 0.68.
+Across five workloads on two GPU architectures, end-to-end speedups range from 2.7$\times$ to
+6.3$\times$, each verified by hardware counter before-and-after comparison.

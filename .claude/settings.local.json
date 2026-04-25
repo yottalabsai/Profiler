@@ -98,7 +98,8 @@
       "Bash(PYTHONPATH=/home/ubuntu/Profiler python3:*)",
       "Bash(/tmp/run_op_profiler.sh map:*)",
       "Bash(PYTHONPATH=/home/ubuntu/Profiler/nvidia python3 -m pytest tests/unit/test_manifest_builder.py -x -q)",
-      "Bash(nvidia-smi --query-gpu=name --format=csv,noheader)"
+      "Bash(nvidia-smi --query-gpu=name --format=csv,noheader)",
+      "Bash(xargs grep *)"
     ]
   }
 }

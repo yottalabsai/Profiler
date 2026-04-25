@@ -1,0 +1,36 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \sys, a hardware-attributed GPU profiling and profile-guided optimization system that
+bridges the gap between PyTorch's operator-level abstractions and NVIDIA's kernel-level hardware
+performance counters. Our four contributions---a two-tier attribution pipeline with per-stream
+interval trees and invocation-order matching; a 20-counter curated metric set with duration-weighted
+aggregation and architecture-specific fallbacks; a custom Torch Dynamo PGO backend with six
+FX graph passes; and a closed-loop validation protocol---collectively enable the first automated,
+evidence-driven optimization loop at the intersection of PyTorch operator profiling and hardware
+counter measurement.
+
+The key result is not the 6.3$\times$ speedup number itself, but what it is built from: every
+optimization decision is grounded in a specific hardware counter reading (e.g., \texttt{tensor\_core\_active\_pct
+= 0\%} $\to$ apply BF16 cast; \texttt{local\_memory\_spills = 757,760} $\to$ apply FlashAttention
+substitution; \texttt{Waves/SM = 0.11} $\to$ apply QKV fusion), and every claimed improvement is
+verified by re-profiling with the same hardware counter pipeline.  This makes optimizations
+reproducible, auditable, and non-trivially distinct from rule-of-thumb best practices: some
+bottlenecks (register spill in FMHA, TN layout penalty in the FFN down-projection) are invisible
+to wall-clock profilers and require hardware counter attribution to diagnose.
+
+\paragraph{Limitations.}
+Attribution coverage degrades for heavily fused Triton models where kernel names are ambiguous or
+absent.  \ncu serializes kernels for replay, making concurrent multi-stream profiles require
+separate per-stream runs.  The FX pass set is hand-designed; automatic pass selection from
+counter evidence---for example, via learned thresholds or reinforcement learning over the
+bottleneck-to-pass mapping---is left as future work.
+
+\paragraph{Future work.}
+Online profiling via CUPTI Perfworks streaming would eliminate the separate \ncu pass, enabling
+profiling during ordinary training without a dedicated replay run.  Multi-GPU attribution with
+NCCL stream synchronization events would extend the pipeline to distributed workloads.
+Counter-guided neural architecture search---using per-operator hardware utilization as a fitness
+signal rather than validation accuracy alone---represents a longer-term direction for hardware-aware
+model design.  Finally, extending the counter name mapping and pass library to AMD ROCm (\texttt{rocprof}
++ \texttt{rocm-smi}) would generalize \sys beyond NVIDIA hardware.

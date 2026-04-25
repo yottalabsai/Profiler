@@ -1,0 +1,191 @@
+% -------------------------------------------------------
+% Core frameworks
+% -------------------------------------------------------
+
+@inproceedings{pytorch2019,
+  author    = {Paszke, Adam and Gross, Sam and Massa, Francisco and
+               Lerer, Adam and Bradbury, James and Chanan, Gregory and
+               Killeen, Trevor and Lin, Zeming and Gimelshein, Natalia and
+               Antiga, Luca and Desmaison, Alban and K{\"{o}}pf, Andreas and
+               Yang, Edward and DeVito, Zachary and Raison, Martin and
+               Tejani, Alykhan and Chilamkurthy, Sasank and Steiner, Benoit and
+               Fang, Lu and Bai, Junjie and Chintala, Soumith},
+  title     = {{PyTorch}: An Imperative Style, High-Performance Deep Learning Library},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2019}
+}
+
+@inproceedings{pytorch2024,
+  author    = {Ansel, Jason and Yang, Edward and He, Horace and
+               Gimelshein, Natalia and Jain, Animesh and Voznesensky, Michael and
+               Bao, Bin and Bell, Peter and Berard, David and Burovski, Evgeni and
+               Chauhan, Geeta and Chourdia, Anjali and Cummins, Will and
+               DeVito, Zachary and Diakopoulos, Nikita and Ellison, Damien and
+               Feng, William and Gao, Jiong and others},
+  title     = {{PyTorch} 2: Faster Machine Learning Through Dynamic {Python}
+               Bytecode Transformation and Graph Compilation},
+  booktitle = {Proceedings of the 29th ACM International Conference on
+               Architectural Support for Programming Languages and Operating
+               Systems (ASPLOS)},
+  year      = {2024}
+}
+
+% -------------------------------------------------------
+% Profiling tools
+% -------------------------------------------------------
+
+@misc{kineto2021,
+  author       = {{PyTorch Contributors}},
+  title        = {Kineto: A {CPU}+{GPU} Profiling Library},
+  howpublished = {\url{https://github.com/pytorch/kineto}},
+  year         = {2021}
+}
+
+@misc{nsightcompute,
+  author       = {{NVIDIA Corporation}},
+  title        = {{Nsight Compute} Documentation},
+  howpublished = {\url{https://docs.nvidia.com/nsight-compute/}},
+  year         = {2025}
+}
+
+@misc{nsightsystems,
+  author       = {{NVIDIA Corporation}},
+  title        = {{Nsight Systems} Documentation},
+  howpublished = {\url{https://docs.nvidia.com/nsight-systems/}},
+  year         = {2025}
+}
+
+@inproceedings{dynolog2023,
+  author    = {Zhang, Xu and Bhowmick, Ritika and Chen, Jingwen and
+               Diwakar, Prabhat and Islam, Sazzad and Kijewski, Brian and
+               others},
+  title     = {Dynolog: A System-Wide Continuous Profiler for Cloud Infrastructure},
+  booktitle = {Proceedings of the 18th European Conference on Computer Systems (EuroSys)},
+  year      = {2023}
+}
+
+% -------------------------------------------------------
+% Roofline and performance modeling
+% -------------------------------------------------------
+
+@article{williams2009roofline,
+  author  = {Williams, Samuel and Waterman, Andrew and Patterson, David},
+  title   = {Roofline: An Insightful Visual Performance Model for Multicore
+             Architectures},
+  journal = {Communications of the {ACM}},
+  volume  = {52},
+  number  = {4},
+  pages   = {65--76},
+  year    = {2009}
+}
+
+% -------------------------------------------------------
+% Compilers and optimization
+% -------------------------------------------------------
+
+@inproceedings{tvm2018,
+  author    = {Chen, Tianqi and Moreau, Thierry and Jiang, Ziheng and
+               Zheng, Lianmin and Yan, Eddie and Cowan, Meghan and
+               Shen, Haichen and Wang, Leyuan and Hu, Yuwei and Ceze, Luis
+               and Guestrin, Carlos and Krishnamurthy, Arvind},
+  title     = {{TVM}: An Automated End-to-End Optimizing Compiler for Deep
+               Learning},
+  booktitle = {13th {USENIX} Symposium on Operating Systems Design and
+               Implementation ({OSDI})},
+  year      = {2018}
+}
+
+@inproceedings{halide2013,
+  author    = {Ragan-Kelley, Jonathan and Barnes, Connelly and Adams, Andrew
+               and Paris, Sylvain and Durand, Fr{\'e}d{\'e}ric and Amarasinghe, Saman},
+  title     = {Halide: A Language and Compiler for Optimizing Parallelism,
+               Locality, and Recomputation in Image Processing Pipelines},
+  booktitle = {{ACM} {SIGPLAN} Conference on Programming Language Design and
+               Implementation ({PLDI})},
+  year      = {2013}
+}
+
+@inproceedings{autofdo2016,
+  author    = {Chen, Dehao and Moseley, Tipp and Li, David Xinliang},
+  title     = {{AutoFDO}: Automatic Feedback-Directed Optimization for
+               Warehouse-Scale Applications},
+  booktitle = {{IEEE/ACM} International Symposium on Code Generation and
+               Optimization ({CGO})},
+  year      = {2016}
+}
+
+% -------------------------------------------------------
+% Triton and kernel libraries
+% -------------------------------------------------------
+
+@inproceedings{triton2019,
+  author    = {Tillet, Philippe and Kung, H.~T. and Cox, David},
+  title     = {Triton: An Intermediate Language and Compiler for Tiled
+               Neural Network Computations},
+  booktitle = {Proceedings of the 3rd {ACM} {SIGPLAN} International Workshop on
+               Machine Learning and Programming Languages ({MAPL})},
+  year      = {2019}
+}
+
+@inproceedings{flashattention2022,
+  author    = {Dao, Tri and Fu, Daniel~Y. and Ermon, Stefano and
+               Rudra, Atri and R{\'e}, Christopher},
+  title     = {{FlashAttention}: Fast and Memory-Efficient Exact Attention
+               with {IO}-Awareness},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022}
+}
+
+@inproceedings{flashattention2023,
+  author    = {Dao, Tri},
+  title     = {{FlashAttention-2}: Faster Attention with Better Parallelism
+               and Work Partitioning},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year      = {2024}
+}
+
+@misc{xformers2022,
+  author       = {Lefaudeux, Benjamin and Massa, Francisco and Liskovich, Diana
+                  and Xiong, Wenhan and Caggiano, Vittorio and Nelli, Sean and
+                  Xu, Mel and Hu, Jieru and Tintore, Marta and Zhang, Susan
+                  and others},
+  title        = {{xFormers}: A Modular and Hackable Transformer Modelling Library},
+  howpublished = {\url{https://github.com/facebookresearch/xformers}},
+  year         = {2022},
+  note         = {arXiv:2204.04853}
+}
+
+% -------------------------------------------------------
+% Inference and serving frameworks
+% -------------------------------------------------------
+
+@inproceedings{vllm2023,
+  author    = {Kwon, Woosuk and Li, Zhuohan and Zhuang, Siyuan and Sheng, Ying
+               and Zheng, Lianmin and Yu, Cody~Hao and Gonzalez, Joseph and
+               Zhang, Hao and Stoica, Ion},
+  title     = {Efficient Memory Management for Large Language Model Serving
+               with {PagedAttention}},
+  booktitle = {{ACM} Symposium on Operating Systems Principles ({SOSP})},
+  year      = {2023}
+}
+
+@inproceedings{sglang2024,
+  author    = {Zheng, Lianmin and Yin, Liangsheng and Xie, Zhiqiang and Sun, Jeff
+               and Huang, Chuyue and Yu, Cody~Hao and Cao, Shiyi and
+               Kozyrakis, Christos and Stoica, Ion and Gonzalez, Joseph~E.
+               and others},
+  title     = {{SGLang}: Efficient Execution of Structured Language Model Programs},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2024}
+}
+
+% -------------------------------------------------------
+% CUDA infrastructure
+% -------------------------------------------------------
+
+@misc{cudagraphs2020,
+  author       = {{NVIDIA Corporation}},
+  title        = {{CUDA} Graphs},
+  howpublished = {\url{https://developer.nvidia.com/blog/cuda-graphs/}},
+  year         = {2020}
+}

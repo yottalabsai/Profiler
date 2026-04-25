@@ -1,0 +1,400 @@
+\section{Attribution Pipeline}
+\label{sec:attribution}
+
+\sys ingests two data sources produced for the same workload run: (1) an \nsys SQLite export
+containing CUDA kernel activity and NVTX range annotations, and (2) \ncu CSV output containing
+per-kernel hardware counter measurements. The pipeline produces a hardware-attributed
+\texttt{OperatorProfile}: a JSON document mapping each \texttt{aten::} operator to its constituent
+kernels, their hardware metrics, and the confidence tier of each attribution.
+
+\subsection{Data Ingestion}
+\label{sec:ingestion}
+
+\textbf{Nsight Systems export.}  Running the workload under
+\texttt{nsys profile --trace=cuda,nvtx} produces a \texttt{.nsys-rep} file, exported to SQLite
+via \texttt{nsys export --type=sqlite}. \sys queries three tables:
+
+\begin{lstlisting}[style=sqlstyle,caption={Kernel and NVTX range extraction from the \nsys SQLite export.}]
+-- CUDA kernel activity (GPU-domain timestamps)
+SELECT k.correlationId, s.value AS kernel_name,
+       k.start AS start_ns, k.end AS end_ns,
+       k.streamId, k.deviceId,
+       k.gridX, k.gridY, k.gridZ,
+       k.blockX, k.blockY, k.blockZ,
+       r.globalTid AS host_tid,
+       r.start      AS cpu_launch_start_ns
+FROM   CUPTI_ACTIVITY_KIND_KERNEL k
+JOIN   StringIds s ON s.id = k.shortName
+LEFT JOIN CUPTI_ACTIVITY_KIND_RUNTIME r
+       ON r.correlationId = k.correlationId
+ORDER  BY k.start ASC;
+
+-- NVTX range annotations (CPU-domain timestamps)
+SELECT n.text, n.start AS start_ns, n.end AS end_ns,
+       n.nestingLevel, n.globalTid AS stream_id
+FROM   NVTX_EVENTS n
+WHERE  n.end IS NOT NULL
+ORDER  BY n.start ASC;
+\end{lstlisting}
+
+The \texttt{cpu\_launch\_start\_ns} field from the RUNTIME table is the host-side timestamp when
+the CUDA kernel launch API returned, providing a CPU-domain anchor for NVTX bracket queries
+without conflating it with the GPU-domain kernel execution timestamp (\secref{sec:clockdomain}).
+
+\textbf{Nsight Compute export.}  For each unique kernel name found in the \nsys trace, \sys
+invokes:
+\begin{lstlisting}[style=pystyle]
+ncu --kernel-name <name> --replay-mode kernel \
+    --metrics <comma_separated_list> \
+    --export <output.ncu-rep> \
+    <replay_script.py>
+\end{lstlisting}
+The resulting \texttt{.ncu-rep} is exported to CSV (\texttt{ncu --import --csv}), producing one
+row per kernel invocation per metric.
+
+\subsection{The Clock Domain Problem and Invocation-Order Matching}
+\label{sec:clockdomain}
+
+The fundamental obstacle in cross-tool profiling is that \nsys and \ncu observe the same kernel
+execution through incompatible timing mechanisms. \nsys records CUPTI GPU-domain timestamps from
+the hardware's free-running clock. \ncu replays kernels in an isolated profiling pass with injected
+performance counter reads; its internal invocation clock reflects replay-mode execution, not the
+original capture clock. On a single GPU, these two clocks routinely diverge by 10--100~$\mu$s per
+kernel due to replay serialization and PMU injection overhead. A naive timestamp join would
+incorrectly associate hardware counter measurements with the wrong operator---especially dangerous
+for operators with similar execution times.
+
+\textbf{Invocation-Order Matching (Algorithm~\ref{alg:iom}).}  The key insight is that \ncu
+replays kernels in the same execution order they appear in the \nsys timeline: the $i$-th
+invocation of kernel $K$ in the \nsys trace corresponds to the $i$-th row for kernel $K$ in the
+\ncu CSV output.  We exploit this ordering to assign hardware metrics without any timestamp
+comparison:
+
+\begin{algorithm}[t]
+\caption{Invocation-Order Matching (\nsys $\times$ \ncu)}
+\label{alg:iom}
+\begin{algorithmic}[1]
+\Require \texttt{nsys\_kernels}: list of \texttt{KernelRow} sorted by \texttt{start\_ns} per stream
+\Require \texttt{ncu\_rows}: list of \texttt{NcuRow} sorted by invocation index per kernel name
+\Ensure  Each \texttt{KernelRow} assigned a \texttt{KernelMetrics} object
+\State $\textit{counter} \gets \text{defaultdict}(\text{int})$
+  \Comment{per kernel name}
+\For{$k \in \texttt{nsys\_kernels}$}
+  \State $i \gets \textit{counter}[k.\textit{name}]$
+  \State $k.\textit{metrics} \gets \texttt{ncu\_rows}[k.\textit{name}][i]$
+  \State $\textit{counter}[k.\textit{name}] \mathrel{+}= 1$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+This matching is correct when the workload is deterministic and input shapes are identical between
+the \nsys capture and the \ncu replay.  Shape validation before the replay step enforces this
+invariant (\secref{sec:edgecases}).
+
+\subsection{StreamIntervalTree Attribution}
+\label{sec:intervaltree}
+
+For each unique \texttt{(stream\_id, device\_id)} pair observed in the \nsys trace, \sys
+constructs a \texttt{StreamIntervalTree}: a sorted list of NVTX ranges indexed by
+\texttt{start\_ns}, implemented using Python's \texttt{sortedcontainers.SortedList} for
+$O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = number of enclosing ranges).
+
+\begin{algorithm}[t]
+\caption{NVTX Enclosure Attribution (MEDIUM Confidence)}
+\label{alg:nvtx}
+\begin{algorithmic}[1]
+\Require Kernel row $k$ with \texttt{cpu\_launch\_start\_ns}, \texttt{stream\_id}
+\Require \texttt{forest}: map from \texttt{(stream\_id, device\_id)} to \texttt{SortedList}
+\Ensure Attribution at MEDIUM confidence, or fall through to heuristic
+\State $T \gets k.\textit{cpu\_launch\_start\_ns}$
+\State $\textit{ranges} \gets$ \texttt{forest}[$k.\textit{stream\_id}$].query\_enclosing($T$)
+  \Comment{all NVTX ranges $[s,e]$ with $s \le T \le e$}
+\If{$|\textit{ranges}| = 0$}
+  \State \textbf{fall through} to name heuristic (\secref{sec:heuristic})
+\ElsIf{$|\textit{ranges}| = 1$}
+  \State $k.\textit{operator} \gets \textit{ranges}[0].\textit{text}$,
+         \textit{confidence} $\gets$ MEDIUM
+\Else
+  \State $k.\textit{operator} \gets \arg\max_r r.\textit{nesting\_level}$
+         \Comment{innermost (most specific) enclosing range}
+  \State $k.\textit{is\_fused} \gets \top$;
+         $k.\textit{all\_enclosing} \gets \textit{ranges}$
+         \Comment{fused kernel spans multiple operators}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+The \texttt{cpu\_launch\_start\_ns} field is used as the query point rather than the GPU
+\texttt{start\_ns}, because NVTX ranges are CPU-side events and the async gap between host launch
+and GPU execution makes GPU timestamps unreliable for enclosure queries.
+
+\subsection{Triton Name Heuristic Attribution}
+\label{sec:heuristic}
+
+When NVTX enclosure fails (no enclosing range exists at the query point), \sys parses the kernel
+name for low-confidence attribution. Triton-fused kernel names follow the pattern:
+\begin{center}
+  \texttt{triton\_\{kind\}\_fused\_\{tok\_1\}\_\{tok\_2\}\_\ldots\_\{tok\_n\}\_\{index\}}
+\end{center}
+where each \texttt{tok\_i} is one of a known vocabulary
+(\texttt{layer\_norm}, \texttt{addmm}, \texttt{relu}, \texttt{gelu}, \texttt{softmax},
+\texttt{mm}, \texttt{conv2d}, \etc). \sys extracts tokens left-to-right against a longest-match
+vocabulary and assigns the kernel to the primary operator (first match), recording all matches
+as \texttt{source\_operators} to support fused-kernel analysis.  For non-Triton kernels (cuBLAS,
+cuDNN), a substring dictionary maps name fragments (\texttt{gemm}, \texttt{conv}, \texttt{batch\_norm})
+to \texttt{aten::} equivalents.
+
+\subsection{Confidence Tiers}
+\label{sec:tiers}
+
+\begin{table}[t]
+\centering
+\caption{Attribution confidence tiers in \sys.  Coverage percentages are measured over kernel
+  \emph{runtime} (not kernel count) across the five evaluated workloads in eager compilation mode.}
+\label{tab:tiers}
+\small
+\begin{tabular}{llp{4.2cm}c}
+\toprule
+\textbf{Tier} & \textbf{Evidence} & \textbf{Trigger Condition} & \textbf{Typical Runtime Coverage} \\
+\midrule
+\rowcolor{highcol!15}
+HIGH & torch.profiler invocation-order join & Kineto trace available; kernel count agrees with operator dispatch count & 35--45\% \\
+\rowcolor{medcol!15}
+MEDIUM & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range & 45--55\% \\
+\rowcolor{lowcol!15}
+LOW & Triton/cuBLAS name heuristic & Kernel name contains parseable op tokens & 5--15\% \\
+\rowcolor{ucol!15}
+UNATTRIBUTED & None & Library-internal kernels (cuDNN helpers, NCCL) & 1--10\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Edge Cases}
+\label{sec:edgecases}
+
+\sys explicitly handles the following attribution edge cases:
+
+\begin{enumerate}[leftmargin=1.5em]
+
+\item \textbf{Clock domain mismatch.} Invocation-order matching (\algref{alg:iom}) makes
+  attribution clock-immune by construction.
+
+\item \textbf{CUDA Graph replay.} During graph capture, operators emit NVTX ranges and kernels are
+  attributed normally.  During replay, new GPU timestamps with no NVTX correspondence are generated.
+  \sys detects replay by the absence of NVTX events in the replay window and replays the attribution
+  cache from the capture phase.
+
+\item \textbf{Multi-stream execution.} Each \texttt{(stream\_id, device\_id)} pair has its own
+  \texttt{StreamIntervalTree}, preventing cross-stream false matches.
+
+\item \textbf{JIT warm-up kernels.} Kernels launched before the first NVTX range (JIT compilation
+  artifacts) are flagged using a duration-outlier heuristic ($> 10\times$ median kernel duration)
+  and excluded from operator mapping.
+
+\item \textbf{Async kernel launch.} NVTX push/pop occurs on the host before the kernel executes on
+  the GPU.  The RUNTIME table's \texttt{cpu\_launch\_start\_ns} field provides a host-side anchor
+  that lies within the NVTX range, whereas the GPU \texttt{start\_ns} may not.
+
+\item \textbf{Dynamic shapes.} \sys validates that input shapes at \ncu replay match those recorded
+  during \nsys capture; a \texttt{ShapeMismatchError} is raised otherwise.
+
+\item \textbf{Fused kernels.} When multiple NVTX ranges enclose a single kernel (Triton-fused
+  cross-operator), \sys sets \texttt{is\_fused=True} and stores all enclosing ranges in
+  \texttt{all\_enclosing\_ranges} for downstream analysis.
+
+\item \textbf{ncu timing independence.} \ncu timestamps are internal to each replay run and are
+  discarded entirely; only metric values are extracted from \ncu output.
+
+\end{enumerate}
+
+% -------------------------------------------------------
+\section{Metric Set and Aggregation}
+\label{sec:metrics}
+
+\subsection{Counter Selection Rationale}
+
+Collecting all 90+ \ncu counters is expensive (multiple replay passes) and produces profiles too
+large for operator-level analysis.  We select 20 counters according to three criteria:
+(1)~coverage of every bottleneck axis in the roofline taxonomy (\secref{sec:roofline});
+(2)~availability of a valid counter name on Ampere, Hopper, \emph{and} Blackwell (some counters
+were renamed in the Blackwell GB202 silicon); (3)~non-redundancy (no two selected counters
+correlate perfectly).
+
+\subsection{The 20-Counter Set}
+
+\begin{table}[t]
+\centering
+\caption{The 20 hardware counters collected by \sys.  ``Agg.'' denotes the aggregation method
+  applied when multiple kernels are attributed to one operator (see \secref{sec:aggregation}).}
+\label{tab:counters}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{clllc}
+\toprule
+\textbf{\#} & \textbf{Profile Field} & \textbf{Bottleneck Axis} & \textbf{Measures} & \textbf{Agg.}\\
+\midrule
+1  & \texttt{gpu\_time\_duration\_ns}      & Latency          & GPU wall time                & SUM \\
+2  & \texttt{dram\_bytes\_read}            & Memory BW        & DRAM read bytes              & SUM \\
+3  & \texttt{dram\_bytes\_written}         & Memory BW        & DRAM write bytes             & SUM \\
+4  & \texttt{memory\_throughput\_pct}      & Memory BW        & Memory subsystem \% peak     & DW-mean \\
+5  & \texttt{dram\_throughput\_pct}        & Memory BW        & DRAM \% of peak BW           & DW-mean \\
+6  & \texttt{mem\_busy\_pct}              & L1 pipeline      & L1 pipeline \% peak active   & DW-mean \\
+7  & \texttt{l1\_hit\_rate}               & Cache            & L1 cache hit rate (\%)       & DW-mean \\
+8  & \texttt{l2\_hit\_rate}               & Cache            & L2 cache hit rate (\%)       & DW-mean \\
+9  & \texttt{sm\_throughput\_pct}         & Compute          & SM \% of peak throughput     & DW-mean \\
+10 & \texttt{tensor\_core\_active\_pct}   & Tensor Cores     & TC pipeline active (\%)      & DW-mean \\
+11 & \texttt{sm\_active\_cycles}          & Compute          & Total SM active cycles       & SUM \\
+12 & \texttt{achieved\_occupancy}         & Occupancy        & Warps active \% of peak      & DW-mean \\
+13 & \texttt{warp\_cycles\_per\_instr}    & Latency          & Cycles per issued instruction & DW-mean \\
+14 & \texttt{eligible\_cycles\_pct}       & Latency          & Eligible warp issue rate (\%) & DW-mean \\
+15 & \texttt{executed\_instructions}      & Throughput       & Total executed instructions  & SUM \\
+16 & \texttt{ipc\_active}                 & Throughput       & IPC when SM active           & DW-mean \\
+17 & \texttt{avg\_threads\_per\_warp}     & Divergence       & Avg threads active per warp  & DW-mean \\
+18 & \texttt{registers\_per\_thread}      & Reg.\ pressure   & Registers allocated / thread & MAX \\
+19 & \texttt{local\_memory\_spills}       & Reg.\ spills     & Spill events to L1 local mem & SUM \\
+20 & \texttt{dynamic\_smem\_per\_block}   & SMEM pressure    & Dynamic shared mem / block   & MAX \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\tabref{tab:counters} lists all 20 counters, their bottleneck axis, what they measure, and their
+aggregation method.  Seven counters require architecture-specific name fallbacks between Ampere
+(e.g.\ \texttt{dram\_\_bytes\_read.sum}), Hopper, and Blackwell
+(e.g.\ \texttt{dram\_\_bytes\_op\_read.sum} or \texttt{fbpa\_\_dram\_read\_bytes.sum});
+\sys queries all variants and uses the first that returns a value.
+
+\subsection{Duration-Weighted Aggregation}
+\label{sec:aggregation}
+
+An operator may dispatch multiple kernels with heterogeneous durations.  For rate and utilization
+metrics (rows marked DW-mean in \tabref{tab:counters}), a naive arithmetic mean would give a
+short-lived auxiliary kernel the same weight as the long-running compute kernel.  \sys uses
+duration-weighted aggregation instead:
+\begin{equation}
+  \overline{m}_\text{op} = \frac{\displaystyle\sum_{i} m_i \cdot d_i}{\displaystyle\sum_{i} d_i}
+  \label{eq:dwmean}
+\end{equation}
+where $m_i$ and $d_i$ are the metric value and duration of the $i$-th kernel attributed to the
+operator.  This ensures that the dominant kernel---the primary optimization target---contributes
+proportionally to the operator-level summary.  For additive quantities (bytes, instruction counts,
+spills), \sys uses plain summation.  For per-kernel constants (register count, shared memory),
+\sys takes the maximum across all kernels, since the highest-pressure kernel limits occupancy.
+
+% -------------------------------------------------------
+\section{Profile-Guided Optimization Backend}
+\label{sec:pgo}
+
+\subsection{Torch Dynamo Integration}
+
+\sys registers a custom backend under the Torch Dynamo compilation stack:
+
+\begin{lstlisting}[style=pystyle]
+@torch._dynamo.register_backend("operator_profiler")
+def op_profiler_backend(
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
+) -> Callable:
+    gm = pass_bf16_cast(gm, example_inputs, profile)
+    gm = pass_fuse_qkv(gm, profile)
+    gm = pass_replace_sdpa(gm, profile)
+    gm = pass_normalize_gelu(gm, profile)
+    gm = pass_pretranspose_weights(gm, profile)
+    gm = pass_batch_padding(gm, example_inputs, profile)
+    return torch._inductor.compile_fx(gm, example_inputs)
+\end{lstlisting}
+
+The backend receives the Aten IR \texttt{GraphModule} and applies passes sequentially before
+delegating to Inductor for Triton code generation.  A profiling JSON (\texttt{profile}) loaded from
+the most recent profiling run provides the hardware counter evidence that triggers each pass.
+
+\subsection{FX Pass Architecture and Preconditions}%
+\label{sec:passes}
+
+Each pass implements a precondition check against operator-level aggregated metrics before
+modifying the graph.  Passes that fail their precondition log a diagnostic warning and return the
+graph unmodified.  \tabref{tab:passes} summarizes all six passes.
+
+\begin{table}[t]
+\centering
+\caption{Profile-guided FX graph passes.  Each pass fires only when the stated counter precondition
+  is satisfied by the baseline profile; it transforms the Aten IR graph and delegates to Inductor
+  for final compilation.}
+\label{tab:passes}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{1.9cm}p{3.0cm}p{3.5cm}p{1.5cm}}
+\toprule
+\textbf{Pass} & \textbf{Counter Precondition} & \textbf{Graph Transformation} & \textbf{Bottleneck Axis} \\
+\midrule
+BF16 casting
+  & \texttt{tensor\_core\_active\_pct < 5\%}
+  & Insert \texttt{to(bfloat16)} before GEMM/conv nodes; \texttt{to(float32)} after output
+  & TC idle \\[4pt]
+QKV fusion
+  & $\ge 2$ \texttt{mm} nodes share input; combined \texttt{dram\_bytes\_read} $>$ threshold
+  & Concat $[W_Q, W_K, W_V]$ $\to$ single \texttt{mm} + \texttt{chunk(n)}
+  & Wave starvation \\[4pt]
+FlashAttn sub.
+  & \texttt{softmax} preceded by \texttt{mm}; \texttt{l2\_hit\_rate < 20\%}
+  & Replace \texttt{mm$\to$scale$\to$softmax$\to$mm} with \texttt{F.scaled\_dot\_product\_attention}
+  & Register spill \\[4pt]
+Weight pretranspose
+  & \texttt{aten.t()} on weight $\ge 512$-dim; low \texttt{sm\_throughput\_pct}
+  & Pre-compute \texttt{W.T.contiguous()}, register as buffer; remove runtime transpose
+  & Cache miss \\[4pt]
+Activation norm.
+  & \texttt{relu} between two \texttt{mm} nodes; low \texttt{ipc\_active}
+  & Replace \texttt{relu} with \texttt{gelu(approximate=`tanh')}
+  & SFU serialization \\[4pt]
+Batch padding
+  & \texttt{achieved\_occupancy < 30\%} and Waves/SM $< 1$
+  & Pad batch dim $B \to B'$; slice output back to $B$
+  & Wave starvation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{BF16 casting} is the highest-leverage pass.  On Blackwell and Hopper, BF16 operands route
+all GEMM calls through Tensor Core HMMA tiles (128$\times$128$\times$32 for WGMMA), delivering up
+to $8\times$ raw FLOP throughput over FP32 scalar SIMT.  The pass is triggered exclusively by the
+profiler's observation that \texttt{tensor\_core\_active\_pct} $\approx 0$, ruling out models that
+already use mixed precision.
+
+\textbf{QKV fusion} detects groups of \texttt{aten::mm} nodes with an identical input activation
+node.  It concatenates their weight parameters ($[D_\text{out}, D_\text{in}]$ each) into a single
+fused weight $[n \cdot D_\text{out}, D_\text{in}]$, replaces the $n$ separate GEMMs with one
+\texttt{mm} call, and splits the result with \texttt{chunk(n, dim=1)}.  The transformation raises
+Waves/SM from 0.11 to 0.68 for the TransformerBlock Q/K/V projections by replacing three
+128-CTA dispatches with one 384-CTA dispatch across 188 SMs.
+
+\textbf{FlashAttention substitution} uses \texttt{torch.fx.subgraph\_rewriter.replace\_pattern}
+to identify the four-node pattern
+\texttt{mm(Q,\,$K^\top$)}~$\to$~\texttt{mul(scale)}~$\to$~\texttt{softmax}~$\to$~\texttt{mm(attn,\,V)}
+and replace it with \texttt{F.scaled\_dot\_product\_attention}, which Inductor lowers to a
+FlashAttention-2 Triton kernel.  This eliminates the $[B, H, S, S]$ attention matrix DRAM
+round-trip and drops local memory spills from 757,760 per call to zero.
+
+\textbf{Weight pre-transposition} detects the pattern \texttt{mm(x, aten.t(W))} where
+$W.\textit{shape}[0] \ge 512$.  It pre-computes $W^\top.\texttt{contiguous()}$ at graph compile
+time, registers it as a model buffer, and replaces the runtime transpose node with a direct
+\texttt{get\_attr}.  This switches cuBLAS from the \texttt{gemmSN\_TN} path (sub-optimal L2 tiling
+for tall-$K$ TN matrices) to the \texttt{gemmSN\_NN} path, yielding the largest single-operator
+speedup (10.8$\times$) observed in our evaluation.
+
+\subsection{Closed-Loop Validation Protocol}
+\label{sec:validation}
+
+The full optimization cycle consists of four steps:
+\begin{enumerate}
+  \item \textbf{Profile}: capture baseline \texttt{profile.json} via \nsys + \ncu pipeline.
+  \item \textbf{Diagnose}: \texttt{DiagnosisEngine} maps per-operator counter values to bottleneck
+    classes from the taxonomy in \secref{sec:roofline}, selecting the applicable FX passes.
+  \item \textbf{Transform}: run \texttt{torch.compile(model, backend="operator\_profiler")} to
+    apply passes and compile.
+  \item \textbf{Validate}: capture optimized \texttt{profile\_optimized.json}; generate a delta
+    report comparing per-operator counter values, flagging any regression.
+\end{enumerate}
+
+This protocol makes every optimization auditable: the delta report shows not just speedup, but
+\emph{which counter improved}, providing evidence that the diagnosed bottleneck was actually
+eliminated rather than merely shifted to a different operator.

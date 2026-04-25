@@ -1,0 +1,80 @@
+\section{Background}
+\label{sec:background}
+
+\subsection{GPU Execution Model and Clock Domains}
+
+A PyTorch forward pass translates a sequence of \texttt{aten::} operator calls through the
+dispatcher into one or more CUDA kernel launches.  Each kernel executes on a set of Streaming
+Multiprocessors (SMs), organized into thread blocks (CTAs); each CTA contains multiple warps of
+32 threads.  GPU hardware exposes performance counters via CUPTI (CUDA Profiling Tools Interface),
+which operates in a hardware-domain clock derived from the GPU's free-running oscillator.
+
+\textbf{The clock domain problem.}  Two GPU profiling tools observe the same kernel execution
+through different timing mechanisms.  Nsight Systems (\nsys) reads CUPTI activity records that
+carry GPU-domain timestamps (\texttt{start\_ns}, \texttt{end\_ns}) from
+\texttt{CUPTI\_ACTIVITY\_KIND\_KERNEL}.  Nsight Compute (\ncu) replays each kernel in a separate
+profiling pass, injecting performance counter reads between kernel invocations; its internal
+timestamps reflect the replay-mode execution clock, not the original capture clock.  Even on the
+same physical GPU, the two clocks diverge by tens of microseconds per kernel due to replay overhead
+and kernel serialization.  \textbf{Timestamp joins across these two tools are incorrect and
+introduce systematic misattribution.}  \sys avoids this entirely (\secref{sec:attribution}).
+
+NVTX (NVIDIA Tools Extension) ranges are CPU-side annotations pushed and popped by the host
+process.  PyTorch's \texttt{torch.autograd.profiler.emit\_nvtx()} context manager inserts
+\texttt{nvtxRangePushA("aten::linear")} before and \texttt{nvtxRangePop()} after every
+\texttt{aten::} dispatch call, labeling the host-side window during which that operator's CUDA
+kernels are launched.  These annotations appear in the \nsys SQLite export as
+\texttt{NVTX\_EVENTS} rows with CPU-domain timestamps.
+
+\subsection{PyTorch Compilation Stack}
+
+PyTorch 2.x introduced TorchDynamo and TorchInductor \cite{pytorch2024} as a two-stage compilation
+pipeline.  Dynamo intercepts Python bytecode, identifies subgraphs of PyTorch operations, and
+traces them to an FX graph in the Aten IR (\texttt{torch.ops.aten.*}).  Inductor then lowers this
+graph to Triton-generated GPU kernels, applying fusion heuristics such as pointwise-into-reduction
+and elementwise-chaining.
+
+Custom compilation backends are registered via:
+\begin{lstlisting}[style=pystyle]
+@torch._dynamo.register_backend("my_backend")
+def my_backend(gm: torch.fx.GraphModule,
+               example_inputs) -> Callable:
+    # apply FX passes, then compile
+    return torch._inductor.compile_fx(gm, example_inputs)
+\end{lstlisting}
+This hook intercepts the Aten IR \texttt{GraphModule} before Inductor processes it, enabling
+hardware-informed FX passes to modify the graph based on profiling data (\secref{sec:pgo}).
+
+Triton \cite{triton2019} generates fused kernels whose names encode constituent operations, \eg
+\texttt{triton\_poi\_fused\_relu\_addmm\_0} for a pointwise kernel fusing \texttt{relu} and
+\texttt{addmm}.  When NVTX ranges are absent or ambiguous, these names provide a low-confidence
+attribution signal (\secref{sec:heuristic}).
+
+\subsection{Roofline Bottleneck Taxonomy}
+\label{sec:roofline}
+
+The Roofline model \cite{williams2009roofline} characterizes a kernel's performance ceiling as
+$\min(\text{peak FLOP/s},\ \text{AI} \times \text{peak bandwidth})$, where arithmetic intensity
+$\text{AI} = \text{FLOPs} / \text{bytes}$.  A kernel below the bandwidth ceiling is
+\emph{memory-bound}; above the ridge point it is \emph{compute-bound}.  \sys operationalizes this
+taxonomy at the per-operator level using hardware counters:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Tensor Core idle} (\texttt{tensor\_core\_active\_pct} $\approx 0$):
+    compute-bound path is not engaging hardware-accelerated units; fix via dtype change
+    (\secref{sec:passes}).
+  \item \textbf{Wave starvation} (\texttt{achieved\_occupancy} $< 20\%$, Waves/SM $< 1$):
+    insufficient parallelism to fill the GPU; fix via batch padding or kernel fusion
+    (\secref{sec:passes}).
+  \item \textbf{Register pressure} (\texttt{registers\_per\_thread} $> 128$):
+    limits concurrent warps; often resolves with dtype change reducing per-thread state.
+  \item \textbf{Cache miss pressure} (\texttt{l2\_hit\_rate} $< 30\%$ on GEMM paths):
+    layout or access-pattern mismatch; fix via weight pre-transposition
+    (\secref{sec:passes}).
+  \item \textbf{Memory spill} (\texttt{local\_memory\_spills} $> 0$):
+    register-file overflow to L1; fix via kernel substitution (FlashAttention-2 vs.\ standard FMHA,
+    \secref{sec:passes}).
+\end{itemize}
+
+These five patterns cover the bottlenecks observed across all five workloads evaluated in
+\secref{sec:experiments}.
