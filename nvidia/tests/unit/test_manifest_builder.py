@@ -72,6 +72,7 @@ class TestManifestBuilder:
         kernel_rows: list[KernelRow],
         nvtx_rows: list[NvtxRow],
         correlation_map: dict | None = None,
+        inductor_fusion_map: dict | None = None,
     ):
         """Helper: run ManifestBuilder with mocked nsys I/O functions only."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,6 +82,7 @@ class TestManifestBuilder:
                 nsys_rep_path=tmp_path / "fake.nsys-rep",
                 metadata=metadata,
                 correlation_map=correlation_map,
+                inductor_fusion_map=inductor_fusion_map,
             )
 
             # Mock only the I/O boundary — let _build_forest and _attribute run normally
@@ -306,3 +308,68 @@ class TestManifestBuilder:
         assert entry.attribution.method == AttributionMethod.TORCH_PROFILER
         assert entry.attribution.confidence == Confidence.HIGH
         assert entry.attribution.source_operators == ["flash_attn::fwd"]
+
+    # --- Inductor fusion map enrichment ---
+
+    def test_inductor_fusion_enriches_nvtx_attribution(self):
+        """Inductor fusion map adds fused_ops to an NVTX-attributed kernel."""
+        kernel = make_kernel_row(kernel_name="triton_poi_fused_relu_addmm_0")
+        nvtx = make_nvtx_row(text="aten::linear", start_ns=900, end_ns=1300)
+        fusion_map = {"triton_poi_fused_relu_addmm_0": ["aten::relu", "aten::addmm"]}
+        manifest = self._build([kernel], [nvtx], inductor_fusion_map=fusion_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.NVTX
+        assert entry.attribution.confidence == Confidence.MEDIUM
+        assert entry.attribution.fused_ops == ["aten::relu", "aten::addmm"]
+        assert entry.attribution.is_fused is True
+
+    def test_inductor_fusion_upgrades_unattributed(self):
+        """Unattributed kernel in fusion map → INDUCTOR_FUSION at MEDIUM confidence."""
+        kernel = make_kernel_row(kernel_name="triton_poi_fused_relu_0")
+        fusion_map = {"triton_poi_fused_relu_0": ["aten::relu"]}
+        manifest = self._build([kernel], [], inductor_fusion_map=fusion_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.INDUCTOR_FUSION
+        assert entry.attribution.confidence == Confidence.MEDIUM
+        assert entry.attribution.source_operators == ["aten::relu"]
+        assert entry.attribution.fused_ops == ["aten::relu"]
+
+    def test_inductor_fusion_multi_op_sets_is_fused(self):
+        """Multiple fused_ops → is_fused=True even for previously UNATTRIBUTED kernel."""
+        kernel = make_kernel_row(kernel_name="triton_poi_fused_relu_addmm_0")
+        fusion_map = {"triton_poi_fused_relu_addmm_0": ["aten::relu", "aten::addmm"]}
+        manifest = self._build([kernel], [], inductor_fusion_map=fusion_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.is_fused is True
+        assert len(entry.attribution.fused_ops) == 2
+
+    def test_inductor_fusion_no_map_unchanged(self):
+        """No fusion map → fused_ops empty, behavior identical to before."""
+        kernel = make_kernel_row(kernel_name="some_mystery_kernel")
+        manifest = self._build([kernel], [])
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.UNATTRIBUTED
+        assert entry.attribution.fused_ops == []
+
+    def test_torch_profiler_plus_inductor_fusion(self):
+        """TORCH_PROFILER (HIGH) + fusion map → method stays HIGH, fused_ops added."""
+        kernel = make_kernel_row(kernel_name="triton_poi_fused_relu_addmm_0")
+        corr_map = {("triton_poi_fused_relu_addmm_0", 0): "aten::linear"}
+        fusion_map = {"triton_poi_fused_relu_addmm_0": ["aten::relu", "aten::addmm"]}
+        manifest = self._build([kernel], [], correlation_map=corr_map,
+                               inductor_fusion_map=fusion_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.method == AttributionMethod.TORCH_PROFILER
+        assert entry.attribution.confidence == Confidence.HIGH
+        assert entry.attribution.source_operators == ["aten::linear"]
+        assert entry.attribution.fused_ops == ["aten::relu", "aten::addmm"]
+        assert entry.attribution.is_fused is True
+
+    def test_inductor_fusion_kernel_not_in_map_unchanged(self):
+        """Kernel absent from fusion map is not enriched."""
+        kernel = make_kernel_row(kernel_name="unknown_kernel_xyz")
+        fusion_map = {"other_kernel": ["aten::relu"]}
+        manifest = self._build([kernel], [], inductor_fusion_map=fusion_map)
+        entry = manifest.kernels[0]
+        assert entry.attribution.fused_ops == []
+        assert entry.attribution.method == AttributionMethod.UNATTRIBUTED

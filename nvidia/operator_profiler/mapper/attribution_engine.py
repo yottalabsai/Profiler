@@ -171,10 +171,14 @@ class AttributionEngine:
             is_fused = any(e.attribution.is_fused for e in entries)
             fused_with: list[str] = []
             for e in entries:
-                if e.attribution.is_fused:
-                    for op in e.attribution.source_operators[1:]:
-                        if op not in fused_with:
-                            fused_with.append(op)
+                # Prefer Inductor ground-truth fused_ops; fall back to NVTX
+                # stack ops from source_operators[1:] when fused_ops is absent.
+                ops_source = e.attribution.fused_ops or (
+                    e.attribution.source_operators[1:] if e.attribution.is_fused else []
+                )
+                for op in ops_source:
+                    if op not in fused_with and op != op_name:
+                        fused_with.append(op)
 
             # NVTX range info from first attributed kernel
             nvtx_range: NvtxRangeInfo | None = None

@@ -8,9 +8,10 @@ Sources joined:
 Produces: MappingManifest
 
 Confidence scoring:
-  torch.profiler join → method=torch_profiler, confidence=high
-  NVTX enclosure      → method=nvtx,           confidence=medium
-  no match            → method=unattributed,   confidence=unattributed
+  torch.profiler join → method=torch_profiler,  confidence=high
+  NVTX enclosure      → method=nvtx,            confidence=medium
+  Inductor debug      → method=inductor_fusion, confidence=medium  (enrichment)
+  no match            → method=unattributed,    confidence=unattributed
 
 Edge cases handled here:
   #1  Clock domain  — we never join on absolute timestamps across tools.
@@ -66,7 +67,12 @@ class ManifestBuilder:
     correlation_map:
         Optional {(kernel_name, nth_occurrence): aten_op_name} produced by
         torch_profiler_correlator.build_correlation_map().  When present, kernels
-        are attributed at HIGH confidence before the NVTX and name-heuristic tiers.
+        are attributed at HIGH confidence before the NVTX tier.
+    inductor_fusion_map:
+        Optional {kernel_name: [aten_op, ...]} produced by
+        inductor_fusion_extractor.parse_inductor_debug_dir().  Applied as a
+        post-attribution enrichment pass: populates fused_ops on all entries and
+        upgrades UNATTRIBUTED kernels to INDUCTOR_FUSION / MEDIUM confidence.
     """
 
     def __init__(
@@ -75,12 +81,14 @@ class ManifestBuilder:
         metadata: CaptureManifestMetadata,
         sqlite_cache_dir: str | Path | None = None,
         correlation_map: dict[tuple[str, int], str] | None = None,
+        inductor_fusion_map: dict[str, list[str]] | None = None,
         nsys_executable: str = "nsys",
     ) -> None:
         self.nsys_rep_path = Path(nsys_rep_path)
         self.metadata = metadata
         self.sqlite_cache_dir = sqlite_cache_dir
         self._correlation_map: dict[tuple[str, int], str] = correlation_map or {}
+        self._inductor_fusion_map: dict[str, list[str]] = inductor_fusion_map or {}
         self.nsys_executable = nsys_executable
 
     # ------------------------------------------------------------------
@@ -154,6 +162,12 @@ class ManifestBuilder:
                     attribution=attribution,
                 )
             )
+
+        # Step 5: Inductor fusion enrichment (optional)
+        # Runs after all runtime tiers so it never overrides a valid attribution
+        # method — only supplements fused_ops and upgrades UNATTRIBUTED entries.
+        if self._inductor_fusion_map:
+            entries = self._apply_inductor_fusion(entries)
 
         high_count = sum(
             1 for e in entries if e.attribution.confidence == Confidence.HIGH
@@ -244,6 +258,44 @@ class ManifestBuilder:
             method=AttributionMethod.UNATTRIBUTED,
             confidence=Confidence.UNATTRIBUTED,
         )
+
+    def _apply_inductor_fusion(
+        self, entries: list[KernelManifestEntry]
+    ) -> list[KernelManifestEntry]:
+        """
+        Enrich KernelAttribution with fused_ops from the Inductor fusion map.
+
+        For UNATTRIBUTED kernels found in the map: upgrade to INDUCTOR_FUSION
+        at MEDIUM confidence with all fused ops as source_operators.
+        For already-attributed kernels: add fused_ops and update is_fused;
+        method and confidence are preserved.
+        """
+        enriched: list[KernelManifestEntry] = []
+        for entry in entries:
+            fused_ops = self._inductor_fusion_map.get(entry.kernel_name)
+            if not fused_ops:
+                enriched.append(entry)
+                continue
+
+            a = entry.attribution
+            if a.method == AttributionMethod.UNATTRIBUTED:
+                new_attr = KernelAttribution(
+                    method=AttributionMethod.INDUCTOR_FUSION,
+                    source_operators=fused_ops,
+                    confidence=Confidence.MEDIUM,
+                    fused_ops=fused_ops,
+                    is_fused=len(fused_ops) > 1,
+                )
+            else:
+                new_attr = a.model_copy(update={
+                    "fused_ops": fused_ops,
+                    "is_fused": len(fused_ops) > 1 or a.is_fused,
+                })
+            enriched.append(entry.model_copy(update={"attribution": new_attr}))
+
+        n_enriched = sum(1 for e in enriched if e.attribution.fused_ops)
+        log.info("Inductor fusion enrichment: %d kernel(s) enriched", n_enriched)
+        return enriched
 
     def _detect_initialization_kernels(
         self, kernel_rows: list[KernelRow], nvtx_rows: list[NvtxRow]

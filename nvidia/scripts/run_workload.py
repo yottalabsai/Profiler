@@ -88,6 +88,16 @@ def main() -> None:
         "--output-prefix", default="profile",
         help="Prefix used to name sidecar files (default: 'profile').",
     )
+    parser.add_argument(
+        "--inductor-debug-dir", default=None,
+        help=(
+            "Directory where Inductor debug artifacts (output_code.py) will be "
+            "written during torch.compile().  Enables torch._inductor.config.debug "
+            "and redirects TORCHINDUCTOR_CACHE_DIR to this path so the artifacts "
+            "are in a predictable location.  Pass this path to "
+            "parse_inductor_debug_dir() after the nsys run to build a fusion map."
+        ),
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -98,6 +108,14 @@ def main() -> None:
     model, x = workload.get_model_and_input()
 
     if args.compile_backend != "none":
+        if args.inductor_debug_dir:
+            import os
+            import torch._inductor.config as _ind_cfg
+            debug_dir = Path(args.inductor_debug_dir).resolve()
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            _ind_cfg.debug = True
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(debug_dir)
+            print(f"[run_workload] Inductor debug artifacts → {debug_dir}", flush=True)
         print(f"[run_workload] Compiling with backend='{args.compile_backend}'...", flush=True)
         model = torch.compile(model, backend=args.compile_backend)
 

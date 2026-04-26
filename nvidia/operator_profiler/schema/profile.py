@@ -19,10 +19,10 @@ SCHEMA_VERSION = "1.0"
 # ---------------------------------------------------------------------------
 
 class AttributionMethod(str, Enum):
-    TORCH_PROFILER = "torch_profiler"
-    NVTX = "nvtx"
-    NAME_HEURISTIC = "name_heuristic"
-    UNATTRIBUTED = "unattributed"
+    TORCH_PROFILER  = "torch_profiler"
+    NVTX            = "nvtx"
+    INDUCTOR_FUSION = "inductor_fusion"
+    UNATTRIBUTED    = "unattributed"
 
 
 class Confidence(str, Enum):

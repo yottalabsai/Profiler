@@ -32,6 +32,11 @@ class KernelAttribution(BaseModel):
     is_fused: bool = False
     # All enclosing NVTX ranges, outermost first — needed for fused kernel attribution
     all_enclosing_ranges: list[NvtxRangeInfo] = Field(default_factory=list)
+    # All aten ops fused into this kernel by Inductor (from debug artifacts).
+    # Separate from source_operators: source_operators answers "what Python-level
+    # op owns this kernel?" while fused_ops answers "what aten primitives did
+    # Inductor fuse into it?" — they can differ in abstraction level.
+    fused_ops: list[str] = Field(default_factory=list)
 
 
 class CaptureManifestMetadata(BaseModel):
