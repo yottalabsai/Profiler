@@ -2,20 +2,21 @@
 ncu subprocess wrapper.
 
 Provides two entry points:
-  1. run_kernel_profile()  — collect metrics for one kernel name across the workload
+  1. run_kernel_profile()  — collect metrics via --replay-mode application
+                             (full workload, all kernels in one pass); optionally
+                             filtered to one kernel name via --kernel-name
   2. import_ncu_report()   — export an existing .ncu-rep to CSV
 
-Kernel-name based profiling
-----------------------------
-Instead of NVTX range filtering (which requires a shared libnvToolsExt.so that
-recent PyTorch builds no longer expose), we filter by kernel name using ncu's
---kernel-name flag.  This works regardless of how the workload links NVTX and
-handles both eager and compiled (Triton) workloads:
+Application-mode profiling
+---------------------------
+ncu replays the entire workload once per counter group (typically 4–8 passes),
+collecting hardware counters for all kernels in each pass.  This is far more
+efficient than kernel-mode replay for multi-layer models, because the number
+of ncu subprocess calls is bounded by the counter-group count rather than the
+unique kernel count.
 
-  - Eager mode:   kernel names are stable cuBLAS/cuDNN identifiers.
-  - Compiled mode: Inductor-generated Triton kernels have unique names per fused
-                   operation (e.g. triton_per_fused_addmm_relu_0), so one kernel
-                   name == one fused unit — no grouping needed.
+--kernel-name filtering is still supported (and used by _profile_one() for
+targeted single-kernel re-profiling), but the primary path passes no filter.
 
 Edge case #8: ncu timestamps are NEVER used for attribution ordering;
 only metric values are extracted from ncu output.
@@ -36,10 +37,10 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class NcuKernelProfileConfig:
-    """Configuration for a single ncu kernel-name-filtered profile run."""
+    """Configuration for a single ncu profile run."""
     script: str | Path                 # Python script to replay
     script_args: list[str] = field(default_factory=list)
-    kernel_name_filter: str = ""       # Exact name or regex passed to --kernel-name
+    kernel_name_filter: str | None = None  # Exact name or regex for --kernel-name; None = profile all kernels
     # ncu_metric_set takes precedence over metrics when non-empty.
     # Leave empty (default) to use AGGREGATE_NCU_METRICS via --metrics.
     # Pass a named set ("full", "default", "roofline", "basic") to override.
@@ -57,11 +58,12 @@ class NcuKernelProfileConfig:
 
 def run_kernel_profile(config: NcuKernelProfileConfig) -> Path:
     """
-    Run ncu with --kernel-name <filter> --replay-mode kernel.
+    Run ncu with --replay-mode application [--kernel-name <filter>].
 
-    Profiles every invocation of matching kernels across the full workload
-    execution.  Results are written to a .ncu-rep file which is then imported
-    via import_ncu_report().
+    Replays the full workload once per counter group, collecting hardware
+    counters for all kernels (or only matching kernels when kernel_name_filter
+    is set).  Results are written to a .ncu-rep file imported via
+    import_ncu_report().
 
     Returns the path to the .ncu-rep output file.
     """
@@ -81,7 +83,7 @@ def run_kernel_profile(config: NcuKernelProfileConfig) -> Path:
 
     ncu_cmd = [
         config.ncu_executable,
-        "--replay-mode", "kernel",
+        "--replay-mode", "application",
         *metric_args,
         "--export", str(output_path),
         "--force-overwrite",

@@ -1,38 +1,38 @@
 """
 Kernel Profile Orchestrator.
 
-For each unique kernel name found in the mapping manifest, runs:
-    ncu --kernel-name <name> --replay-mode kernel --metrics <list>
-
-Then merges the resulting KernelMetrics back into the operator records by
-matching on (kernel_name, invocation_index).
+Runs one ncu invocation for the entire workload using --replay-mode application,
+then fans the resulting metrics out to all manifest kernel entries by kernel name.
 
 Design decisions
 ----------------
-Kernel-name based profiling (instead of NVTX range filtering)
+Application-mode profiling (instead of per-kernel-name loop)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Earlier designs used ``ncu --nvtx-include <range> --replay-mode range`` to
-select kernels.  This approach requires the workload to expose NVTX push/pop
-ranges through a *shared* libnvToolsExt.so at runtime.  Recent PyTorch builds
-(2.x nightlies) statically link NVTX v3 inside libtorch_cuda.so, so ncu's
-injection mechanism never sees any NVTX events — range mode silently captures
-nothing.
+The previous design ran ncu once per unique kernel name (--replay-mode kernel).
+For a workload with N unique kernel names this meant N subprocess calls and N
+full application replays — O(N) wall time.
 
-Kernel-name based profiling avoids this dependency entirely:
+--replay-mode application makes ncu replay the entire workload once per counter
+group (typically 4–8 passes regardless of N), collecting hardware counters for
+ALL kernels in each pass.  This reduces profiling time from O(N * replay_cost)
+to O(counter_groups * replay_cost).
 
-  - Eager mode:   cuBLAS/cuDNN kernel names are stable identifiers.
-  - Compiled mode (Inductor/Triton): each fused operation produces a uniquely
-    named Triton kernel (e.g. ``triton_per_fused_addmm_relu_0``).  Profiling
-    that kernel by name captures the entire fused unit — no grouping needed,
-    and no cache-coherence concern because fusion already happened at compile
-    time.
+_profile_one() is retained for targeted single-kernel re-profiling when needed.
+
+Why not NVTX range mode
+~~~~~~~~~~~~~~~~~~~~~~~
+Earlier designs used ``ncu --nvtx-include <range> --replay-mode range``.  This
+requires the workload to expose NVTX push/pop ranges through a *shared*
+libnvToolsExt.so.  Recent PyTorch builds (2.x nightlies) statically link NVTX v3
+inside libtorch_cuda.so, so ncu's injection mechanism never sees any NVTX events
+— range mode silently captures nothing.
 
 Invocation matching (edge case #1)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-ncu numbers every invocation of a kernel from 0 upward (in launch order).
-The manifest lists kernels in the same launch order.  We match the i-th ncu
-row for kernel name K to the i-th manifest entry with kernel_name == K,
-never using absolute timestamps across tools.
+ncu numbers every invocation of a given kernel name from 0 upward (in launch
+order) in the CSV ID column.  The manifest lists kernels in the same launch
+order.  We match the i-th ncu row for kernel name K to the i-th manifest entry
+with kernel_name == K, never using absolute timestamps across tools.
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class KernelReplayTarget:
-    """One ncu profile run — one unique kernel name across the workload."""
+    """One kernel name group — used to fan out application-mode ncu results."""
     kernel_name: str
     # Ordered list of manifest kernel_ids that have this kernel_name,
     # in launch order.  Used to match ncu invocation index → kernel_id.
@@ -86,12 +86,12 @@ class KernelProfileConfig:
 
 class KernelProfileOrchestrator:
     """
-    Runs ncu kernel profiles for all unique kernel names in the manifest and
-    populates KernelMetrics on OperatorRecord.kernels in-place.
+    Runs one application-mode ncu profile for the entire workload and populates
+    KernelMetrics on OperatorRecord.kernels in-place.
 
-    For each unique kernel name, runs the workload script under ncu with
-    ``--kernel-name <name> --replay-mode kernel`` to collect hardware counters,
-    then matches ncu invocation rows back to manifest entries by launch order.
+    Calls ncu once (--replay-mode application, no --kernel-name filter) to
+    collect hardware counters for all kernels in a single sweep, then fans the
+    resulting metrics out to manifest entries per kernel name by launch order.
 
     Usage:
         orch = KernelProfileOrchestrator(manifest, operator_records, config)
@@ -116,11 +116,11 @@ class KernelProfileOrchestrator:
 
     def run(self) -> Path:
         """
-        Run all kernel profiles and merge metrics into operator_records in-place.
+        Run one application-mode ncu profile and merge metrics into
+        operator_records in-place.
 
-        Returns the directory containing the .ncu-rep output files.
+        Returns the directory containing the all_kernels.ncu-rep output file.
         """
-        # Edge case #6: validate input shapes before replay
         if self.config.expected_input_shapes:
             validate_input_shapes(
                 self.config.expected_input_shapes,
@@ -128,18 +128,19 @@ class KernelProfileOrchestrator:
             )
 
         targets = self._build_replay_targets()
-        log.info("Running ncu kernel profile for %d unique kernel name(s)", len(targets))
+        log.info(
+            "Application-mode ncu profile: %d unique kernel name(s) in manifest",
+            len(targets),
+        )
 
         output_dir = Path(self.config.output_dir) if self.config.output_dir else None
         if output_dir is None:
             output_dir = Path(tempfile.mkdtemp(prefix="op_profiler_ncu_"))
 
+        metrics_map = self._profile_all(output_dir)
+        log.info("ncu complete: %d (kernel_name, id) entries", len(metrics_map))
+
         for target in targets:
-            log.info(
-                "Profiling kernel '%s' (%d invocation(s))",
-                target.kernel_name, len(target.kernel_ids),
-            )
-            metrics_map = self._profile_one(target, output_dir)
             self._merge_metrics(target, metrics_map)
 
         self._apply_metrics_to_records()
@@ -199,6 +200,42 @@ class KernelProfileOrchestrator:
                 "during the replay run (likely a profiling-overhead kernel from "
                 "emit_nvtx). Skipping metric collection for this kernel.",
                 target.kernel_name,
+            )
+            return {}
+
+        csv_text = import_ncu_report(ncu_rep_path, self.config.ncu_executable)
+        return parse_ncu_csv_by_id(csv_text)
+
+    def _profile_all(
+        self, output_dir: Path
+    ) -> dict[tuple[str, str], KernelMetrics]:
+        """
+        Run ncu once for the entire workload (--replay-mode application, no
+        --kernel-name filter).  Returns the full (kernel_name, invocation_id)
+        → KernelMetrics map covering all observed kernels.
+
+        _merge_metrics() is then called once per KernelReplayTarget to fan
+        this map out to the manifest kernel_ids that belong to each kernel name.
+        """
+        ncu_rep_path = output_dir / "all_kernels.ncu-rep"
+        ncu_config = NcuKernelProfileConfig(
+            script=self.config.replay_script,
+            script_args=self.config.replay_script_args,
+            kernel_name_filter=None,
+            ncu_metric_set=self.config.ncu_metric_set,
+            metrics=self.config.metrics,
+            output_path=ncu_rep_path,
+            ncu_executable=self.config.ncu_executable,
+            use_sudo=self.config.ncu_sudo,
+            extra_env=self.config.ncu_extra_env,
+        )
+        run_kernel_profile(ncu_config)
+
+        if not ncu_rep_path.exists():
+            log.warning(
+                "ncu produced no output for application-mode replay — "
+                "no CUDA kernels were observed during the replay run. "
+                "Metric collection will be empty."
             )
             return {}
 
