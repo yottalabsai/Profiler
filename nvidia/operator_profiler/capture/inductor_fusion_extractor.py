@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 
 _ORIG_ATEN_RE = re.compile(r"# .+Original ATen:\s*\[([^\]]+)\]")
 _KERNEL_RUN_RE = re.compile(r"\b(\w+)\.run\(")
+# PyTorch >= 2.x emits a stream-setup assignment between the Original ATen
+# comment and the .run() call: "stream0 = get_raw_stream(0)".  This line
+# must not reset pending_ops.
+_STREAM_SETUP_RE = re.compile(r"^\s*\w+\s*=\s*get_raw_stream\(")
 
 
 def _normalize_op(raw: str) -> str | None:
@@ -95,6 +99,11 @@ def parse_inductor_debug_dir(debug_dir: str | Path) -> dict[str, list[str]]:
                     if kernel_name not in result:
                         result[kernel_name] = pending_ops
                     pending_ops = None
+                elif _STREAM_SETUP_RE.search(line):
+                    # Stream-setup assignment (e.g. "stream0 = get_raw_stream(0)")
+                    # appears between the Original ATen comment and the .run()
+                    # call in PyTorch >= 2.x generated code; skip without reset.
+                    pass
                 elif line.strip() and not line.strip().startswith("#"):
                     # Non-comment, non-empty line without a .run() call —
                     # the comment preceded an extern_kernel or other non-Triton

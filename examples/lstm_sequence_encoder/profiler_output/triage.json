@@ -1,0 +1,69 @@
+{
+  "profile_summary": {
+    "model_name": "LSTMSequenceEncoder",
+    "device": "NVIDIA H100 PCIe",
+    "compile_mode": "inductor",
+    "total_attributed_ns": 27202898,
+    "unattributed_kernel_count": 0,
+    "total_kernel_count": 5330
+  },
+  "time_budget": [
+    {
+      "operator_id": "aten::_cudnn_rnn (x10 measurement iterations)",
+      "operator_name": "aten::_cudnn_rnn",
+      "pct": 98.9,
+      "total_duration_ns": 26904880,
+      "kernel_count": 5280,
+      "bottleneck_class": "tensor_core_idle",
+      "priority": 1,
+      "evidence": {
+        "dominant_kernel_name": "Kernel2",
+        "kernel_name_note": "cuDNN selects 'Kernel2' for FP32 LSTM on H100 — this is the legacy SIMT GEMM path, NOT the WGMMA Tensor Core path (sm90_xmma_gemm_bf16bf16_*). The switch to the Tensor Core path is triggered by BF16/FP16 dtype.",
+        "tensor_core_active_pct": null,
+        "tensor_core_inference": "IDLE (inferred) — FP32 dtype → cuDNN selects non-HMMA Kernel2; BF16 would route to sm90_xmma_gemm_bf16bf16_* (WGMMA, 4x throughput on H100)",
+        "achieved_occupancy": null,
+        "sm_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "metric_availability_note": "cuDNN operators are opaque to ncu — TC%, occupancy, SM%, DRAM% all unavailable. Bottleneck inferred from (1) kernel name 'Kernel2' = cuDNN non-HMMA path, (2) model dtype FP32, (3) H100 Tensor Core dispatch rule."
+      }
+    },
+    {
+      "operator_id": "aten::addmm (x10 measurement iterations)",
+      "operator_name": "aten::addmm",
+      "pct": 0.7,
+      "total_duration_ns": 190421,
+      "kernel_count": 10,
+      "bottleneck_class": "wave_starvation",
+      "priority": 2,
+      "evidence": {
+        "dominant_kernel_name": "sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize32x32x8_stage3",
+        "kernel_name_note": "tilesize32x32x8 = minimal tile — chosen because output is only [32, 10]. Tiny GEMM, wave-starved by construction. At 0.7% of total time, not a meaningful optimization target.",
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null
+      }
+    },
+    {
+      "operator_id": "aten::mean (x10 measurement iterations)",
+      "operator_name": "aten::mean",
+      "pct": 0.4,
+      "total_duration_ns": 108795,
+      "kernel_count": 10,
+      "bottleneck_class": "memory_bound",
+      "priority": 3,
+      "evidence": {
+        "dominant_kernel_name": "reduce_kernel",
+        "kernel_name_note": "Temporal reduction over [32, 128, 512] — memory-bound by nature. At 0.4% of total time, not a meaningful optimization target."
+      }
+    }
+  ],
+  "edge_case_flags": [
+    "ncu_replay_timing",
+    "cudnn_metric_unavailable"
+  ],
+  "edge_case_notes": {
+    "ncu_replay_timing": "All durations are from ncu kernel-replay mode (2-5x longer than real wall-clock). Use only for relative comparison between baseline and optimized profiles.",
+    "cudnn_metric_unavailable": "aten::_cudnn_rnn dispatches to cuDNN's internal LSTM implementation. Standard hardware counters (tensor_core_active_pct, achieved_occupancy, sm_throughput_pct, dram_throughput_pct) are all null for cuDNN operators. Bottleneck classification uses kernel name + dtype inference instead of measured counters. This is expected behavior for cuDNN operators — the profiler correctly attributes timing to the operator but cannot measure cuDNN's internal kernel metrics."
+  },
+  "architecture_notes": "H100 PCIe: 114 SMs (device_name null in profile — using H100 defaults). Ridge point ~200 FLOP/byte for BF16. WGMMA (Tensor Core) path requires BF16/FP16 inputs for cuDNN LSTM. FP32 LSTM uses legacy SIMT Kernel2 path, which cannot use Tensor Cores.",
+  "optimization_ceiling": "aten::_cudnn_rnn accounts for 98.9% of attributed time. BF16 dtype promotion is the single actionable optimization: routes cuDNN from SIMT Kernel2 to WGMMA sm90_xmma_gemm_bf16bf16_* (expected 2-4x faster on H100 for this GEMM size). The remaining 1.1% (addmm + mean + copy_ + fill_) is below meaningful optimization threshold."
+}

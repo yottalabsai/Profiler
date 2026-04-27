@@ -45,6 +45,7 @@ class CaptureManifestMetadata(BaseModel):
     compile_mode: str
     nsys_report_path: str | None = None
     capture_timestamp_utc: str
+    device_name: str | None = None
     # Input shapes recorded at capture time — validated at replay to prevent
     # dynamic-shape kernel count mismatches (edge case #6)
     input_shapes: dict[str, list[int]] = Field(default_factory=dict)

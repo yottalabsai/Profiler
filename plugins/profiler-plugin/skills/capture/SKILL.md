@@ -32,17 +32,31 @@ The pipeline does not read any other function from your file. The model must be 
 
 ## Pipeline Stages
 
-### Stage 0a: nsys Capture
-Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing.
+### Stage 0a-pre: Correlation Pass (standalone, before nsys)
+Runs the torch.profiler correlation pass as a plain Python invocation — **not inside nsys**. nsys and torch.profiler both use CUPTI and cannot run simultaneously; running `--correlation-pass` inside nsys produces a 0-entry sidecar and inflates the nsys kernel count, causing a mismatch with ncu.
 
 ```bash
-nsys profile --trace=cuda,nvtx --output=profiler_output/{stem} --force-overwrite=true \
+PYTHONPATH={project_root} python nvidia/scripts/run_workload.py \
+    --workload workload.py \
+    --compile-backend inductor \
+    --warmup-iters 5 \
+    --measure-iters 10 \
+    --correlation-pass \
+    --output-prefix profiler_output/{stem}
+```
+
+Output: `profiler_output/{stem}.corr.json`
+
+### Stage 0a: nsys Capture (WITHOUT --correlation-pass)
+Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing. The correlation pass already ran in Stage 0a-pre; do not include `--correlation-pass` here.
+
+```bash
+PYTHONPATH={project_root} nsys profile --trace=cuda,nvtx --output=profiler_output/{stem} --force-overwrite=true \
     python nvidia/scripts/run_workload.py \
         --workload workload.py \
         --compile-backend inductor \
         --warmup-iters 5 \
-        --measure-iters 10 \
-        --correlation-pass
+        --measure-iters 10
 ```
 
 Output: `profiler_output/{stem}.nsys-rep`
@@ -55,33 +69,36 @@ nsys export --type=sqlite --output=profiler_output/{stem}.sqlite profiler_output
 ```
 
 ### Stage 0c: Manifest Build
-Parses the SQLite database and joins CUDA kernel launches to NVTX operator ranges.
+Parses the SQLite database and joins CUDA kernel launches to NVTX operator ranges. Auto-detects the GPU device name and optionally loads the correlation map from Stage 0a-pre for HIGH-confidence attribution.
 
 ```bash
-PYTHONPATH=/project/root python -m nvidia.operator_profiler profile \
-    --workload workload.py \
+PYTHONPATH={project_root}:{full_sys_path} operator-profiler manifest \
     --nsys-rep profiler_output/{stem}.nsys-rep \
-    --output profiler_output/{stem}.manifest.json
+    --output profiler_output/{stem}.manifest.json \
+    --model-name {model_name} \
+    --compile-backend {compile_backend} \
+    --corr-json profiler_output/{stem}.corr.json
 ```
 
-Output: `profiler_output/{stem}.manifest.json` (the `MappingManifest`)
+Output: `profiler_output/{stem}.manifest.json` (the `MappingManifest`, with `device_name` populated)
 
 ### Stage 0d: Kernel Replay with ncu
-Replays each unique kernel under Nsight Compute to collect 20 hardware performance counters.
+Replays each unique kernel under Nsight Compute to collect 20 hardware performance counters. Always pass `--ncu-output-dir profiler_output/ncu_reps/` so `.ncu-rep` files are written to a persistent location, not `/tmp/`.
 
 ```bash
-[sudo -E] ncu --target-processes all \
-    python -m nvidia.operator_profiler map \
-        --manifest profiler_output/{stem}.manifest.json \
-        --output profile.json \
-        --ncu-sudo true \
-        --ncu-env PYTHONPATH=/project/root \
-        --warmup-iters 5 \
-        --measure-iters 10 \
-        --script-args --workload workload.py --compile-backend inductor
+PYTHONPATH={project_root} operator-profiler map \
+    profiler_output/{stem}.manifest.json \
+    --script {project_root}/nvidia/scripts/run_workload.py \
+    --ncu-executable {ncu_path} \
+    --ncu-sudo \
+    --ncu-env "PYTHONPATH={project_root}:{full_sys_path}" \
+    --ncu-output-dir profiler_output/ncu_reps/ \
+    --model-name {model_name} \
+    --output profile.json \
+    --script-args --workload workload.py --compile-backend inductor --warmup-iters 5 --measure-iters 10
 ```
 
-Output: `profile.json`
+Output: `profile.json`, `.ncu-rep` files in `profiler_output/ncu_reps/`
 
 ## Automatic System Detection
 
@@ -91,7 +108,7 @@ The capture-agent detects your system configuration automatically:
 |---|---|
 | nsys executable | `nsys --version`; fallback: scan `/opt/nvidia/nsight-systems/*/bin/nsys` |
 | ncu executable | `ncu --version`; fallback: scan `/opt/nvidia/nsight-compute/*/ncu` |
-| sudo requirement | Attempt `ncu --version`; if `ERR_NVGPUCTRPERM` → needs sudo |
+| sudo requirement | Read `/proc/driver/nvidia/params`; if `RmProfilingAdminOnly: 1` → needs sudo |
 | PYTHONPATH | `python -c "import sys; print(':'.join(sys.path))"` + project root prepended |
 | Project root | Search upward from workload for directory containing `nvidia/operator_profiler/` |
 

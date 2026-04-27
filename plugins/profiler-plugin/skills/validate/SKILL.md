@@ -27,13 +27,29 @@ Catches: unclosed brackets, bad indentation, typos in keywords.
 
 ### Step 2: Import
 ```bash
-python -c "import workload_optimized"
+python -c "import sys; sys.path.insert(0, '{project_root}'); sys.path.insert(0, '{file_dir}'); import {module_name}"
 ```
-Catches: missing imports, wrong `compile_fx` import path, circular imports.
+Where:
+- `{project_root}` = directory containing `nvidia/operator_profiler/` (search upward from the file)
+- `{file_dir}` = directory containing the file being validated
+- `{module_name}` = filename stem (strip `.py`)
+
+Example for `examples/transformer_block/transformer_optimized.py` run from `/home/ubuntu/Profiler`:
+```bash
+python -c "import sys; sys.path.insert(0, '/home/ubuntu/Profiler'); sys.path.insert(0, '/home/ubuntu/Profiler/examples/transformer_block'); import transformer_optimized"
+```
+Catches: missing imports, wrong `compile_fx` import path, circular imports, missing PYTHONPATH for the `nvidia` package.
 
 ### Step 3: Backend Registration
 ```bash
-python -c "import torch; import workload_optimized; assert '{backend}' in str(torch._dynamo.list_backends())"
+python -c "
+import sys
+sys.path.insert(0, '{project_root}')
+sys.path.insert(0, '{file_dir}')
+import torch
+import {module_name}
+assert '{backend}' in str(torch._dynamo.list_backends())
+"
 ```
 Catches: missing `@register_backend` decorator, import that didn't execute the decorator.
 

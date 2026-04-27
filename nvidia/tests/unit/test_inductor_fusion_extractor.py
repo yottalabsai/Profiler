@@ -113,15 +113,19 @@ triton_poi_fused_relu_0.run(buf0, out0, 16, grid=grid(16))
         assert len(result["triton_poi_fused_relu_0"]) == 1
 
     def test_stream_setup_lines_between_comment_and_run(self, tmp_path):
-        """Intermediate lines (stream setup) between comment and .run() reset pending."""
+        """Stream-setup assignment (get_raw_stream) between comment and .run() is skipped.
+
+        PyTorch >= 2.x always emits 'stream0 = get_raw_stream(0)' between the
+        Original ATen comment and the triton kernel .run() call.  The extractor
+        must treat this as a transparent line so the kernel is still captured.
+        """
         _write_output_code(tmp_path, """\
 # Topologically Sorted Source Nodes: [relu], Original ATen: [aten.relu]
 stream0 = get_raw_stream(0)
 triton_poi_fused_relu_0.run(buf0, out0, 16, grid=grid(16), stream=stream0)
 """)
         result = parse_inductor_debug_dir(tmp_path)
-        # stream0 = ... is non-comment, non-empty, non-.run() → pending reset
-        assert "triton_poi_fused_relu_0" not in result
+        assert result["triton_poi_fused_relu_0"] == ["aten::relu"]
 
     def test_empty_dir(self, tmp_path):
         assert parse_inductor_debug_dir(tmp_path) == {}

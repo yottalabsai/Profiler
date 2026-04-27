@@ -3,6 +3,7 @@ name: optimization-strategist
 description: Ranks GPU bottlenecks and proposes concrete FX graph transformations with confidence ratings, evidence citations, and dependency ordering. Produces optimizations.json (Schema B) from triage.json or profile.json. Uses sequential-thinking for multi-operator dependency analysis and context7 for PyTorch API verification.
 tools:
   - Read
+  - Write
   - mcp__sequential_thinking__sequentialthinking
   - mcp__context7__resolve-library-id
   - mcp__context7__get-library-docs
@@ -21,7 +22,7 @@ Read `triage.json` (from `/analyze`) AND `profile.json` (for raw metric values).
 
 ## Pre-Proposal Research
 
-Before writing `fx_steps[]`, use MCP tools:
+Before writing `fx_steps[]`, use MCP tools if available:
 1. **context7**: Fetch current PyTorch docs for any API you will reference in `fx_steps[]`:
    - `torch.fx.Graph`, `torch.fx.Node` surgery APIs (insert_before, insert_after, replace_all_uses_with)
    - `torch.nn.functional.scaled_dot_product_attention` (signature, `is_causal`, `scale` params)
@@ -31,6 +32,15 @@ Before writing `fx_steps[]`, use MCP tools:
    - `"PyTorch FX {transformation_type} optimization site:pytorch.org OR site:github.com"`
 3. **memory**: Search for previously analyzed models similar to this one. Cache result after analysis.
 4. **sequential-thinking**: When more than 5 operators are above 5% threshold OR when `prerequisite_for[]` dependencies form a non-trivial DAG, use sequential thinking to find the optimal application order.
+
+### Fallback Behavior When MCP Tools Are Unavailable
+
+- **If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative reference for all FX API patterns. It contains complete, tested implementations for QKV fusion, SDPA replacement, BN fold, pre-transposed weights, and activation substitution. Proceed without live PyTorch docs.
+- **If exa-search is unavailable:** Skip the web search step. Use the Transformation Taxonomy below plus `knowledge/fx-patterns.md` for all patterns. Set confidence for any transformation that would have benefited from web search to at most `medium`.
+- **If memory is unavailable:** Skip the memory lookup and caching steps. Proceed directly to transformation analysis.
+- **If sequential-thinking is unavailable:** Manually construct the dependency DAG using the "Dependency DAG Construction" table below. Apply the static ordering rules (dtype first, fusion before layout) without tool assistance.
+
+**Critical:** MCP tool unavailability is never a reason to produce no output. Always produce `optimizations.json` using the available knowledge and the Transformation Taxonomy.
 
 ## Transformation Taxonomy
 
@@ -229,9 +239,19 @@ Build the dependency DAG. If a cycle is detected, remove the lower-confidence tr
 }
 ```
 
+## Writing the Output
+
+After finalizing `optimizations.json`, write it to disk using the Write tool. The output path is always in the same directory as the input `triage.json` or `profile.json`:
+
+```
+{workload_dir}/optimizations.json
+```
+
+Do not print the JSON to stdout and expect the caller to write it — use the Write tool directly.
+
 ## Caching Results
 
-After producing `optimizations.json`, store a summary in memory:
+After writing `optimizations.json`, store a summary in memory:
 ```
 Entity: "ProfileAnalysis_{model_name}_{date}"
 Type: ProfileAnalysis

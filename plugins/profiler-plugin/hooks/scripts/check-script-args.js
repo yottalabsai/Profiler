@@ -15,7 +15,7 @@ process.stdin.on('end', () => {
     const event = JSON.parse(input);
     const command = (event.tool_input && event.tool_input.command) || '';
 
-    if (!command.includes('operator-profiler map') && !command.includes('operator_profiler map')) {
+    if (!command.includes('operator-profiler map') && !command.includes('operator_profiler map') && !command.includes('nvidia.operator_profiler map')) {
       process.exit(0);
     }
 

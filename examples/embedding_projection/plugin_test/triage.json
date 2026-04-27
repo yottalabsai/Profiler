@@ -1,0 +1,377 @@
+{
+  "schema_version": "1.0",
+  "model_name": "EmbeddingProjection",
+  "device": "unknown (null \u2014 A100 SXM5 assumed)",
+  "compile_mode": "inductor",
+  "total_duration_ms": 48.059232,
+  "operators": [
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 10, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(9,0), (0,-1), (0,-1)]_0",
+      "call_index": 0,
+      "duration_ms": 4.147907,
+      "pct_total": 8.6308,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.7%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 40, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(39,0), (29,0), (19,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.106307,
+      "pct_total": 8.5443,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.7%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 30, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(29,0), (19,0), (9,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.102115,
+      "pct_total": 8.5355,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.8%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 20, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(19,0), (9,0), (0,-1)]_0",
+      "call_index": 0,
+      "duration_ms": 4.099427,
+      "pct_total": 8.5299,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.7%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 50, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(49,0), (39,0), (29,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.097442,
+      "pct_total": 8.5258,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.7%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 90, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(89,0), (79,0), (69,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.096803,
+      "pct_total": 8.5245,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.8%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 60, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(59,0), (49,0), (39,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.095778,
+      "pct_total": 8.5224,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.7%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 80, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(79,0), (69,0), (59,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.093987,
+      "pct_total": 8.5186,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.8%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 70, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(69,0), (59,0), (49,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.092386,
+      "pct_total": 8.5153,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.7%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 100, sizes = [[8192, 512], [512, 32000], [8192, 32000]], input_op_ids = [(99,0), (89,0), (79,0)]_0",
+      "call_index": 0,
+      "duration_ms": 4.089155,
+      "pct_total": 8.5086,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=63.8%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 9, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (7,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.380512,
+      "pct_total": 0.7918,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.4%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 89, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (79,0), (0,-1), (0,-1), (0,-1), (87,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.378848,
+      "pct_total": 0.7883,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.4%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 19, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (17,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.376512,
+      "pct_total": 0.7834,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.4%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 49, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (39,0), (0,-1), (0,-1), (0,-1), (47,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.375905,
+      "pct_total": 0.7822,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.5%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 29, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (19,0), (0,-1), (0,-1), (0,-1), (27,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.375104,
+      "pct_total": 0.7805,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.4%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 39, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (29,0), (0,-1), (0,-1), (0,-1), (37,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.374912,
+      "pct_total": 0.7801,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.4%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 59, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (49,0), (0,-1), (0,-1), (0,-1), (57,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.374209,
+      "pct_total": 0.7786,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.5%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.6%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 79, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (69,0), (0,-1), (0,-1), (0,-1), (77,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.373504,
+      "pct_total": 0.7772,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.5%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 69, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (59,0), (0,-1), (0,-1), (0,-1), (67,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.373216,
+      "pct_total": 0.7766,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.4%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm, op_id = 99, sizes = [[512], [8192, 2048], [2048, 512], [], [], [8192, 512]], input_op_ids = [(0,-1), (89,0), (0,-1), (0,-1), (0,-1), (97,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.372704,
+      "pct_total": 0.7755,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=42.5%; registers_per_thread=212 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 87, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(69,0), (0,-1), (80,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.30096,
+      "pct_total": 0.6262,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.7%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 37, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(19,0), (0,-1), (30,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.299104,
+      "pct_total": 0.6224,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.7%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 17, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(0,-1), (0,-1), (10,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.298976,
+      "pct_total": 0.6221,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.8%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.6%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 7, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(0,-1), (0,-1), (0,-1)]_0",
+      "call_index": 0,
+      "duration_ms": 0.298945,
+      "pct_total": 0.622,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.8%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.6%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 27, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(9,0), (0,-1), (20,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.29872,
+      "pct_total": 0.6216,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.9%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.6%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 67, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(49,0), (0,-1), (60,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.298113,
+      "pct_total": 0.6203,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.7%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 47, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(29,0), (0,-1), (40,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.297856,
+      "pct_total": 0.6198,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.7%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 97, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(79,0), (0,-1), (90,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.297856,
+      "pct_total": 0.6198,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.7%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 77, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(59,0), (0,-1), (70,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.297825,
+      "pct_total": 0.6197,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.8%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::mm",
+      "operator_id": "aten::mm, op_id = 57, sizes = [[8192, 512], [512, 2048], [8192, 2048]], input_op_ids = [(39,0), (0,-1), (50,0)]_0",
+      "call_index": 0,
+      "duration_ms": 0.29744,
+      "pct_total": 0.6189,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=56.6%; registers_per_thread=210 (HIGH register pressure, limits occupancy to 16.7%)",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::addmm",
+      "operator_id": "aten::addmm_0",
+      "call_index": 0,
+      "duration_ms": 0.208896,
+      "pct_total": 0.4347,
+      "bottleneck": "tensor_core_idle",
+      "confidence": "high",
+      "evidence": "tensor_core_active_pct=0.0 (Tensor Cores completely idle \u2014 SIMT FP32 path); sm_throughput_pct=33.4%; registers_per_thread=18",
+      "attribution_tier": "unattributed"
+    },
+    {
+      "operator_name": "aten::embedding",
+      "operator_id": "aten::embedding_0",
+      "call_index": 0,
+      "duration_ms": 0.087808,
+      "pct_total": 0.1827,
+      "bottleneck": "unknown",
+      "confidence": "low",
+      "evidence": "sm_throughput_pct=29.2%, memory_throughput_pct=55.9%, achieved_occupancy=81.8%, tensor_core_active_pct=0.0",
+      "attribution_tier": "unattributed"
+    }
+  ],
+  "unattributed_kernels": [
+    {
+      "kernel_name": "triton_red_fused_embedding_native_layer_norm_0",
+      "duration_ms": 0.087808,
+      "count": 10
+    },
+    {
+      "kernel_name": "triton_poi_fused_addmm_gelu_view_1",
+      "duration_ms": 0.208896,
+      "count": 10
+    }
+  ],
+  "unattributed_kernel_count": 20,
+  "unattributed_pct": 0.6174,
+  "top_bottleneck": "tensor_core_idle",
+  "notes": "20 kernels attributed via name_heuristic (triton_red_fused_embedding_native_layer_norm_0 x10, triton_poi_fused_addmm_gelu_view_1 x10) \u2014 this tier was deprecated; these attributions should be treated as low-confidence. True attribution requires --correlation-pass. | device_name is null \u2014 A100 SXM5 limits assumed (108 SMs). All GEMM operators use cuBLAS 'Kernel2' (gemmSN FP32 SIMT path) \u2014 tensor_core_active_pct=0.0 confirms Tensor Cores are idle. BF16/FP16 dtype cast will route to Tensor Core HMMA path and is the highest-priority optimization. | ncu_replay_timing: all duration_ns values come from NCU replay (2-5x longer than real wall time); use for relative comparison only. | 2 operators marked is_fused=true (aten::embedding_0, aten::addmm_0) \u2014 their duration may overlap with fused partner; avoid double-counting."
+}

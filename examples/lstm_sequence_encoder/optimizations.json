@@ -1,0 +1,153 @@
+{
+  "analysis": {
+    "model": "LSTMSequenceEncoder",
+    "device": "NVIDIA H100 PCIe",
+    "compile_mode": "inductor",
+    "dtype": "FP32",
+    "total_profiled_wall_time_ms": 27.20,
+    "time_budget": {
+      "aten::_cudnn_rnn": {
+        "pct": 98.9,
+        "duration_ns": 26904880,
+        "kernel_count": 5280
+      },
+      "aten::addmm": {
+        "pct": 0.7,
+        "duration_ns": 190421,
+        "kernel_count": 10
+      },
+      "aten::mean": {
+        "pct": 0.4,
+        "duration_ns": 108795,
+        "kernel_count": 10
+      }
+    },
+    "cudnn_dispatch_note": "nn.LSTM compiled with torch.compile+inductor on PyTorch 2.11/H100 stays as a single cuDNN operator (aten::_cudnn_rnn). Inductor does NOT decompose LSTM into per-timestep Triton kernels on this configuration. FX graph passes cannot reach inside cuDNN. All optimizations are non-graph transformations applied before torch.compile."
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "priority": 1,
+      "operators": ["aten::_cudnn_rnn (all 10 measurement-iteration instances, 98.9% of total time)"],
+      "bottleneck": {
+        "description": "cuDNN LSTM dispatches to 'Kernel2' — the legacy FP32 SIMT GEMM path — because model inputs are FP32. On H100, BF16/FP16 inputs cause cuDNN to select sm90_xmma_gemm_bf16bf16_* (WGMMA, full Tensor Core path), which delivers 4x the throughput of SIMT for this workload.",
+        "evidence": {
+          "kernel": "Kernel2",
+          "kernel_meaning": "cuDNN internal non-HMMA gate GEMM for FP32 LSTM",
+          "dtype": "FP32 (inferred from model defaults, confirmed by sm80 addmm kernel for linear head)",
+          "total_duration_ns": 26904880,
+          "total_launches": 5280,
+          "pct_of_total": 98.9,
+          "h100_dispatch_rule": "cuDNN routes LSTM to WGMMA (sm90_xmma_gemm_bf16bf16_*) only when input dtype is BF16 or FP16. FP32 always uses Kernel2 (SIMT path, no Tensor Core utilization).",
+          "metric_availability": "tensor_core_active_pct=null (cuDNN opaque to ncu); bottleneck inferred from kernel name + dtype"
+        }
+      },
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Cast model parameters and input tensor to BF16. This is a non-graph transformation applied in get_model_and_input() before torch.compile. cuDNN responds to the dtype of the input tensor and weight buffers at runtime: BF16 inputs trigger selection of sm90_xmma_gemm_bf16bf16_* (WGMMA Tensor Core path on H100).",
+        "location": "get_model_and_input()",
+        "fx_steps": [
+          "if next(model.parameters()).dtype != torch.bfloat16:",
+          "    model = model.to(torch.bfloat16)",
+          "    x = x.to(torch.bfloat16)"
+        ],
+        "code_hint": "Apply BEFORE torch.compile(). BF16 is preferred over FP16 for H100 (native BF16 accumulation in WGMMA, no overflow risk for hidden states). Do NOT use FP16 for LSTM — sigmoid/tanh activations require sufficient dynamic range."
+      },
+      "estimated_impact": {
+        "latency_reduction_ns": 20178660,
+        "latency_reduction_pct_of_total": 74.2,
+        "throughput_multiplier": "2-4x on aten::_cudnn_rnn (SIMT → WGMMA; H100 BF16 GEMM throughput 3989 TOPS vs. ~1000 TOPS for FP32 SIMT at this tile size)",
+        "memory_traffic_reduction": "~2x (BF16 halves weight and activation DRAM footprint for the LSTM cell)"
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-2"],
+      "notes": "BF16 for LSTM is well-supported in cuDNN since PyTorch 1.9. Hidden states accumulate in BF16 across 128 timesteps; numerical precision is sufficient for inference but may degrade training loss at high learning rates. This workload is eval() mode — BF16 is safe."
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": ["aten::_cudnn_rnn (all instances)"],
+      "bottleneck": {
+        "description": "cuDNN selects LSTM algorithm statically based on input shape at first call. torch.backends.cudnn.benchmark=True enables cuDNN to benchmark multiple algorithm candidates (including new BF16-optimized algorithms added in recent cuDNN versions) and cache the fastest one for this exact (batch=32, seq=128, input=256, hidden=512) configuration.",
+        "evidence": {
+          "kernel": "Kernel2",
+          "benchmark_opportunity": "Without benchmark=True, cuDNN uses a heuristic to select algorithm. With benchmark=True after BF16 cast, cuDNN profiles available sm90 LSTM algorithms and picks the fastest for the current hardware and input shape.",
+          "total_duration_ns": 26904880
+        }
+      },
+      "transformation": {
+        "type": "algorithm_selection",
+        "description": "Enable cuDNN benchmark mode to auto-select the fastest LSTM algorithm for this input shape. Apply after BF16 cast (OPT-1) so cuDNN benchmarks BF16-specific algorithms, not FP32 ones. Also enable TF32 for the linear classifier head (aten::addmm).",
+        "location": "get_model_and_input()",
+        "fx_steps": [
+          "torch.backends.cudnn.benchmark = True",
+          "torch.backends.cuda.matmul.allow_tf32 = True"
+        ],
+        "code_hint": "Set these flags at module level or in get_model_and_input() before the model is constructed. cudnn.benchmark=True has a one-time warmup cost (first forward is slow while cuDNN benchmarks); subsequent calls use the cached algorithm. This is already handled by the --warmup-iters=5 in the profiling pipeline."
+      },
+      "estimated_impact": {
+        "latency_reduction_ns": 1345244,
+        "latency_reduction_pct_of_total": 4.9,
+        "throughput_multiplier": "1.05-1.2x additional on top of OPT-1 (algorithm selection within BF16 path)",
+        "memory_traffic_reduction": "none"
+      },
+      "confidence": "high",
+      "prerequisite_for": [],
+      "notes": "Must be applied AFTER OPT-1 (BF16 cast) to benchmark BF16 algorithms. If applied before BF16 cast, cuDNN will cache a FP32 algorithm and may not re-benchmark when dtype changes (cached plans are dtype-keyed so this should be safe, but ordering ensures clean benchmark)."
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": ["aten::addmm (linear classifier head, 0.7% of total)"],
+      "bottleneck": {
+        "description": "The linear classifier (addmm, [32x512]x[512x10]) dispatches to sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize32x32x8_stage3 in FP32. After BF16 cast (OPT-1), the addmm will dispatch to a BF16 path. The 'tn' layout suffix means the weight is transposed at call time (aten.t() on the weight tensor). Pre-transposing eliminates this per-call transpose.",
+        "evidence": {
+          "kernel": "sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize32x32x8_stage3",
+          "tn_suffix": "'tn' = transposed-N layout; weight is transposed on the fly each forward pass",
+          "total_duration_ns": 190421,
+          "pct_of_total": 0.7
+        }
+      },
+      "transformation": {
+        "type": "pretranspose_weights",
+        "description": "Pre-transpose the classifier Linear weight and store as a buffer to eliminate the aten.t() call. After BF16 cast, the pre-transposed buffer is also BF16. This is an FX graph pass applied inside the custom backend.",
+        "location": "FX pass in custom backend",
+        "fx_steps": [
+          "for node in list(gm.graph.nodes):",
+          "    if node.target == torch.ops.aten.addmm.default:",
+          "        weight_node = node.args[2]",
+          "        if (weight_node.target == torch.ops.aten.t.default",
+          "                and weight_node.args[0].op == 'get_attr'):",
+          "            param_name = weight_node.args[0].target",
+          "            weight = gm.get_parameter(param_name)",
+          "            w_t = weight.T.contiguous()",
+          "            buf_name = param_name.replace('.', '_') + '_T'",
+          "            gm.register_buffer(buf_name, w_t)",
+          "            with gm.graph.inserting_before(node):",
+          "                new_get = gm.graph.get_attr(buf_name)",
+          "            weight_node.replace_all_uses_with(new_get)",
+          "            gm.graph.erase_node(weight_node)",
+          "gm.graph.lint()",
+          "gm.recompile()"
+        ],
+        "code_hint": "At 0.7% of total time, impact is negligible (<0.2ms). Include as a completeness pass but do not expect measurable speedup."
+      },
+      "estimated_impact": {
+        "latency_reduction_ns": 9521,
+        "latency_reduction_pct_of_total": 0.04,
+        "throughput_multiplier": "1.01x (negligible)",
+        "memory_traffic_reduction": "none"
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "Impact is negligible (0.04% of total time). Included for completeness — demonstrates that FX passes are running correctly even when the dominant bottleneck is cuDNN-opaque. If the FX pattern does not match after Inductor tracing (addmm shape may be fused differently), the pass degrades gracefully with a WARNING log."
+    }
+  ],
+  "priority_order": ["OPT-1", "OPT-2", "OPT-3"],
+  "global_notes": [
+    "All duration values from ncu kernel-replay mode — 2-5x longer than real wall-clock execution. Use only for relative comparison between baseline and optimized profiles.",
+    "H100 PCIe: 114 SMs, 2TB/s HBM3 bandwidth, 3989 TOPS BF16 Tensor Core (WGMMA). Ridge point ~200 FLOP/byte BF16.",
+    "CRITICAL ARCHITECTURAL NOTE: nn.LSTM with torch.compile+inductor on PyTorch 2.11/H100 stays as aten::_cudnn_rnn (a single cuDNN kernel). Inductor does NOT decompose LSTM into per-timestep Triton kernels on this system. This means: (1) FX graph passes see only the linear head and mean pooling, not LSTM gate operations; (2) All LSTM optimization must be done non-graph (dtype, config flags); (3) The profile's limited counter coverage (Null values for cuDNN ops) is expected and correct.",
+    "LSTM gate GEMM shapes: each timestep [32, 768] x [768, 2048] for layer 1, [32, 1024] x [1024, 2048] for layer 2. These are substantial GEMMs that benefit significantly from Tensor Core utilization."
+  ]
+}

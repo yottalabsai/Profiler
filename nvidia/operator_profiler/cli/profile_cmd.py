@@ -41,6 +41,18 @@ def add_parser(subparsers) -> None:
             "--output-prefix (e.g. run_workload.py)."
         ),
     )
+    p.add_argument(
+        "--inductor-debug-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory containing Inductor trace artifacts (output_code.py files) "
+            "written when TORCH_COMPILE_DEBUG=1 is set during the capture run. "
+            "When provided, parse_inductor_debug_dir() is called after nsys capture "
+            "and the resulting fusion map is passed to ManifestBuilder so that "
+            "unattributed fused Triton kernels receive INDUCTOR_FUSION attribution."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -98,6 +110,19 @@ def _run(args) -> None:
             corr_sidecar,
         )
 
+    # Load inductor fusion map if the user captured Inductor debug artifacts
+    inductor_fusion_map: dict[str, list[str]] | None = None
+    if args.inductor_debug_dir:
+        from nvidia.operator_profiler.capture.inductor_fusion_extractor import (
+            parse_inductor_debug_dir,
+        )
+        inductor_fusion_map = parse_inductor_debug_dir(args.inductor_debug_dir)
+        log.info(
+            "Inductor fusion map: %d kernel→ops entries from %s",
+            len(inductor_fusion_map),
+            args.inductor_debug_dir,
+        )
+
     metadata = CaptureManifestMetadata(
         model_name=args.model_name,
         torch_version=torch_version,
@@ -110,6 +135,7 @@ def _run(args) -> None:
         nsys_rep_path=rep_path,
         metadata=metadata,
         correlation_map=correlation_map,
+        inductor_fusion_map=inductor_fusion_map,
     )
     manifest = builder.build()
 

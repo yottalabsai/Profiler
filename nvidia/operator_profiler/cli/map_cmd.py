@@ -42,6 +42,17 @@ def add_parser(subparsers) -> None:
     p.add_argument("--model-name", default="model")
     p.add_argument("--torch-version", default=None)
     p.add_argument("--device-name", default=None)
+    p.add_argument(
+        "--ncu-output-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory where per-kernel .ncu-rep files are written. "
+            "Defaults to a temp directory under /tmp/ if not set. "
+            "Set this to a path inside profiler_output/ so .ncu-rep files "
+            "survive the run and can be inspected or re-imported later."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -72,9 +83,15 @@ def _run(args) -> None:
         key, _, value = pair.partition("=")
         ncu_extra_env[key] = value
 
+    ncu_output_dir = args.ncu_output_dir
+    if ncu_output_dir:
+        import os
+        os.makedirs(ncu_output_dir, exist_ok=True)
+
     replay_config = KernelProfileConfig(
         replay_script=args.script,
         replay_script_args=args.script_args or [],
+        output_dir=ncu_output_dir or "",
         ncu_executable=args.ncu_executable,
         ncu_sudo=args.ncu_sudo,
         ncu_extra_env=ncu_extra_env,
@@ -83,6 +100,10 @@ def _run(args) -> None:
     orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()
 
+    # Resolve device_name: explicit flag wins; fall back to what was captured at
+    # manifest-build time (operator-profiler manifest records torch.cuda.get_device_name).
+    device_name = args.device_name or manifest.capture_metadata.device_name
+
     # Assemble profile
     profile = build_profile(
         manifest=manifest,
@@ -90,7 +111,7 @@ def _run(args) -> None:
         unattributed_kernels=unattributed,
         model_name=args.model_name,
         torch_version=torch_version,
-        device_name=args.device_name,
+        device_name=device_name,
         ncu_report_path=str(ncu_output_dir),
     )
 

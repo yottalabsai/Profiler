@@ -1,0 +1,148 @@
+{
+  "workload": "EmbeddingProjection",
+  "analysis": {
+    "model": "EmbeddingProjection",
+    "device": "A100 SXM5 (assumed — device_name null in capture_metadata)",
+    "compile_mode": "inductor",
+    "dtype": "FP32",
+    "total_profiled_ncu_replay_ms": 48.059,
+    "note": "All duration values are NCU replay times (2-5x longer than real wall time). Use only for relative comparison.",
+    "time_budget": {
+      "aten::mm [8192,512]x[512,32000] x10 (Linear 512->32000 output projection)": {
+        "total_duration_ms": 40.920,
+        "pct_total": 85.15,
+        "kernel": "Kernel2 (cuBLAS gemmSN FP32 SIMT)",
+        "sm_throughput_pct": 63.7,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy_pct": 16.67,
+        "registers_per_thread": 212,
+        "l2_hit_rate_pct": 84.56
+      },
+      "aten::addmm [8192,2048]x[2048,512] x10 (Linear 2048->512)": {
+        "total_duration_ms": 3.757,
+        "pct_total": 7.82,
+        "kernel": "Kernel2 (cuBLAS gemmSN FP32 SIMT)",
+        "sm_throughput_pct": 42.4,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy_pct": 16.67,
+        "registers_per_thread": 212,
+        "l2_hit_rate_pct": 81.41
+      },
+      "aten::mm [8192,512]x[512,2048] x10 (Linear 512->2048)": {
+        "total_duration_ms": 2.985,
+        "pct_total": 6.21,
+        "kernel": "Kernel2 (cuBLAS gemmSN FP32 SIMT)",
+        "sm_throughput_pct": 56.8,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy_pct": 16.67,
+        "registers_per_thread": 210,
+        "l2_hit_rate_pct": 81.91
+      },
+      "triton_poi_fused_addmm_gelu_view_1 x10 (Linear+GELU Triton fused)": {
+        "total_duration_ms": 0.209,
+        "pct_total": 0.43,
+        "kernel": "Triton fused (Inductor)",
+        "dram_throughput_pct": 91.4,
+        "sm_throughput_pct": 33.7,
+        "tensor_core_active_pct": 0.0
+      },
+      "triton_red_fused_embedding_native_layer_norm_0 x10 (Embedding+LayerNorm Triton fused)": {
+        "total_duration_ms": 0.088,
+        "pct_total": 0.18,
+        "kernel": "Triton fused (Inductor)",
+        "dram_throughput_pct": 54.9,
+        "sm_throughput_pct": 29.2,
+        "tensor_core_active_pct": 0.0
+      }
+    }
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "title": "BF16 dtype cast — route all cuBLAS GEMMs to Tensor Core HMMA path",
+      "confidence": "high",
+      "expected_speedup": "3-5x on cuBLAS GEMM kernels; 3-4x total workload",
+      "target_operators": ["aten::mm (all 20 cuBLAS nodes)", "aten::addmm (all 10 cuBLAS nodes)"],
+      "bottleneck_addressed": "tensor_core_idle",
+      "mechanism": "All 30 attributed cuBLAS GEMM operators show tensor_core_active_pct=0.0 and registers_per_thread=212, confirming cuBLAS is dispatching to the FP32 SIMT path (Kernel2/gemmSN). On A100 this limits effective throughput to ~19.5 TFLOPS vs 312 TFLOPS from BF16 HMMA Tensor Cores. Casting to bfloat16 forces cuBLAS to select sm80_xmma_gemm_bf16bf16. Secondary: BF16 registers (~80-128 vs 212) resolve occupancy collapse from 16.7% to ~50%+. The 31.25MB BF16 weight fits in A100 40MB L2 (FP32 62.5MB does not). The triton_poi_fused kernel (91% DRAM-bound) also benefits from 2x lower DRAM traffic after Inductor recompiles with BF16 inputs.",
+      "implementation": {
+        "type": "eager",
+        "description": "Cast model parameters and input tensor to bfloat16 in get_model_and_input(). nn.Embedding is not FX-traceable by Dynamo — must be done eagerly, not as an FX pass.",
+        "code_sketch": "def get_model_and_input():\n    torch.backends.cuda.matmul.allow_tf32 = True\n    model = EmbeddingProjection().to(DEVICE).eval()\n    # Verify no tied weights before casting\n    assert model.logits.weight.data_ptr() != model.embed.weight.data_ptr(), \\\n        'Tied embedding weights — BF16 cast unsafe'\n    model = model.to(torch.bfloat16)\n    token_ids = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LEN), device=DEVICE)\n    return model, token_ids"
+      },
+      "dependencies": [],
+      "risks": "1. Tied weights: if Linear(512->32000) shares nn.Embedding.weight, casting corrupts embedding lookup — check with data_ptr() equality. 2. BF16 has 7-bit mantissa vs FP32 23-bit; accuracy may shift slightly. 3. Triton fused kernels recompile at BF16 — extra compile latency on first run. 4. LayerNorm reduction in BF16 can underflow — Inductor typically keeps reduction in FP32 accumulation automatically."
+    },
+    {
+      "id": "OPT-2",
+      "title": "Enable TF32 for matmul — zero-precision-change Tensor Core routing",
+      "confidence": "high",
+      "expected_speedup": "2-3x on cuBLAS GEMM kernels; ~2-2.5x total workload",
+      "target_operators": ["aten::mm (all 20 cuBLAS nodes)", "aten::addmm (all 10 cuBLAS nodes)"],
+      "bottleneck_addressed": "tensor_core_idle",
+      "mechanism": "TF32 routes FP32 GEMMs through Tensor Core HMMA units with 10-bit mantissa precision and FP32 accumulation. Disabled by default in PyTorch. No DRAM bandwidth reduction (weights stay FP32 at 62.5MB). Speedup comes entirely from Tensor Core compute path. Less impactful than BF16 but completely safe — no tied-weight concern, no precision review needed.",
+      "implementation": {
+        "type": "eager",
+        "description": "Two one-line flags before model construction. No model changes needed.",
+        "code_sketch": "torch.backends.cuda.matmul.allow_tf32 = True\ntorch.backends.cudnn.allow_tf32 = True"
+      },
+      "dependencies": [],
+      "risks": "Mild precision reduction: TF32 truncates mantissa from 23 to 10 bits before multiply-accumulate. Negligible for inference. For training with tight numerical stability, verify loss curves."
+    },
+    {
+      "id": "OPT-3",
+      "title": "Pre-transpose projection weights FX pass — eliminate CUBLAS_OP_T overhead",
+      "confidence": "medium",
+      "expected_speedup": "5-10% on cuBLAS GEMM kernels; ~4-9% total workload",
+      "target_operators": ["aten::mm (all 20 cuBLAS nodes)", "aten::addmm (all 10 cuBLAS nodes)"],
+      "bottleneck_addressed": "tensor_core_idle",
+      "mechanism": "nn.Linear stores weight as [out, in] and calls weight.t() at runtime. Inductor passes the non-contiguous transposed view to cuBLAS with CUBLAS_OP_T. Storing weight as [in, out] contiguously allows cuBLAS CUBLAS_OP_N on a row-major matrix, enabling better tiling heuristics. Must be applied after OPT-1 so the buffer is created at BF16.",
+      "implementation": {
+        "type": "fx_pass",
+        "description": "FX graph pass that finds aten.t(get_attr) -> aten.mm patterns and replaces with a pre-transposed buffer registered on the graph module.",
+        "code_sketch": "def pass_pretranspose_weights(gm: fx.GraphModule) -> fx.GraphModule:\n    graph = gm.graph\n    for node in list(graph.nodes):\n        if node.op != 'call_function':\n            continue\n        if node.target not in (torch.ops.aten.t.default, torch.ops.aten.t):\n            continue\n        (weight_node,) = node.args\n        if weight_node.op != 'get_attr':\n            continue\n        attr_path = weight_node.target.split('.')\n        weight_tensor = gm\n        for part in attr_path:\n            weight_tensor = getattr(weight_tensor, part)\n        if weight_tensor.numel() * weight_tensor.element_size() < 1024 * 1024:\n            continue\n        buf_name = weight_node.target.replace('.', '_') + '_pretransposed'\n        gm.register_buffer(buf_name, weight_tensor.t().contiguous())\n        with graph.inserting_before(node):\n            new_attr = graph.get_attr(buf_name)\n        node.replace_all_uses_with(new_attr)\n        graph.erase_node(node)\n    graph.lint()\n    gm.recompile()\n    return gm"
+      },
+      "dependencies": ["OPT-1"],
+      "risks": "1. If Inductor already selects the same cuBLAS algorithm for these shapes regardless of OP_T vs OP_N, gain may be near zero. 2. Memory cost: ~35MB additional BF16 buffers. 3. Apply AFTER OPT-1 so buffer is at BF16."
+    },
+    {
+      "id": "OPT-4",
+      "title": "torch.compile(mode='max-autotune') — auto-tune tile configs for addmm shapes",
+      "confidence": "medium",
+      "expected_speedup": "10-20% on aten::addmm group (7.8% of total); ~1-2% overall",
+      "target_operators": ["aten::addmm [8192,2048]x[2048,512] (all 10 nodes)"],
+      "bottleneck_addressed": "tensor_core_idle",
+      "mechanism": "The addmm operators show sm_throughput=42.4%, lower than dominant mm (63.7%), indicating suboptimal tiling. max-autotune benchmarks multiple GEMM kernel configurations and selects the fastest per shape. Stacks with OPT-1/OPT-2.",
+      "implementation": {
+        "type": "eager",
+        "description": "Change compile mode to max-autotune. Increases first-run compile time by 2-5 minutes.",
+        "code_sketch": "compiled_model = torch.compile(model, mode='max-autotune', fullgraph=True)"
+      },
+      "dependencies": ["OPT-1", "OPT-2"],
+      "risks": "1. Significantly increased cold-start compile time. 2. Autotuned configs are shape-specific — variable batch sizes will miss the tuned path. 3. Low overall impact (~1-2%) since addmm is only 7.8% of total time."
+    },
+    {
+      "id": "OPT-5",
+      "title": "Tied-weight detection and untying — prerequisite gate for OPT-1",
+      "confidence": "low",
+      "expected_speedup": "Enables OPT-1 if tied weights are detected; 0% standalone",
+      "target_operators": ["aten::mm [8192,512]x[512,32000] (Linear 512->32000)"],
+      "bottleneck_addressed": "tensor_core_idle",
+      "mechanism": "Language models frequently tie output projection weight to embedding table. If tied, BF16 cast may produce shared-storage semantics issues. This detects and untie weights before casting.",
+      "implementation": {
+        "type": "eager",
+        "description": "Check weight identity and create an explicit copy if tied.",
+        "code_sketch": "def safe_bf16_cast(model):\n    if model.logits.weight.data_ptr() == model.embed.weight.data_ptr():\n        print('WARNING: tied embedding weights detected. Creating explicit copy.')\n        with torch.no_grad():\n            model.logits.weight = torch.nn.Parameter(\n                model.logits.weight.detach().clone()\n            )\n    return model.to(torch.bfloat16)"
+      },
+      "dependencies": [],
+      "risks": "Untying doubles memory footprint of the embedding/output projection table (~31.25MB BF16 additional). For training, gradient flow through the tied weight is broken — do not apply during training."
+    }
+  ],
+  "global_notes": [
+    "All duration values from ncu replay are 2-5x longer than actual execution — use for relative comparison only.",
+    "A100 peak: 312 TFLOPS BF16, 156 TFLOPS TF32, ~19.5 TFLOPS FP32 SIMT effective. The dominant mm [8192,512]x[512,32000] at sm_throughput=63.7% and dram_throughput=12.8% is firmly compute-bound on the SIMT path — moving to Tensor Cores is the highest-leverage change.",
+    "Dependency application order: OPT-2 (allow_tf32) is zero-risk and should be applied first. Apply OPT-1 (BF16) after OPT-5 tied-weight check. Apply OPT-3 (pre-transpose) after OPT-1. Apply OPT-4 (max-autotune) last.",
+    "device_name is null in capture_metadata — A100 limits assumed.",
+    "The embedding table (32000*512*FP32 = 62.5MB) does not fit in A100 L2 (40MB). In BF16 it shrinks to 31.25MB, fitting within L2 — this secondary cache-residency effect is included in the OPT-1 speedup estimate."
+  ]
+}

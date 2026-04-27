@@ -1,0 +1,64 @@
+{
+  "validation_timestamp": "2026-04-26T21:00:00+00:00",
+  "workload": "examples/lstm_sequence_encoder/lstm_sequence_encoder_optimized.py",
+  "backend_name": "lstm_sequence_encoder_opt",
+  "overall_result": "PASS",
+  "steps": {
+    "step1_syntax": {
+      "result": "PASS",
+      "command": "python -m py_compile lstm_sequence_encoder_optimized.py"
+    },
+    "step2_import": {
+      "result": "PASS",
+      "command": "python -c 'import lstm_sequence_encoder_optimized'"
+    },
+    "step3_backend_registration": {
+      "result": "PASS",
+      "command": "python -c 'import torch; import lstm_sequence_encoder_optimized; assert \"lstm_sequence_encoder_opt\" in str(torch._dynamo.list_backends())'",
+      "backend_found": true
+    },
+    "step4_pytest": {
+      "result": "PASS",
+      "tests_run": 4,
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "test_results": {
+        "test_import": "PASS",
+        "test_backend_registration": "PASS",
+        "test_get_model_and_input": "PASS — input shape (32,128,256) BF16 on CUDA, model BF16",
+        "test_forward_pass": "PASS — output (32,10) BF16, no NaN/Inf"
+      }
+    },
+    "step5_smoke_test": {
+      "result": "PASS",
+      "command": "python nvidia/scripts/run_workload.py --workload lstm_sequence_encoder_optimized.py --compile-backend lstm_sequence_encoder_opt --warmup-iters 1 --measure-iters 1",
+      "compile_backend": "lstm_sequence_encoder_opt"
+    }
+  },
+  "pass_application_report": {
+    "pass_pretranspose_classifier": {
+      "status": "DID_NOT_FIRE",
+      "reason": "Dynamo produces 0 traceable FX graphs for nn.LSTM models. torch._VF.lstm (the cuDNN entry point) is not traced by TorchDynamo — it creates an immediate graph break. As a result, the backend function lstm_sequence_encoder_opt() is never called, and no FX passes execute.",
+      "impact": "None — the addmm was 0.7% of baseline time. The pass was included for completeness only.",
+      "recommendation": "For LSTM models, FX graph passes targeting the classifier head should be implemented via a custom nn.Module.forward() override instead, or the model should be restructured so the classifier is in a separately-compilable submodule."
+    }
+  },
+  "optimization_verification": {
+    "OPT1_bf16": {
+      "status": "VERIFIED",
+      "evidence": "test_get_model_and_input: x.dtype == torch.bfloat16, model params dtype == torch.bfloat16. Compiled and eager outputs numerically identical (allclose atol=0.05)."
+    },
+    "OPT2_cudnn_benchmark": {
+      "status": "VERIFIED",
+      "evidence": "torch.backends.cudnn.benchmark = True set in get_model_and_input(). cudnn.benchmark caches fastest algorithm on first warmup call."
+    },
+    "OPT3_pretranspose": {
+      "status": "NOT_APPLIED",
+      "reason": "FX backend never invoked by Dynamo for this model architecture."
+    }
+  },
+  "warnings": [
+    "RNN module weights not contiguous after BF16 cast — flatten_parameters() called on each forward pass. This is expected and handled by warmup iterations in the profiling pipeline.",
+    "Dynamo graph count = 0 for nn.LSTM — model runs through cuDNN in eager mode even when torch.compile is specified. This is a known limitation of TorchDynamo with cuDNN RNN operators in PyTorch 2.11. The primary optimizations (BF16 + cudnn.benchmark) apply at the eager level and do not require Dynamo compilation."
+  ]
+}

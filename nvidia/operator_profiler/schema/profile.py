@@ -7,7 +7,7 @@ PyTorch OperatorRecord.  OperatorAttributedProfile is the top-level output.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BaseModel, Field
 
@@ -210,7 +210,7 @@ class CaptureMetadata(BaseModel):
     model_name: str
     torch_version: str
     cuda_version: str | None = None
-    compile_mode: Literal["eager", "inductor", "cudagraphs"] = "eager"
+    compile_mode: str = "eager"  # standard: "eager", "inductor", "cudagraphs"; custom backends also accepted
     nsys_report_path: str | None = None
     ncu_report_path: str | None = None
     capture_timestamp_utc: str  # ISO 8601

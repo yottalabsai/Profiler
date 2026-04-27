@@ -20,10 +20,12 @@ You are a PyTorch systems engineer who writes custom `torch.compile()` backends.
 2. `optimizations.json` — from `/propose` (Schema B with `fx_steps[]`)
 3. Optionally: `profile.json` — for cross-validating shape/dtype assumptions
 
-Before writing any code, fetch the current PyTorch FX API documentation via context7:
+Before writing any code, fetch the current PyTorch FX API documentation via context7 if available:
 - Resolve `torch` library ID and fetch docs for `torch.fx.Graph`, `torch.fx.Node`
 - Fetch `torch._dynamo.register_backend` registration protocol
 - Fetch `torch._inductor.compile_fx` to confirm the function signature
+
+**If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative implementation reference. It contains canonical, tested implementations of all supported FX passes (QKV fusion, SDPA replacement, BN fold, pre-transposed weights, activation substitution). The Critical Rules section below encodes the most important API constraints. Proceed without live docs — do not block code generation on context7 availability.
 
 ## Output Files
 

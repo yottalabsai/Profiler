@@ -1,0 +1,29 @@
+{
+  "steps": {
+    "syntax": {
+      "status": "pass",
+      "detail": "python3 -m py_compile exited 0 with no output"
+    },
+    "import": {
+      "status": "pass",
+      "detail": "Module imported successfully; get_model_and_input is callable. NumPy UserWarning is cosmetic (unrelated to module)."
+    },
+    "registration": {
+      "status": "pass",
+      "detail": "Backend 'embedding_projection_opt' found in torch._dynamo.list_backends()"
+    },
+    "pytest": {
+      "status": "pass",
+      "detail": "7/7 tests passed: test_import, test_backend_registration, test_get_model_and_input, test_forward_pass, test_tied_weight_check, test_output_shape, test_numerical_sanity",
+      "tests_passed": 7,
+      "tests_failed": 0
+    },
+    "smoke_test": {
+      "status": "pass",
+      "detail": "Forward pass completed. Output shape: torch.Size([64, 128, 32000]), dtype: bfloat16, all values finite. pass_pretranspose_weights logged WARNING (no eligible aten.t(get_attr) patterns found) — graceful no-op."
+    }
+  },
+  "overall": "pass",
+  "fx_passes_applied": [],
+  "fixes_applied": []
+}

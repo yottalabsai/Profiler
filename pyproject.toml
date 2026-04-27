@@ -15,7 +15,7 @@ dependencies = [
 operator-profiler = "operator_profiler.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["nvidia"]
 include = ["operator_profiler*"]
 
 [tool.pytest.ini_options]
