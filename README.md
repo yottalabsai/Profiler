@@ -66,6 +66,31 @@ pip install -e .
 
 ---
 
+## Claude Code Plugin
+
+The profiler ships a Claude Code plugin that automates the full optimization workflow inside your Claude Code session. Pass a workload file and get a profiled, optimized, validated PyTorch backend — no manual pipeline steps required.
+
+For full documentation — agents, hooks, knowledge base, and per-skill reference — see **[plugins/nvidia-profiler/README.md](plugins/nvidia-profiler/README.md)**.
+
+### Prerequisites
+
+- [Claude Code](https://claude.ai/code) installed
+- `nsys` and `ncu` available (see [Requirements](#requirements))
+- A CUDA GPU
+
+### Installation
+
+In any Claude Code session:
+
+```
+/plugin marketplace add profiler-plugins
+/plugin install nvidia-profiler@profiler-plugins
+```
+
+This registers the plugin globally — no need to clone the repository first.
+
+---
+
 ## CLI Reference
 
 ### `profile` — capture
@@ -242,6 +267,8 @@ for op in operators_by_duration[:5]:
 ---
 
 ## Optimization Workflow
+
+The Claude Code plugin (see above) automates this entire workflow via `/optimize workload.py`. The manual steps below are available if you want finer control over individual stages.
 
 Once you have a profile, use the provided prompt templates to identify and implement optimizations:
 
