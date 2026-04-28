@@ -39,6 +39,10 @@ def add_parser(subparsers) -> None:
                    help="Optional .corr.json from --correlation-pass; enables HIGH-confidence attribution.")
     p.add_argument("--nsys-executable", default="nsys",
                    help="Path to nsys executable (used for SQLite export if not already cached).")
+    p.add_argument("--inductor-fusion-dir", default=None, metavar="PATH",
+                   help="Directory of Inductor debug artifacts (set via --inductor-debug-dir "
+                        "in run_workload.py). Enables MEDIUM-confidence attribution for "
+                        "unattributed Triton fused kernels.")
     p.set_defaults(func=_run)
 
 
@@ -82,11 +86,20 @@ def _run(args) -> None:
         device_name=device_name,
     )
 
+    # Load inductor fusion map if provided
+    inductor_fusion_map: dict[str, list[str]] | None = None
+    if args.inductor_fusion_dir:
+        from nvidia.operator_profiler.capture.inductor_fusion_extractor import parse_inductor_debug_dir
+        inductor_fusion_map = parse_inductor_debug_dir(args.inductor_fusion_dir)
+        log.info("Loaded inductor fusion map: %d entries from %s",
+                 len(inductor_fusion_map), args.inductor_fusion_dir)
+
     builder = ManifestBuilder(
         nsys_rep_path=nsys_rep,
         metadata=meta,
         sqlite_cache_dir=nsys_rep.parent,
         correlation_map=correlation_map,
+        inductor_fusion_map=inductor_fusion_map,
         nsys_executable=args.nsys_executable,
     )
     manifest = builder.build()

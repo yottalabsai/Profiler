@@ -91,10 +91,10 @@ def main() -> None:
     parser.add_argument(
         "--inductor-debug-dir", default=None,
         help=(
-            "Directory where Inductor debug artifacts (output_code.py) will be "
-            "written during torch.compile().  Enables torch._inductor.config.debug "
-            "and redirects TORCHINDUCTOR_CACHE_DIR to this path so the artifacts "
-            "are in a predictable location.  Pass this path to "
+            "Directory where Inductor debug artifacts will be written during "
+            "torch.compile().  Enables torch._inductor.config.debug and sets "
+            "TORCHINDUCTOR_CACHE_DIR to this path so hash-named compiled .py "
+            "files land in a predictable location.  Pass this path to "
             "parse_inductor_debug_dir() after the nsys run to build a fusion map."
         ),
     )
@@ -109,11 +109,12 @@ def main() -> None:
 
     if args.compile_backend != "none":
         if args.inductor_debug_dir:
+            import os
             import torch._inductor.config as _ind_cfg
             debug_dir = Path(args.inductor_debug_dir).resolve()
             debug_dir.mkdir(parents=True, exist_ok=True)
-            _ind_cfg.trace.enabled = True
-            _ind_cfg.trace.debug_dir = str(debug_dir)
+            _ind_cfg.debug = True
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(debug_dir)
             print(f"[run_workload] Inductor debug artifacts → {debug_dir}", flush=True)
         print(f"[run_workload] Compiling with backend='{args.compile_backend}'...", flush=True)
         model = torch.compile(model, backend=args.compile_backend)

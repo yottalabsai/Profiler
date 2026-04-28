@@ -249,10 +249,16 @@ def main(argv: list[str] | None = None) -> int:
 
     ncu_out_dir = Path(tempfile.mkdtemp(prefix="op_profiler_ncu_out_"))
     replay_config = KernelProfileConfig(
-        replay_script=str(workload_script),
-        replay_script_args=[],
+        replay_script=str(ROOT / "scripts" / "run_workload.py"),
+        replay_script_args=[
+            "--workload", str(workload_script),
+            "--compile-backend", "inductor",
+            "--warmup-iters", "5",
+        ],
         output_dir=str(ncu_out_dir),
         ncu_executable=ncu_bin,
+        ncu_sudo=True,
+        ncu_extra_env={"PYTHONPATH": ":".join([str(ROOT)] + [p for p in sys.path if p])},
     )
 
     try:
