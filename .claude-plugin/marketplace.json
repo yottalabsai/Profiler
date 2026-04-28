@@ -5,8 +5,8 @@
   },
   "plugins": [
     {
-      "name": "nvidia-plugin",
-      "source": "./plugins/nvidia-plugin",
+      "name": "nvidia-profiler",
+      "source": "./plugins/nvidia-profiler",
       "description": "End-to-end GPU optimization workflow for PyTorch models"
     }
   ]
