@@ -70,6 +70,8 @@ pip install -e .
 
 The profiler ships a Claude Code plugin that automates the full optimization workflow inside your Claude Code session. Pass a workload file and get a profiled, optimized, validated PyTorch backend — no manual pipeline steps required.
 
+For full documentation — agents, hooks, knowledge base, and per-skill reference — see **[plugins/profiler-plugin/README.md](plugins/profiler-plugin/README.md)**.
+
 ### Prerequisites
 
 - [Claude Code](https://claude.ai/code) installed
