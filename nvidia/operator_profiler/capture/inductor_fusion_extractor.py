@@ -1,15 +1,21 @@
 """
-inductor_fusion_extractor — parse Inductor debug output_code.py artifacts.
+inductor_fusion_extractor — parse Inductor compiled-code artifacts.
 
-Inductor writes output_code.py during torch.compile() when debug is enabled.
-Each kernel call is preceded by a comment listing the fused aten ops:
+When torch._inductor.config.debug = True, Inductor writes compiled Python
+wrappers to content-addressed hash-named .py files inside TORCHINDUCTOR_CACHE_DIR
+(e.g. ``ab/abcdef1234...xyz.py``).  Each .run() call is preceded by a comment
+listing the fused aten ops:
 
     # Topologically Sorted Source Nodes: [...], Original ATen: [aten.relu, aten.addmm]
+    stream0 = get_raw_stream(0)
     triton_poi_fused_relu_addmm_0.run(...)
 
 parse_inductor_debug_dir() walks a debug directory, extracts these pairs,
 and returns {kernel_name: [aten::relu, aten::addmm]} — ground-truth fusion
 metadata from the compiler, no heuristics involved.
+
+Note: Inductor does NOT write a file called ``output_code.py`` in modern PyTorch
+(2.x+).  The compiled code lands in hash-named .py files inside the cache dir.
 
 Usage
 -----
@@ -75,9 +81,9 @@ def parse_inductor_debug_dir(debug_dir: str | Path) -> dict[str, list[str]]:
         log.debug("Inductor debug dir does not exist: %s", debug_dir)
         return result
 
-    code_files = list(debug_dir.rglob("output_code.py"))
+    code_files = list(debug_dir.rglob("*.py"))
     if not code_files:
-        log.debug("No output_code.py files found in %s", debug_dir)
+        log.debug("No compiled .py files found in %s", debug_dir)
         return result
 
     for code_file in code_files:
@@ -111,7 +117,7 @@ def parse_inductor_debug_dir(debug_dir: str | Path) -> dict[str, list[str]]:
                     pending_ops = None
 
     log.info(
-        "Inductor fusion map: %d kernel→ops entries from %d output_code.py file(s)",
+        "Inductor fusion map: %d kernel→ops entries from %d compiled file(s)",
         len(result),
         len(code_files),
     )

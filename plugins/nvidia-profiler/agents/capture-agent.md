@@ -91,6 +91,7 @@ Derive from the workload file path:
 - `nsys_rep = {output_dir}/{workload_stem}.nsys-rep`
 - `sqlite_path = {output_dir}/{workload_stem}.sqlite`
 - `manifest_path = {output_dir}/{workload_stem}.manifest.json`
+- `inductor_debug_dir = {output_dir}/{workload_stem}_inductor_debug/` (Inductor compiled artifacts for fusion attribution)
 - `profile_path` = `{workload_parent}/profile.json` (baseline) or `{workload_parent}/profile_optimized.json` (with `--profile-name=optimized`)
 
 ## Stage 0a-pre: Correlation Pass (run OUTSIDE nsys)
@@ -108,10 +109,13 @@ PYTHONPATH={project_root}:{pythonpath} python3 {project_root}/nvidia/scripts/run
     --warmup-iters {warmup_iters} \
     --measure-iters {measure_iters} \
     --correlation-pass \
-    --output-prefix {output_dir}/{workload_stem}
+    --output-prefix {output_dir}/{workload_stem} \
+    --inductor-debug-dir {inductor_debug_dir}
 ```
 
-Output: `{output_dir}/{workload_stem}.corr.json`
+Output: `{output_dir}/{workload_stem}.corr.json`, Inductor compiled `.py` artifacts in `{inductor_debug_dir}/`.
+
+**Why `--inductor-debug-dir` here:** Compilation happens on the first run (Stage 0a-pre). Setting `TORCHINDUCTOR_CACHE_DIR` here writes hash-named compiled `.py` files to `{inductor_debug_dir}` instead of the default system cache. These files contain `# Original ATen: [...]` comments that map each Triton kernel to the aten ops it was fused from — the ground-truth fusion metadata needed in Stage 0c. Subsequent stages reuse the cached compilation from the same directory, so kernel names stay identical across stages.
 
 If the `.corr.json` has 0 entries, NVTX-enclosure attribution (MEDIUM confidence) will be used instead. This is normal and not an error — do not retry.
 
@@ -130,7 +134,8 @@ PYTHONPATH={project_root}:{pythonpath} {nsys_executable} profile \
         --workload {workload_path} \
         --compile-backend {compile_backend} \
         --warmup-iters {warmup_iters} \
-        --measure-iters {measure_iters}
+        --measure-iters {measure_iters} \
+        --inductor-debug-dir {inductor_debug_dir}
 ```
 
 Defaults: `compile_backend=inductor`, `warmup_iters=5`, `measure_iters=10`.
@@ -165,10 +170,13 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler manifest \
     --output {manifest_path} \
     --model-name {model_name} \
     --compile-backend {compile_backend} \
-    --corr-json {output_dir}/{workload_stem}.corr.json
+    --corr-json {output_dir}/{workload_stem}.corr.json \
+    --inductor-fusion-dir {inductor_debug_dir}
 ```
 
-The `--corr-json` flag is optional but recommended — it loads the HIGH-confidence correlation map from Stage 0a-pre, reducing the unattributed kernel rate. If the `.corr.json` file does not exist (Stage 0a-pre was skipped), omit the flag.
+`--corr-json` is optional but recommended — loads HIGH-confidence correlation from Stage 0a-pre.
+
+`--inductor-fusion-dir` is optional but recommended when `compile_backend=inductor` — parses the hash-named compiled `.py` files in `{inductor_debug_dir}` to build a `{kernel_name → [aten::ops]}` map. Applied as a post-attribution enrichment pass: upgrades all UNATTRIBUTED Triton fused kernels to MEDIUM confidence, and populates `fused_ops` on already-attributed kernels. Reduces unattributed rate to near 0% for Inductor-compiled models. Omit if `{inductor_debug_dir}` does not exist (e.g. `--compile-backend=none`).
 
 Verify `{manifest_path}` exists and contains `"kernels"` key with non-empty array. If kernels list is empty, check that the nsys capture in Stage 0a used `run_workload.py` (not the raw workload) and that `--trace=cuda,nvtx` was set.
 
@@ -195,12 +203,14 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     --ncu-output-dir {ncu_reps_dir} \
     --model-name {model_name} \
     --output {profile_path} \
-    --script-args --workload {workload_path} --compile-backend {compile_backend} --warmup-iters {warmup_iters} --measure-iters {measure_iters}
+    --script-args --workload {workload_path} --compile-backend {compile_backend} --warmup-iters {warmup_iters} --measure-iters {measure_iters} --inductor-debug-dir {inductor_debug_dir}
 ```
 
 Where `{pythonpath}` is the **full** `sys.path` output from Step 5 of Pre-Run System Detection (must include `~/.local/lib/python3.x/site-packages` so torch is found under sudo). The `PYTHONPATH={project_root}:{pythonpath}` prefix ensures the CLI itself can import `nvidia.operator_profiler` when launched.
 
 **Do NOT use `python -m nvidia.operator_profiler map`** — the package has no `__main__.py` and this invocation fails. Use the `operator-profiler` CLI entry point (installed via `pip install .` from the project root).
+
+**Why `--inductor-debug-dir` in `--script-args`:** The ncu replay re-runs the workload script to collect hardware counters. By pointing it at the same `{inductor_debug_dir}`, Inductor reuses the cached compilation (same `TORCHINDUCTOR_CACHE_DIR`) rather than recompiling, ensuring the kernel names in the ncu replay exactly match those in the nsys trace. Without this, a recompile could generate differently-ordered or differently-named kernels and silently corrupt the kernel→invocation mapping.
 
 ### Command (Linux without sudo, or Windows):
 ```bash
@@ -212,7 +222,7 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     --ncu-output-dir {ncu_reps_dir} \
     --model-name {model_name} \
     --output {profile_path} \
-    --script-args --workload {workload_path} --compile-backend {compile_backend} --warmup-iters {warmup_iters} --measure-iters {measure_iters}
+    --script-args --workload {workload_path} --compile-backend {compile_backend} --warmup-iters {warmup_iters} --measure-iters {measure_iters} --inductor-debug-dir {inductor_debug_dir}
 ```
 
 ### Error Handling
@@ -250,8 +260,10 @@ if len(ops) == 0:
     sys.exit(1)
 if len(unattr) > total * 0.6:
     print('WARNING: >60% kernels unattributed — NVTX ranges may not have been emitted')
-elif len(unattr) > total * 0.3:
-    print('INFO: >30% kernels unattributed — normal for Inductor without --correlation-pass (name heuristic tier removed)')
+elif len(unattr) > total * 0.1:
+    print('INFO: >10% kernels unattributed — check that --inductor-debug-dir was set for inductor backends and --corr-json was passed')
+else:
+    print('OK: unattributed rate is low')
 "
 ```
 
@@ -269,6 +281,7 @@ When invoked by `/capture` or `/optimize`, respect these flags:
 | `--nsys-path` | `auto` | Full path to nsys executable |
 | `--output-dir` | `auto` | Directory for intermediate files (default: sibling `profiler_output/`) |
 | `--profile-name` | `baseline` | Output file name: `baseline` → `profile.json`, `optimized` → `profile_optimized.json` |
+| `--inductor-debug-dir` | `auto` | Directory for Inductor compiled artifacts. Auto-set to `{output_dir}/{workload_stem}_inductor_debug/` when `compile_backend=inductor`. Omit for `none`/`cudagraphs`. |
 
 ## Output
 

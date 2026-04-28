@@ -35,6 +35,8 @@ The pipeline does not read any other function from your file. The model must be 
 ### Stage 0a-pre: Correlation Pass (standalone, before nsys)
 Runs the torch.profiler correlation pass as a plain Python invocation — **not inside nsys**. nsys and torch.profiler both use CUPTI and cannot run simultaneously; running `--correlation-pass` inside nsys produces a 0-entry sidecar and inflates the nsys kernel count, causing a mismatch with ncu.
 
+Also passes `--inductor-debug-dir` so Inductor writes its compiled `.py` artifacts to a known location during compilation. These are used in Stage 0c to attribute Triton fused kernels.
+
 ```bash
 PYTHONPATH={project_root} python nvidia/scripts/run_workload.py \
     --workload workload.py \
@@ -42,13 +44,14 @@ PYTHONPATH={project_root} python nvidia/scripts/run_workload.py \
     --warmup-iters 5 \
     --measure-iters 10 \
     --correlation-pass \
-    --output-prefix profiler_output/{stem}
+    --output-prefix profiler_output/{stem} \
+    --inductor-debug-dir profiler_output/{stem}_inductor_debug
 ```
 
-Output: `profiler_output/{stem}.corr.json`
+Output: `profiler_output/{stem}.corr.json`, Inductor compiled artifacts in `profiler_output/{stem}_inductor_debug/`
 
 ### Stage 0a: nsys Capture (WITHOUT --correlation-pass)
-Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing. The correlation pass already ran in Stage 0a-pre; do not include `--correlation-pass` here.
+Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing. The correlation pass already ran in Stage 0a-pre; do not include `--correlation-pass` here. Pass the same `--inductor-debug-dir` so Inductor reuses the cached compilation and produces the same kernel names in the trace.
 
 ```bash
 PYTHONPATH={project_root} nsys profile --trace=cuda,nvtx --output=profiler_output/{stem} --force-overwrite=true \
@@ -56,7 +59,8 @@ PYTHONPATH={project_root} nsys profile --trace=cuda,nvtx --output=profiler_outpu
         --workload workload.py \
         --compile-backend inductor \
         --warmup-iters 5 \
-        --measure-iters 10
+        --measure-iters 10 \
+        --inductor-debug-dir profiler_output/{stem}_inductor_debug
 ```
 
 Output: `profiler_output/{stem}.nsys-rep`
@@ -69,7 +73,7 @@ nsys export --type=sqlite --output=profiler_output/{stem}.sqlite profiler_output
 ```
 
 ### Stage 0c: Manifest Build
-Parses the SQLite database and joins CUDA kernel launches to NVTX operator ranges. Auto-detects the GPU device name and optionally loads the correlation map from Stage 0a-pre for HIGH-confidence attribution.
+Parses the SQLite database and joins CUDA kernel launches to NVTX operator ranges. Auto-detects the GPU device name, loads the correlation map from Stage 0a-pre for HIGH-confidence attribution, and applies the Inductor fusion map to attribute Triton fused kernels that bypass torch.profiler correlation.
 
 ```bash
 PYTHONPATH={project_root}:{full_sys_path} operator-profiler manifest \
@@ -77,8 +81,11 @@ PYTHONPATH={project_root}:{full_sys_path} operator-profiler manifest \
     --output profiler_output/{stem}.manifest.json \
     --model-name {model_name} \
     --compile-backend {compile_backend} \
-    --corr-json profiler_output/{stem}.corr.json
+    --corr-json profiler_output/{stem}.corr.json \
+    --inductor-fusion-dir profiler_output/{stem}_inductor_debug
 ```
+
+`--inductor-fusion-dir` parses the Inductor-compiled `.py` files (hash-named, not `output_code.py`) to extract `{kernel_name → [aten::ops]}` mappings. Upgrades all UNATTRIBUTED Triton fused kernels to MEDIUM confidence. Omit when `--compile-backend=none`.
 
 Output: `profiler_output/{stem}.manifest.json` (the `MappingManifest`, with `device_name` populated)
 
@@ -95,8 +102,10 @@ PYTHONPATH={project_root} operator-profiler map \
     --ncu-output-dir profiler_output/ncu_reps/ \
     --model-name {model_name} \
     --output profile.json \
-    --script-args --workload workload.py --compile-backend inductor --warmup-iters 5 --measure-iters 10
+    --script-args --workload workload.py --compile-backend inductor --warmup-iters 5 --measure-iters 10 --inductor-debug-dir profiler_output/{stem}_inductor_debug
 ```
+
+`--inductor-debug-dir` in `--script-args` ensures the ncu replay reuses the same cached Inductor compilation (same `TORCHINDUCTOR_CACHE_DIR`). Without it, Inductor may recompile with differently-ordered kernels, silently corrupting the kernel→invocation mapping.
 
 Output: `profile.json`, `.ncu-rep` files in `profiler_output/ncu_reps/`
 
@@ -163,10 +172,12 @@ The capture is successful when `profile.json`:
 3. Has `operators[*].aggregated != null` (metrics were collected)
 4. Has `unattributed_kernels` count < 60% of total kernel count
 
-**Expected unattributed rates:** With the name heuristic attribution tier removed, kernels that cannot be matched by torch.profiler correlation (HIGH) or NVTX enclosure (MEDIUM) go directly to `unattributed_kernels`. Rates of 20–40% are normal for Inductor-compiled models. To reduce unattributed rate, always pass `--correlation-pass`.
+**Expected unattributed rates:** With the Inductor fusion map enabled, unattributed rates should be near 0% for Inductor-compiled models. Triton fused kernels (which bypass torch.profiler correlation) are attributed via ground-truth `# Original ATen: [...]` comments in the Inductor-compiled `.py` files.
 
-If `unattributed_kernels` exceeds 60%, check:
-- Was `--correlation-pass` used during capture? (provides HIGH confidence matching for most kernels)
+If `unattributed_kernels` exceeds 10%, check:
+- Was `--inductor-debug-dir` passed to all three stages (0a-pre, 0a, 0d `--script-args`)? (required for Triton kernel attribution)
+- Was `--inductor-fusion-dir` passed to `operator-profiler manifest`?
+- Was `--correlation-pass` used during capture? (provides HIGH confidence for cuBLAS kernels)
 - Were NVTX ranges emitted? (`--trace=cuda,nvtx` must be set in nsys flags)
 - Did torch.compile complete before the measurement window?
 - Is the model using `cudagraphs` mode? (Graph replay kernels have different attribution)
@@ -183,3 +194,4 @@ If `unattributed_kernels` exceeds 60%, check:
 | `--nsys-path` | `auto` | Explicit path to nsys executable |
 | `--output-dir` | `profiler_output/` | Directory for intermediate files (nsys-rep, sqlite, manifest) |
 | `--profile-name` | `baseline` | `baseline` → `profile.json`, `optimized` → `profile_optimized.json` |
+| `--inductor-debug-dir` | `auto` | Directory for Inductor compiled artifacts. Auto-set to `profiler_output/{stem}_inductor_debug/` when `compile_backend=inductor`. Passed to all three stages (0a-pre, 0a, 0d) for consistent compilation caching and Triton kernel attribution. |
