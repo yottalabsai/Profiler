@@ -27,12 +27,13 @@ That single command runs all 8 pipeline stages — nsys+ncu capture, bottleneck 
 | NVIDIA Nsight Compute (`ncu`) | For hardware counter collection; **requires sudo on most Linux systems** |
 | CUDA GPU | Ampere, Hopper, or Blackwell (A100, H100, H200, RTX 4090, B100, B200, etc.) |
 
-### Add the marketplace
+### Add the marketplace and install
 
 In any Claude Code session:
 
 ```
-/plugin marketplace add yottalabsai/Profiler
+/plugin marketplace add profiler-plugins
+/plugin install nvidia-profiler@profiler-plugins
 ```
 
 This registers the plugin globally. No need to clone the repository.
