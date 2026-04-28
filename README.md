@@ -66,6 +66,68 @@ pip install -e .
 
 ---
 
+## Claude Code Plugin
+
+The profiler ships a Claude Code plugin that automates the full optimization workflow inside your Claude Code session. Pass a workload file and get a profiled, optimized, validated PyTorch backend — no manual pipeline steps required.
+
+### Prerequisites
+
+- [Claude Code](https://claude.ai/code) installed
+- `nsys` and `ncu` available (see [Requirements](#requirements))
+- A CUDA GPU
+
+### Installation
+
+In any Claude Code session, run:
+
+```
+/plugin marketplace add yottalabsai/Profiler
+```
+
+This registers the plugin globally — no need to clone the repository first.
+
+### Skills
+
+| Command | What it does |
+|---|---|
+| `/optimize workload.py` | **End-to-end workflow** — runs all 8 stages and produces a validated optimized backend |
+| `/capture workload.py` | Run nsys + ncu profiling pipeline → `profile.json` |
+| `/analyze profile.json` | Classify GPU bottlenecks by operator → `triage.json` |
+| `/propose profile.json` | Generate ranked FX optimization proposals → `optimizations.json` |
+| `/backend workload.py optimizations.json` | Generate custom `torch.compile()` backend → `workload_optimized.py` |
+| `/validate workload_optimized.py` | 5-step validation (syntax → import → registration → tests → smoke test) |
+| `/compare profile.json profile_optimized.json` | Attribute speedups to specific transformations |
+| `/report` | Generate human-readable `report.md` from all artifacts |
+
+### End-to-end usage
+
+```
+/optimize examples/transformer_block/transformer_block.py
+```
+
+The `/optimize` command runs 8 stages in sequence:
+
+| Stage | Output |
+|---|---|
+| 0. Capture baseline | `profile.json` |
+| 1. Analyze bottlenecks | `triage.json` |
+| 2. Propose optimizations | `optimizations.json` |
+| 3. Generate backend | `transformer_block_optimized.py` |
+| 4. Validate backend | validation report |
+| 5. Capture optimized | `profile_optimized.json` |
+| 6. Compare results | speedup table |
+| 7. Report | `report.md` |
+
+To resume a partially completed run from a specific stage:
+
+```
+/optimize workload.py --resume --from=backend
+```
+
+Individual skills are useful when you want to inspect or modify artifacts between stages — for example, editing `optimizations.json` before running `/backend`, or re-running `/validate` after fixing a generated backend manually.
+
+---
+
 ## CLI Reference
 
 ### `profile` — capture
@@ -242,6 +304,8 @@ for op in operators_by_duration[:5]:
 ---
 
 ## Optimization Workflow
+
+The Claude Code plugin (see above) automates this entire workflow via `/optimize workload.py`. The manual steps below are available if you want finer control over individual stages.
 
 Once you have a profile, use the provided prompt templates to identify and implement optimizations:
 
