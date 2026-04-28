@@ -1,0 +1,660 @@
+PyTorch: 2.11.0+cpu
+
+=== ExplainOutput summary ===
+Graph Count: 1
+Graph Break Count: 0
+Op Count: 8
+Break Reasons:
+Ops per Graph:
+  Ops 1:
+    <built-in function linear>
+    <function relu at 0x00000219487F7250>
+    <built-in function linear>
+    <built-in function gelu>
+    <built-in function linear>
+    <function silu at 0x00000219487F7E20>
+    <built-in function linear>
+    <built-in method tanh of type object at 0x00007FFA1639ADB0>
+Out Guards:
+  Guard 1:
+    Name: ''
+    Source: shape_env
+    Create Function: SHAPE_ENV
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 2:
+    Name: ''
+    Source: global
+    Create Function: DETERMINISTIC_ALGORITHMS
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 3:
+    Name: ''
+    Source: global
+    Create Function: GRAD_MODE
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 4:
+    Name: ''
+    Source: global
+    Create Function: DEFAULT_DEVICE
+    Guard Types: ['DEFAULT_DEVICE']
+    Code List: ['utils_device.CURRENT_DEVICE == None']
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 5:
+    Name: ''
+    Source: global
+    Create Function: GLOBAL_STATE
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 6:
+    Name: ''
+    Source: global
+    Create Function: TORCH_FUNCTION_STATE
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 7:
+    Name: ''
+    Source: global
+    Create Function: AUTOGRAD_SAVED_TENSORS_HOOKS
+    Guard Types: ['AUTOGRAD_SAVED_TENSORS_HOOKS']
+    Code List: ['torch._functorch.aot_autograd.utils.top_saved_tensors_hooks ids == None']
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 8:
+    Name: "G['F']"
+    Source: global
+    Create Function: MODULE_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['F'], 2307613117872), type=<module 'torch.nn.functional' from 'C:\\\\Users\\\\s-lch\\\\anaconda3\\\\envs\\\\ml_env\\\\lib\\\\site-packages\\\\torch\\\\nn\\\\functional.py'>"]
+    Object Weakref: <weakref at 0x21950b2cc70; to 'module' at 0x2194875cdb0>
+    Guarded Class Weakref: <weakref at 0x0000021921F2F1A0; to 'type' at 0x00007FFA16951860 (module)>
+  Guard 9:
+    Name: "L['self']"
+    Source: local_unspecialized_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self'], 2307627480208), type=<class '__main__.MLPActivations'>"]
+    Object Weakref: <weakref at 0x2194d893880; to 'MLPActivations' at 0x219228d38b0>
+    Guarded Class Weakref: <weakref at 0x00000219228B2700; to 'type' at 0x000002194950F490 (MLPActivations)>
+  Guard 10:
+    Name: "L['self']._parameters"
+    Source: local_unspecialized_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._parameters, 140712097364416), type=<class 'dict'>"]
+    Object Weakref: None
+    Guarded Class Weakref: <weakref at 0x0000021921F222A0; to 'type' at 0x00007FFA169439C0 (dict)>
+  Guard 11:
+    Name: "L['self']._modules"
+    Source: local_unspecialized_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules, 140712097364416), type=<class 'dict'>"]
+    Object Weakref: None
+    Guarded Class Weakref: <weakref at 0x0000021921F222A0; to 'type' at 0x00007FFA169439C0 (dict)>
+  Guard 12:
+    Name: "L['self']._modules['fc1']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc1'], 2307085146320), type=<class 'torch.nn.modules.linear.Linear'>"]
+    Object Weakref: <weakref at 0x21950b2e0c0; to 'Linear' at 0x219228d36d0>
+    Guarded Class Weakref: <weakref at 0x00000219488A0B80; to 'type' at 0x0000021928FD98D0 (Linear)>
+  Guard 13:
+    Name: "L['self']._modules['fc1']._backward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 14:
+    Name: "L['self']._modules['fc1']._backward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 15:
+    Name: "L['self']._modules['fc1']._forward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 16:
+    Name: "L['self']._modules['fc1']._forward_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 17:
+    Name: "L['self']._modules['fc1']._forward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 18:
+    Name: "L['self']._modules['fc1']._forward_pre_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 19:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_module']"
+    Source: global
+    Create Function: MODULE_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['__import_torch_dot_nn_dot_modules_dot_module'], 2307609108752), type=<module 'torch.nn.modules.module' from 'C:\\\\Users\\\\s-lch\\\\anaconda3\\\\envs\\\\ml_env\\\\lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py'>"]
+    Object Weakref: <weakref at 0x21950b2d8a0; to 'module' at 0x2194838a110>
+    Guarded Class Weakref: <weakref at 0x0000021921F2F1A0; to 'type' at 0x00007FFA16951860 (module)>
+  Guard 20:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_module']._global_backward_pre_hooks"
+    Source: global
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(G['__import_torch_dot_nn_dot_modules_dot_module']._global_backward_pre_hooks, 140712097425056), type=<class 'collections.OrderedDict'>"]
+    Object Weakref: <weakref at 0x21950b2dd00; to 'OrderedDict' at 0x21948657d40>
+    Guarded Class Weakref: <weakref at 0x0000021921F2FF10; to 'type' at 0x00007FFA169526A0 (OrderedDict)>
+  Guard 21:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_module']._global_backward_hooks"
+    Source: global
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(G['__import_torch_dot_nn_dot_modules_dot_module']._global_backward_hooks, 140712097425056), type=<class 'collections.OrderedDict'>"]
+    Object Weakref: <weakref at 0x21950b2dbc0; to 'OrderedDict' at 0x21948707440>
+    Guarded Class Weakref: <weakref at 0x0000021921F2FF10; to 'type' at 0x00007FFA169526A0 (OrderedDict)>
+  Guard 22:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_module']._global_forward_hooks"
+    Source: global
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(G['__import_torch_dot_nn_dot_modules_dot_module']._global_forward_hooks, 140712097425056), type=<class 'collections.OrderedDict'>"]
+    Object Weakref: <weakref at 0x21950b2dad0; to 'OrderedDict' at 0x21948707240>
+    Guarded Class Weakref: <weakref at 0x0000021921F2FF10; to 'type' at 0x00007FFA169526A0 (OrderedDict)>
+  Guard 23:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_module']._global_forward_pre_hooks"
+    Source: global
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(G['__import_torch_dot_nn_dot_modules_dot_module']._global_forward_pre_hooks, 140712097425056), type=<class 'collections.OrderedDict'>"]
+    Object Weakref: <weakref at 0x21950b2dc60; to 'OrderedDict' at 0x219487073c0>
+    Guarded Class Weakref: <weakref at 0x0000021921F2FF10; to 'type' at 0x00007FFA169526A0 (OrderedDict)>
+  Guard 24:
+    Name: "L['self']._modules['fc1']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 25:
+    Name: "L['self']._modules['fc1']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 26:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_linear']"
+    Source: global
+    Create Function: MODULE_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['__import_torch_dot_nn_dot_modules_dot_linear'], 2307613115712), type=<module 'torch.nn.modules.linear' from 'C:\\\\Users\\\\s-lch\\\\anaconda3\\\\envs\\\\ml_env\\\\lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\linear.py'>"]
+    Object Weakref: <weakref at 0x21950b2d710; to 'module' at 0x2194875c540>
+    Guarded Class Weakref: <weakref at 0x0000021921F2F1A0; to 'type' at 0x00007FFA16951860 (module)>
+  Guard 27:
+    Name: "G['__import_torch_dot_nn_dot_modules_dot_linear'].F"
+    Source: global
+    Create Function: DUPLICATE_INPUT
+    Guard Types: ['DUPLICATE_INPUT']
+    Code List: ["G['F'] is G['__import_torch_dot_nn_dot_modules_dot_linear'].F"]
+    Object Weakref: <weakref at 0x21950b2cc70; to 'module' at 0x2194875cdb0>
+    Guarded Class Weakref: <weakref at 0x0000021921F2F1A0; to 'type' at 0x00007FFA16951860 (module)>
+  Guard 28:
+    Name: "L['self']._modules['fc1']._parameters"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc1']._parameters, 140712097364416), type=<class 'dict'>"]
+    Object Weakref: None
+    Guarded Class Weakref: <weakref at 0x0000021921F222A0; to 'type' at 0x00007FFA169439C0 (dict)>
+  Guard 29:
+    Name: "L['self']._modules['fc1']._parameters['weight']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 30:
+    Name: "L['self']._modules['fc1']._parameters['bias']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 31:
+    Name: "G['F'].linear"
+    Source: global
+    Create Function: BUILTIN_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['F'].linear, 2307601411952), type=<built-in function linear>"]
+    Object Weakref: <weakref at 0x21950b2ccc0; to 'builtin_function_or_method' at 0x21947c32f70>
+    Guarded Class Weakref: <weakref at 0x0000021921F05CB0; to 'type' at 0x00007FFA169513A0 (builtin_function_or_method)>
+  Guard 32:
+    Name: "L['x']"
+    Source: local
+    Create Function: TENSOR_MATCH
+    Guard Types: ['TENSOR_MATCH']
+    Code List: ["hasattr(L['x'], '_dynamo_dynamic_indices') == False"]
+    Object Weakref: <weakref at 0x21950aa34c0; to 'Tensor' at 0x2194b240270>
+    Guarded Class Weakref: <weakref at 0x0000021947E58B80; to 'torch._C._TensorMeta' at 0x0000021928B19480 (Tensor)>
+  Guard 33:
+    Name: "G['F'].relu"
+    Source: global
+    Create Function: CLOSURE_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 34:
+    Name: "L['self']._modules['fc2']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc2'], 2307085146320), type=<class 'torch.nn.modules.linear.Linear'>"]
+    Object Weakref: <weakref at 0x21950b2e250; to 'Linear' at 0x219228d3670>
+    Guarded Class Weakref: <weakref at 0x00000219488A0B80; to 'type' at 0x0000021928FD98D0 (Linear)>
+  Guard 35:
+    Name: "L['self']._modules['fc2']._backward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 36:
+    Name: "L['self']._modules['fc2']._backward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 37:
+    Name: "L['self']._modules['fc2']._forward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 38:
+    Name: "L['self']._modules['fc2']._forward_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 39:
+    Name: "L['self']._modules['fc2']._forward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 40:
+    Name: "L['self']._modules['fc2']._forward_pre_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 41:
+    Name: "L['self']._modules['fc2']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 42:
+    Name: "L['self']._modules['fc2']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 43:
+    Name: "L['self']._modules['fc2']._parameters"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc2']._parameters, 140712097364416), type=<class 'dict'>"]
+    Object Weakref: None
+    Guarded Class Weakref: <weakref at 0x0000021921F222A0; to 'type' at 0x00007FFA169439C0 (dict)>
+  Guard 44:
+    Name: "L['self']._modules['fc2']._parameters['weight']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 45:
+    Name: "L['self']._modules['fc2']._parameters['bias']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 46:
+    Name: "G['F'].gelu"
+    Source: global
+    Create Function: BUILTIN_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['F'].gelu, 2307601279840), type=<built-in function gelu>"]
+    Object Weakref: <weakref at 0x21950b2d030; to 'builtin_function_or_method' at 0x21947c12b60>
+    Guarded Class Weakref: <weakref at 0x0000021921F05CB0; to 'type' at 0x00007FFA169513A0 (builtin_function_or_method)>
+  Guard 47:
+    Name: "L['self']._modules['fc3']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc3'], 2307085146320), type=<class 'torch.nn.modules.linear.Linear'>"]
+    Object Weakref: <weakref at 0x21950b2e390; to 'Linear' at 0x219228d36a0>
+    Guarded Class Weakref: <weakref at 0x00000219488A0B80; to 'type' at 0x0000021928FD98D0 (Linear)>
+  Guard 48:
+    Name: "L['self']._modules['fc3']._backward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 49:
+    Name: "L['self']._modules['fc3']._backward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 50:
+    Name: "L['self']._modules['fc3']._forward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 51:
+    Name: "L['self']._modules['fc3']._forward_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 52:
+    Name: "L['self']._modules['fc3']._forward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 53:
+    Name: "L['self']._modules['fc3']._forward_pre_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 54:
+    Name: "L['self']._modules['fc3']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 55:
+    Name: "L['self']._modules['fc3']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 56:
+    Name: "L['self']._modules['fc3']._parameters"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc3']._parameters, 140712097364416), type=<class 'dict'>"]
+    Object Weakref: None
+    Guarded Class Weakref: <weakref at 0x0000021921F222A0; to 'type' at 0x00007FFA169439C0 (dict)>
+  Guard 57:
+    Name: "L['self']._modules['fc3']._parameters['weight']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 58:
+    Name: "L['self']._modules['fc3']._parameters['bias']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 59:
+    Name: "G['F'].silu"
+    Source: global
+    Create Function: CLOSURE_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 60:
+    Name: "G['torch']"
+    Source: global
+    Create Function: MODULE_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['torch'], 2306976987344), type=<module 'torch' from 'C:\\\\Users\\\\s-lch\\\\anaconda3\\\\envs\\\\ml_env\\\\lib\\\\site-packages\\\\torch\\\\__init__.py'>"]
+    Object Weakref: <weakref at 0x21950b2cdb0; to 'module' at 0x219228b38d0>
+    Guarded Class Weakref: <weakref at 0x0000021921F2F1A0; to 'type' at 0x00007FFA16951860 (module)>
+  Guard 61:
+    Name: "L['self']._modules['fc4']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc4'], 2307085146320), type=<class 'torch.nn.modules.linear.Linear'>"]
+    Object Weakref: <weakref at 0x21950b2e480; to 'Linear' at 0x219228d3580>
+    Guarded Class Weakref: <weakref at 0x00000219488A0B80; to 'type' at 0x0000021928FD98D0 (Linear)>
+  Guard 62:
+    Name: "L['self']._modules['fc4']._backward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 63:
+    Name: "L['self']._modules['fc4']._backward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 64:
+    Name: "L['self']._modules['fc4']._forward_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 65:
+    Name: "L['self']._modules['fc4']._forward_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 66:
+    Name: "L['self']._modules['fc4']._forward_pre_hooks"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 67:
+    Name: "L['self']._modules['fc4']._forward_pre_hooks_with_kwargs"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: EMPTY_NN_MODULE_HOOKS_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 68:
+    Name: "L['self']._modules['fc4']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 69:
+    Name: "L['self']._modules['fc4']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: NOT_PRESENT_IN_GENERIC_DICT
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 70:
+    Name: "L['self']._modules['fc4']._parameters"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TYPE_MATCH
+    Guard Types: ['TYPE_MATCH']
+    Code List: ["___check_type_id(L['self']._modules['fc4']._parameters, 140712097364416), type=<class 'dict'>"]
+    Object Weakref: None
+    Guarded Class Weakref: <weakref at 0x0000021921F222A0; to 'type' at 0x00007FFA169439C0 (dict)>
+  Guard 71:
+    Name: "L['self']._modules['fc4']._parameters['weight']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 72:
+    Name: "L['self']._modules['fc4']._parameters['bias']"
+    Source: local_unspecialized_builtin_nn_module
+    Create Function: TENSOR_MATCH
+    Guard Types: None
+    Code List: None
+    Object Weakref: None
+    Guarded Class Weakref: None
+  Guard 73:
+    Name: "G['torch'].tanh"
+    Source: global
+    Create Function: BUILTIN_MATCH
+    Guard Types: ['ID_MATCH']
+    Code List: ["___check_obj_id(G['torch'].tanh, 2307008050608), type=<built-in method tanh of type object at 0x00007FFA1639ADB0>"]
+    Object Weakref: <weakref at 0x21950b2d5d0; to 'builtin_function_or_method' at 0x219246535b0>
+    Guarded Class Weakref: <weakref at 0x0000021921F05CB0; to 'type' at 0x00007FFA169513A0 (builtin_function_or_method)>
+Compile Times: TorchDynamo compilation metrics:
+Function                           Runtimes (s)
+-------------------------------  --------------
+_compile.compile_inner                   0.5259
+compile_attempt_0                        0.4451
+bytecode_tracing                         0.396
+get_fake_value                           0.0501
+create_proxy                             0.0166
+wrap_to_fake_tensor_and_record           0.013
+variable_builder_call                    0.3091
+insert_deferred_runtime_asserts          0.004
+OutputGraph.call_user_compiler           0
+build_guards                             0.026
+gc                                       0.0011
+
+
+--- 1 graph(s) captured ---
+
+[Graph 0]
+class GraphModule(torch.nn.Module):
+    def forward(self, L_self_modules_fc1_parameters_weight_: "f32[2048, 512]", L_self_modules_fc1_parameters_bias_: "f32[2048]", L_x_: "f32[4, 512]", L_self_modules_fc2_parameters_weight_: "f32[2048, 2048]", L_self_modules_fc2_parameters_bias_: "f32[2048]", L_self_modules_fc3_parameters_weight_: "f32[2048, 2048]", L_self_modules_fc3_parameters_bias_: "f32[2048]", L_self_modules_fc4_parameters_weight_: "f32[512, 2048]", L_self_modules_fc4_parameters_bias_: "f32[512]"):
+        l_self_modules_fc1_parameters_weight_ = L_self_modules_fc1_parameters_weight_
+        l_self_modules_fc1_parameters_bias_ = L_self_modules_fc1_parameters_bias_
+        l_x_ = L_x_
+        l_self_modules_fc2_parameters_weight_ = L_self_modules_fc2_parameters_weight_
+        l_self_modules_fc2_parameters_bias_ = L_self_modules_fc2_parameters_bias_
+        l_self_modules_fc3_parameters_weight_ = L_self_modules_fc3_parameters_weight_
+        l_self_modules_fc3_parameters_bias_ = L_self_modules_fc3_parameters_bias_
+        l_self_modules_fc4_parameters_weight_ = L_self_modules_fc4_parameters_weight_
+        l_self_modules_fc4_parameters_bias_ = L_self_modules_fc4_parameters_bias_
+
+        # File: C:\Users\s-lch\anaconda3\envs\ml_env\lib\site-packages\torch\nn\modules\linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        linear: "f32[4, 2048]" = torch._C._nn.linear(l_x_, l_self_modules_fc1_parameters_weight_, l_self_modules_fc1_parameters_bias_);  l_x_ = l_self_modules_fc1_parameters_weight_ = l_self_modules_fc1_parameters_bias_ = None
+
+        # File: C:\Users\s-lch\OneDrive - Duke University\Yotta Labs\Profiler\_dynamo_explain_test.py:15 in forward, code: x = F.relu(self.fc1(x))
+        x: "f32[4, 2048]" = torch.nn.functional.relu(linear);  linear = None
+
+        # File: C:\Users\s-lch\anaconda3\envs\ml_env\lib\site-packages\torch\nn\modules\linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        linear_1: "f32[4, 2048]" = torch._C._nn.linear(x, l_self_modules_fc2_parameters_weight_, l_self_modules_fc2_parameters_bias_);  x = l_self_modules_fc2_parameters_weight_ = l_self_modules_fc2_parameters_bias_ = None
+
+        # File: C:\Users\s-lch\OneDrive - Duke University\Yotta Labs\Profiler\_dynamo_explain_test.py:16 in forward, code: x = F.gelu(self.fc2(x))
+        x_1: "f32[4, 2048]" = torch._C._nn.gelu(linear_1);  linear_1 = None
+
+        # File: C:\Users\s-lch\anaconda3\envs\ml_env\lib\site-packages\torch\nn\modules\linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        linear_2: "f32[4, 2048]" = torch._C._nn.linear(x_1, l_self_modules_fc3_parameters_weight_, l_self_modules_fc3_parameters_bias_);  x_1 = l_self_modules_fc3_parameters_weight_ = l_self_modules_fc3_parameters_bias_ = None
+
+        # File: C:\Users\s-lch\OneDrive - Duke University\Yotta Labs\Profiler\_dynamo_explain_test.py:17 in forward, code: x = F.silu(self.fc3(x))
+        x_2: "f32[4, 2048]" = torch.nn.functional.silu(linear_2);  linear_2 = None
+
+        # File: C:\Users\s-lch\anaconda3\envs\ml_env\lib\site-packages\torch\nn\modules\linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        linear_3: "f32[4, 512]" = torch._C._nn.linear(x_2, l_self_modules_fc4_parameters_weight_, l_self_modules_fc4_parameters_bias_);  x_2 = l_self_modules_fc4_parameters_weight_ = l_self_modules_fc4_parameters_bias_ = None
+
+        # File: C:\Users\s-lch\OneDrive - Duke University\Yotta Labs\Profiler\_dynamo_explain_test.py:18 in forward, code: x = torch.tanh(self.fc4(x))
+        x_3: "f32[4, 512]" = torch.tanh(linear_3);  linear_3 = None
+        return (x_3,)
+
+
+--- 0 graph break(s) ---

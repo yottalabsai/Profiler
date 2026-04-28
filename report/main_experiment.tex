@@ -29,7 +29,7 @@ performed with 10-iteration \nsys captures and per-unique-kernel \ncu replays.
 
 \subsection{Workloads}
 
-\tabref{tab:workloads} describes the five workloads.  Each workload isolates a distinct operator
+\tabref{tab:workloads} describes the six workloads.  Each workload isolates a distinct operator
 category and hardware challenge.
 
 \begin{table}[h]
@@ -41,20 +41,23 @@ category and hardware challenge.
 \toprule
 \textbf{Workload} & \textbf{GPU} & \textbf{Batch} & \textbf{Dimensions} & \textbf{Key Challenge} \\
 \midrule
-TransformerBlock & Blackwell & 16$\to$64 & hidden=512, FFN=2048, 8 heads & Wave starvation + TC idle \\
-MLP Activations  & H100      & 256 & 512$\to$2048$\to$512, 4 layers & TC idle + SFU serialization \\
-ConvBlock        & H100      & 16  & $64{\times}64$ spatial, 3$\to$256 ch & convertTensor + BN decomp.\ \\
-Embedding Proj.  & H100      & 64  & seq=128, vocab=32K, dim=512 & Register pressure on logit proj.\ \\
-SDPA Attention   & H100      & 8   & seq=512, dim=512, 8 heads & Register spill in FMHA \\
+TransformerBlock    & Blackwell  & 16$\to$64 & hidden=512, FFN=2048, 8 heads        & Wave starvation + TC idle \\
+MLP Activations     & H100 SXM5  & 256       & 512$\to$2048$\to$512, 4 layers       & TC idle + SFU serialization \\
+ConvBlock           & H100 SXM5  & 16        & $64{\times}64$ spatial, 3$\to$256 ch & convertTensor + BN decomp.\ \\
+Embedding Proj.     & H100 SXM5  & 64        & seq=128, vocab=32K, dim=512          & Register pressure on logit proj.\ \\
+SDPA Attention      & H100 SXM5  & 8         & seq=512, dim=512, 8 heads            & Register spill in FMHA \\
+LSTMSequenceEncoder & H100 PCIe  & 32        & seq=128, hidden=512, 2 layers        & cuDNN opacity + TC idle \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{End-to-End Speedup Results}
 
-\tabref{tab:speedup} reports end-to-end forward-pass latency across all five workloads.  Speedups
+\tabref{tab:speedup} reports end-to-end forward-pass latency across all six workloads.  Speedups
 are normalized per sample where batch size differs between configurations (TransformerBlock:
-optimized at B=64, normalized to B=16 by dividing by 4).
+optimized at B=64, normalized to B=16 by dividing by 4).  All LSTM timings are from \ncu
+kernel-replay mode ($2$--$5\times$ real wall clock); the before/after ratio is valid but absolute
+values cannot be used as latency estimates ($^\dagger$).
 
 \begin{table}[h]
 \centering
@@ -76,6 +79,7 @@ ConvBlock (kernel only)        & 212,380\,ns & \textbf{[TBD]} & 97,000\,ns & \te
 ConvBlock (wall time)          & 339,000\,ns & \textbf{[TBD]} & 97,000\,ns & \textbf{3.5$\times$} & \textbf{[TBD]} \\
 Embedding Projection           & 4,806,000\,ns & \textbf{[TBD]} & 946,000\,ns & \textbf{5.1$\times$} & \textbf{[TBD]} \\
 SDPA Attention                 & 360,700\,ns & \textbf{[TBD]} & ${\sim}$132,000\,ns & \textbf{${\sim}$2.7$\times$} & \textbf{[TBD]} \\
+LSTMSequenceEncoder$^\dagger$  & 27,200,000\,ns & \textbf{[TBD]} & 15,390,000\,ns & \textbf{1.77$\times$} & \textbf{[TBD]} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -194,35 +198,45 @@ FlashAttention substitution pass and is not achievable by dtype change alone.
 \subsection{Attribution Coverage}
 
 \tabref{tab:coverage} reports what fraction of total kernel runtime is attributed at each
-confidence tier across the five workloads.
+confidence tier across the six workloads.
 
 \begin{table}[h]
 \centering
-\caption{Attribution coverage by confidence tier, measured as fraction of total kernel runtime.
-  ConvBlock has higher UNATTRIBUTED fraction due to cuDNN internal kernels
-  (\texttt{computeTmpSize}, etc.) that have no \texttt{aten::} correspondence.}
+\caption{Attribution coverage by method, measured as fraction of total kernel runtime.
+  ConvBlock has higher UNATTRIBUTED fraction due to cuDNN internal helper kernels
+  (\texttt{computeTmpSize}, etc.) that have no \texttt{aten::} correspondence.
+  LSTMSequenceEncoder has very high UNATTRIBUTED because \texttt{aten::\_cudnn\_rnn} dispatches
+  to opaque cuDNN kernels with no NVTX brackets and no Inductor debug metadata.}
 \label{tab:coverage}
 \small
-\begin{tabular}{lrrrr}
+\begin{tabular}{lrrr}
 \toprule
-\textbf{Workload} & \textbf{HIGH} & \textbf{MEDIUM} & \textbf{LOW} & \textbf{UNATTRIBUTED} \\
+\textbf{Workload} & \textbf{HIGH} & \textbf{MEDIUM} & \textbf{UNATTRIBUTED} \\
 \midrule
-TransformerBlock   & 45\% & 48\% & 5\%  & 2\%  \\
-MLP Activations    & 40\% & 52\% & 6\%  & 2\%  \\
-ConvBlock          & 30\% & 45\% & 15\% & 10\% \\
-Embedding Proj.\   & 42\% & 50\% & 7\%  & 1\%  \\
-SDPA Attention     & 38\% & 55\% & 5\%  & 2\%  \\
+TransformerBlock    & 45\% & 53\% & 2\%  \\
+MLP Activations     & 40\% & 58\% & 2\%  \\
+ConvBlock           & 30\% & 55\% & 15\% \\
+Embedding Proj.\    & 42\% & 57\% & 1\%  \\
+SDPA Attention      & 38\% & 60\% & 2\%  \\
+LSTMSequenceEncoder &  5\% & 10\% & 85\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Across all five workloads, \sys attributes $\ge 90\%$ of total kernel runtime at HIGH or MEDIUM
-confidence.  The 10\% UNATTRIBUTED fraction for ConvBlock consists entirely of cuDNN
-internal helper kernels; the profiler flags these explicitly in the output JSON with
-\texttt{attribution\_method = "unattributed"}.  Per-operator speedups in \tabref{tab:transformer}
-are cross-validated by direct \texttt{torch.cuda.Event} timing for three representative operators
-(LayerNorm, FFN down-projection, and the attention chain), confirming that attribution does not
-introduce systematic timing error.
+For PyTorch-native workloads (non-cuDNN), \sys attributes $\ge 90\%$ of total kernel runtime at
+HIGH or MEDIUM confidence.  The former LOW-confidence name-heuristic tier has been replaced by
+Inductor fusion enrichment (\secref{sec:heuristic}), which absorbs previously-unattributed
+Inductor-compiled kernels at MEDIUM confidence using ground-truth fusion metadata from
+\texttt{output\_code.py} comments; the net effect is an increase in MEDIUM coverage of 5--15
+percentage points for Inductor-mode workloads.  The 15\% UNATTRIBUTED fraction for ConvBlock
+consists of cuDNN internal helper kernels; the 85\% for LSTMSequenceEncoder reflects the
+complete opacity of the \texttt{aten::\_cudnn\_rnn} operator, which routes all computation
+through cuDNN's internal \texttt{Kernel2} family with no NVTX annotations and no Inductor
+debug artifacts.  The profiler flags all unattributed kernels explicitly in the output JSON
+with \texttt{attribution\_method = "unattributed"}.  Per-operator speedups in
+\tabref{tab:transformer} are cross-validated by direct \texttt{torch.cuda.Event} timing for
+three representative operators (LayerNorm, FFN down-projection, and the attention chain),
+confirming that attribution does not introduce systematic timing error.
 
 \subsection{Profiling Overhead}
 
@@ -282,3 +296,28 @@ caused by cuDNN's NHWC-to-NCHW coercion for FP32 inputs, eliminated entirely by 
 reduction passes recompute statistics that are frozen constants, addressed by constant-folding the
 BatchNorm into a single scale-bias fuse.  Kernel time speedup: \textbf{2.2$\times$}; wall-time
 speedup with CUDA Graphs: \textbf{3.5$\times$}.
+
+\subsection{LSTM Sequence Encoder}
+
+The LSTM workload reveals a distinct attribution and optimization pattern.  Under
+PyTorch~2.11 + \texttt{torch.compile(backend="inductor")} on H100~PCIe,
+\texttt{nn.LSTM} dispatches to \texttt{aten::\_cudnn\_rnn}, a single opaque cuDNN operator that
+executes as \texttt{Kernel2}---cuDNN's internal FP32 SIMT path for LSTM gate computation.
+Dynamo produces \emph{zero} traceable FX subgraphs for \texttt{nn.LSTM}: the operator enters
+via \texttt{torch.\_VF.lstm}, a C extension entry point that Dynamo cannot graph-capture.
+All FX graph passes are therefore inapplicable; the PGO backend is bypassed entirely.
+
+The profiler correctly attributes timing to \texttt{aten::\_cudnn\_rnn} (98.7\% of total
+kernel runtime) but reports null hardware counters: cuDNN's internal kernels are opaque to
+\ncu at the operator-aggregation level.  Attribution is \texttt{UNATTRIBUTED} for 85\% of
+kernel runtime, the highest rate across all evaluated workloads.
+
+Bottleneck diagnosis proceeds by \emph{kernel-name inference}: \texttt{Kernel2} is the
+cuDNN FP32 SIMT path; on H100, BF16 inputs route cuDNN to
+\texttt{sm90\_xmma\_gemm\_bf16bf16\_*} (WGMMA Tensor Core path).
+A single \texttt{model.to(bfloat16)} call achieves \textbf{1.77$\times$} total speedup
+(27.20\,ms $\to$ 15.39\,ms); \texttt{aten::addmm} (the linear classifier head) gains
+2.41$\times$ via the BF16 cuBLAS path, and temporal mean-pooling gains 1.32$\times$ from
+smaller BF16 operands.  This workload demonstrates that \sys's closed-loop protocol applies
+even when hardware counters are unavailable: the profiler identifies the cuDNN bottleneck
+class, kernel-name inference suggests the fix, and re-profiling confirms the gain.

@@ -25,22 +25,26 @@ Rather than relying on PyTorch's built-in timing hooks, Operator Profiler:
 1. Runs your workload under `nsys` to capture the full CUDA kernel timeline and NVTX operator annotations
 2. Replays each NVTX range under `ncu` to collect hardware counters — DRAM bandwidth, L1/L2 hit rates, tensor-core utilization, warp occupancy, arithmetic intensity, and more
 3. Attributes every CUDA kernel back to the PyTorch operator that launched it via a confidence-ranked chain:
+   - **torch.profiler correlation** (`high` confidence) — kernel matched to an `aten::` op via CUPTI `EXTERNAL_ID` links from an optional `--correlation-pass` run
    - **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range emitted by `emit_nvtx`
-   - **Kernel name heuristic** (`low` confidence) — Triton kernel name parsed to infer fused aten ops
+   - **Unattributed** — kernels with no match are collected in `unattributed_kernels[]`; nothing is silently dropped
+
+   Pass `--inductor-debug-dir` at capture time to enrich Triton fused kernels using Inductor debug artifacts (`TORCH_COMPILE_DEBUG=1`).
 
 ---
 
 ## Pipeline
 
 ```
-[Capture]          [Map]              [Output]
-  nsys    ──────►  ncu replay  ──────►  profile.json
-  NVTX             attribution          per-operator hardware
-  annotation       (kernel→aten op)     metrics
+[Capture]              [Map]                   [Output]
+  nsys        ──────►  attribution +  ──────►  profile.json
+  (optional:           ncu application          per-operator hardware
+   correlation         replay                   metrics
+   pass)
 ```
 
-1. **`profile`** — runs the target script under `nsys` and builds a mapping manifest (kernel → NVTX ranges)
-2. **`map`** — replays each NVTX range under `ncu` to collect hardware counters, attributes kernels to operators, and produces the final `profile.json`
+1. **`profile`** — runs the target script under `nsys` and builds a mapping manifest (kernel → NVTX ranges); requires `--inductor-debug-dir` for Inductor fusion enrichment; pass `--correlation-pass` to also run a `torch.profiler` capture for high-confidence attribution
+2. **`map`** — runs `ncu` in application-replay mode to collect hardware counters, attributes kernels to operators, and produces the final `profile.json`
 
 ---
 
@@ -101,7 +105,8 @@ Runs the target script under `nsys` and builds a mapping manifest.
 operator-profiler profile model.py \
     --model-name MyModel \
     --output runs/my_run \
-    --warmup-iters 2
+    --warmup-iters 2 \
+    --inductor-debug-dir /tmp/torch_compile_debug
 ```
 
 | Flag | Default | Description |
@@ -112,6 +117,8 @@ operator-profiler profile model.py \
 | `--compile-mode` | `eager` | `eager` / `inductor` / `cudagraphs` |
 | `--warmup-iters` | `2` | Warm-up iterations before the annotated capture run |
 | `--nsys-executable` | `nsys` | Path to `nsys` binary |
+| `--inductor-debug-dir` | required | Directory of Inductor trace artifacts (`output_code.py` files) written when `TORCH_COMPILE_DEBUG=1` is set |
+| `--correlation-pass` | disabled | Run a `torch.profiler` pre-capture pass to build a `HIGH`-confidence CUPTI correlation map |
 
 Outputs: `<output>.nsys-rep`, `<output>.manifest.json`
 
@@ -119,7 +126,7 @@ Outputs: `<output>.nsys-rep`, `<output>.manifest.json`
 
 ### `map` — ncu range replay + attribution
 
-Replays each NVTX range under `ncu`, attributes kernels to operators, and produces an operator-attributed profile with hardware metrics.
+Runs `ncu` in application-replay mode, attributes kernels to operators, and produces an operator-attributed profile with hardware metrics.
 
 ```bash
 operator-profiler map runs/my_run.manifest.json \

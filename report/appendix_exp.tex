@@ -1,0 +1,87 @@
+﻿\section{Reproduction and Additional Details}
+\label{sec:appendix:exp}
+
+\subsection{Workload Reproduction}
+\label{sec:appendix:repro}
+
+All six workloads are reproduced using the commands below.
+Each workload requires an NVIDIA GPU (Ampere, Hopper, or Blackwell),
+\nsys $\ge$ 2025.1, \ncu $\ge$ 2025.4.1, PyTorch 2.11, and CUDA 12.x.
+
+\begin{lstlisting}[style=pystyle]
+# Install
+pip install -e .
+
+# Capture baseline profile for one workload
+operator-profiler profile scripts/workloads/transformer_block.py \
+    --output runs/transformer_block/baseline \
+    --warmup-iters 2
+
+# Collect hardware counters
+operator-profiler map runs/transformer_block/baseline.manifest.json \
+    --script scripts/workloads/transformer_block.py \
+    --ncu-sudo --output runs/transformer_block/profile.json
+
+# Run all six workloads in batch
+python scripts/run_all_profiles.py
+\end{lstlisting}
+
+Profiling results, optimized workload scripts, and \texttt{profile.json} /
+\texttt{profile\_optimized.json} pairs for all six examples are in
+\texttt{examples/} in the repository.  Each subdirectory contains
+\texttt{report.md} with the measured before-and-after hardware counter values.
+
+\subsection{Hardware Counter Reference}
+\label{sec:appendix:counters}
+
+\tabref{tab:counters_full} lists the architecture-specific \ncu counter name
+variants for the five counters that differ across Ampere, Hopper, and
+Blackwell.  \sys queries all variants and uses the first that returns a
+non-null value.
+
+\begin{table}[h]
+\centering
+\caption{Architecture-specific \ncu counter name fallbacks used by \sys.}
+\label{tab:counters_full}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{3.2cm}p{4.5cm}p{5cm}}
+\toprule
+\textbf{Profile Field} & \textbf{Ampere name} & \textbf{Hopper / Blackwell name} \\
+\midrule
+\texttt{dram\_bytes\_read}
+  & \texttt{dram\_\_bytes\_read.sum}
+  & \texttt{fbpa\_\_dram\_read\_bytes.sum} \\
+\texttt{dram\_bytes\_written}
+  & \texttt{dram\_\_bytes\_write.sum}
+  & \texttt{fbpa\_\_dram\_write\_bytes.sum} \\
+\texttt{dram\_throughput\_pct}
+  & \texttt{dram\_\_throughput.avg.pct\_of\_peak\_sustained\_elapsed}
+  & \texttt{gpu\_\_dram\_throughput.avg.pct\_of\_peak\_sustained\_elapsed} \\
+\texttt{sm\_throughput\_pct}
+  & \texttt{sm\_\_throughput.avg.pct\_of\_peak\_sustained\_elapsed}
+  & same \\
+\texttt{achieved\_occupancy}
+  & \texttt{sm\_\_warps\_active.avg.pct\_of\_peak\_sustained\_active}
+  & same \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Additional Limitations}
+\label{sec:appendix:limitations}
+
+Beyond the limitations noted in \secref{sec:conclusion}:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{\ncu replay timing inflation.}  All \texttt{duration\_ns} values in
+    \texttt{profile.json} reflect \ncu's serialized replay execution, which runs
+    2--5$\times$ slower than real wall-clock execution.  Values should be used for
+    relative comparison only; \texttt{torch.cuda.Event} timing is authoritative for
+    absolute latency.
+  \item \textbf{Multi-GPU attribution.}  The current pipeline profiles a single GPU.
+    Distributed workloads with NCCL communication require per-stream, per-device
+    profiling runs; cross-device attribution is not yet supported.
+  \item \textbf{Dynamic shapes.}  Shape validation enforces that \ncu replay inputs
+    match the \nsys capture.  Models with truly dynamic shapes (varying sequence
+    length per call) require separate captures per shape bucket.
+\end{itemize}

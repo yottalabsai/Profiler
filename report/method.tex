@@ -41,16 +41,22 @@ The \texttt{cpu\_launch\_start\_ns} field from the RUNTIME table is the host-sid
 the CUDA kernel launch API returned, providing a CPU-domain anchor for NVTX bracket queries
 without conflating it with the GPU-domain kernel execution timestamp (\secref{sec:clockdomain}).
 
-\textbf{Nsight Compute export.}  For each unique kernel name found in the \nsys trace, \sys
-invokes:
+\textbf{Nsight Compute export.}  For the full set of kernels in the \nsys trace, \sys invokes
+a single application-mode replay pass per counter group (4--8 passes total), collecting all
+20 metrics simultaneously:
 \begin{lstlisting}[style=pystyle]
-ncu --kernel-name <name> --replay-mode kernel \
+ncu --replay-mode application \
     --metrics <comma_separated_list> \
     --export <output.ncu-rep> \
+    [--kernel-name <filter>] \
     <replay_script.py>
 \end{lstlisting}
-The resulting \texttt{.ncu-rep} is exported to CSV (\texttt{ncu --import --csv}), producing one
-row per kernel invocation per metric.
+Application-mode replays the workload once per counter group regardless of the number of
+unique kernel names, making profiling cost $O(\text{counter groups})$ rather than
+$O(\text{unique kernels})$---a 10--50$\times$ efficiency gain for multi-layer models.
+The optional \texttt{--kernel-name} flag filters to a specific kernel for targeted
+re-profiling.  The resulting \texttt{.ncu-rep} is exported to CSV
+(\texttt{ncu --import --csv}), producing one row per kernel invocation per metric.
 
 \subsection{The Clock Domain Problem and Invocation-Order Matching}
 \label{sec:clockdomain}
@@ -110,7 +116,7 @@ $O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = number of enclo
 \State $\textit{ranges} \gets$ \texttt{forest}[$k.\textit{stream\_id}$].query\_enclosing($T$)
   \Comment{all NVTX ranges $[s,e]$ with $s \le T \le e$}
 \If{$|\textit{ranges}| = 0$}
-  \State \textbf{fall through} to name heuristic (\secref{sec:heuristic})
+  \State \textbf{fall through} to Inductor fusion enrichment (\secref{sec:heuristic}) or UNATTRIBUTED
 \ElsIf{$|\textit{ranges}| = 1$}
   \State $k.\textit{operator} \gets \textit{ranges}[0].\textit{text}$,
          \textit{confidence} $\gets$ MEDIUM
@@ -128,43 +134,68 @@ The \texttt{cpu\_launch\_start\_ns} field is used as the query point rather than
 \texttt{start\_ns}, because NVTX ranges are CPU-side events and the async gap between host launch
 and GPU execution makes GPU timestamps unreliable for enclosure queries.
 
-\subsection{Triton Name Heuristic Attribution}
+\subsection{Inductor Fusion Enrichment}
 \label{sec:heuristic}
 
-When NVTX enclosure fails (no enclosing range exists at the query point), \sys parses the kernel
-name for low-confidence attribution. Triton-fused kernel names follow the pattern:
-\begin{center}
-  \texttt{triton\_\{kind\}\_fused\_\{tok\_1\}\_\{tok\_2\}\_\ldots\_\{tok\_n\}\_\{index\}}
-\end{center}
-where each \texttt{tok\_i} is one of a known vocabulary
-(\texttt{layer\_norm}, \texttt{addmm}, \texttt{relu}, \texttt{gelu}, \texttt{softmax},
-\texttt{mm}, \texttt{conv2d}, \etc). \sys extracts tokens left-to-right against a longest-match
-vocabulary and assigns the kernel to the primary operator (first match), recording all matches
-as \texttt{source\_operators} to support fused-kernel analysis.  For non-Triton kernels (cuBLAS,
-cuDNN), a substring dictionary maps name fragments (\texttt{gemm}, \texttt{conv}, \texttt{batch\_norm})
-to \texttt{aten::} equivalents.
+When NVTX enclosure fails (no enclosing range exists at the query point), \sys applies a
+post-attribution enrichment pass that recovers ground-truth fused operator identity from Inductor
+debug artifacts, rather than guessing from kernel names.
+
+\textbf{Inductor debug extraction.}  When \texttt{torch.compile(backend="inductor")} runs with
+debug mode enabled, Inductor writes \texttt{output\_code.py} artifacts containing the generated
+Triton kernel source.  Each kernel call site is preceded by a structured comment:
+
+\begin{lstlisting}[style=pystyle]
+# Topologically Sorted Source Nodes: [...],
+# Original ATen: [aten.relu, aten.addmm]
+def triton_poi_fused_relu_addmm_0(in_ptr0, ...):
+    ...
+\end{lstlisting}
+
+\sys's \texttt{InductorFusionExtractor} parses these comments via the regex
+\texttt{\# .+Original~ATen:\textbackslash{}s*\textbackslash{}[([\textasciicircum{}\textbackslash{}]]+)\textbackslash{}]},
+producing a mapping $\{$\textit{kernel\_short\_name} $\to$ $[$\texttt{aten::op}_1,
+\texttt{aten::op}_2, $\ldots]$$\}$ that contains the exact set of aten operators fused into
+each kernel.
+
+\textbf{Enrichment as a post-attribution pass.}  This map is applied \emph{after} the NVTX
+enclosure pass and never overrides a valid TORCH\_PROFILER or NVTX attribution:
+\begin{enumerate}[leftmargin=1.5em]
+  \item For kernels that remain UNATTRIBUTED after NVTX enclosure, a lookup in the fusion map
+    upgrades them to \texttt{INDUCTOR\_FUSION} attribution at MEDIUM confidence, with
+    \texttt{source\_operators} populated from the \texttt{Original~ATen} comment.
+  \item For already-attributed kernels (TORCH\_PROFILER or NVTX), the enrichment augments the
+    \texttt{fused\_ops} field and sets \texttt{is\_fused~=~True} if multiple operators are present.
+\end{enumerate}
+
+Kernels matching neither NVTX enclosure nor the Inductor fusion map remain in
+\texttt{unattributed\_kernels[]} with \texttt{attribution\_method = "unattributed"}.  For eager-mode
+workloads or cuDNN-backed operators (\eg \texttt{nn.LSTM} via \texttt{aten::\_cudnn\_rnn}), which
+produce neither NVTX brackets nor Inductor debug output, unattributed rates of 20--85\% are expected
+and are surfaced explicitly in the profile output.
 
 \subsection{Confidence Tiers}
 \label{sec:tiers}
 
 \begin{table}[t]
 \centering
-\caption{Attribution confidence tiers in \sys.  Coverage percentages are measured over kernel
-  \emph{runtime} (not kernel count) across the five evaluated workloads in eager compilation mode.}
+\caption{Attribution methods in \sys.  Coverage percentages are measured over kernel
+  \emph{runtime} (not kernel count) across the six evaluated workloads; the UNATTRIBUTED rate
+  varies widely with compile mode and operator backend.}
 \label{tab:tiers}
 \small
 \begin{tabular}{llp{4.2cm}c}
 \toprule
-\textbf{Tier} & \textbf{Evidence} & \textbf{Trigger Condition} & \textbf{Typical Runtime Coverage} \\
+\textbf{Method} & \textbf{Evidence} & \textbf{Trigger Condition} & \textbf{Typical Runtime Coverage} \\
 \midrule
 \rowcolor{highcol!15}
 HIGH & torch.profiler invocation-order join & Kineto trace available; kernel count agrees with operator dispatch count & 35--45\% \\
 \rowcolor{medcol!15}
-MEDIUM & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range & 45--55\% \\
-\rowcolor{lowcol!15}
-LOW & Triton/cuBLAS name heuristic & Kernel name contains parseable op tokens & 5--15\% \\
+MEDIUM (NVTX) & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range & 45--55\% \\
+\rowcolor{medcol!10}
+MEDIUM (Inductor) & Inductor \texttt{output\_code.py} debug comments & Kernel name in Inductor fusion map; NVTX enclosure absent & 5--15\% (Inductor mode) \\
 \rowcolor{ucol!15}
-UNATTRIBUTED & None & Library-internal kernels (cuDNN helpers, NCCL) & 1--10\% \\
+UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN convolutions); eager Triton without NVTX & 1--85\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -398,3 +429,40 @@ The full optimization cycle consists of four steps:
 This protocol makes every optimization auditable: the delta report shows not just speedup, but
 \emph{which counter improved}, providing evidence that the diagnosed bottleneck was actually
 eliminated rather than merely shifted to a different operator.
+
+\subsection{Automated Optimization via Claude Code Plugin}
+\label{sec:plugin}
+
+The closed-loop protocol above requires coordinating five distinct tools: \nsys, \ncu, the
+attribution engine, the Torch Dynamo backend, and a second profiling pass.  \sys ships a
+Claude Code plugin that automates all eight stages---baseline capture, bottleneck analysis, FX
+optimization proposals, backend code generation, 5-step validation, re-profiling,
+cross-profile comparison, and human-readable reporting---in a single command:
+
+\begin{lstlisting}[style=pystyle]
+/optimize workload.py
+\end{lstlisting}
+
+The plugin orchestrates six specialized LLM agents.  \textbf{capture-agent} handles the \nsys
++ \ncu pipeline including executable auto-detection and \texttt{sudo} permission propagation;
+\textbf{profile-analyzer} applies the bottleneck decision tree and computes per-operator
+time-budget percentages; \textbf{optimization-strategist} produces \texttt{optimizations.json}
+with ranked FX proposals, exact metric-evidence citations, and dependency ordering;
+\textbf{backend-engineer} generates \texttt{workload\_optimized.py} with defensive FX passes
+and a pytest suite; \textbf{validation-agent} runs the 5-step pass/fail validation sequence
+and classifies which FX passes applied vs.\ fell through gracefully; and
+\textbf{comparison-agent} normalizes for batch-size differences and attributes measured counter
+deltas to specific transformations.
+
+Four Claude Code hooks maintain workflow continuity: write of \texttt{profile.json} prompts
+\texttt{/analyze}; write of \texttt{optimizations.json} prompts \texttt{/backend}; write of
+\texttt{*\_optimized.py} prompts \texttt{/validate}; and a pre-Bash hook enforces
+\texttt{--script-args} ordering in all \texttt{operator-profiler map} invocations.  A bundled
+knowledge base provides GPU roofline reference data for 12 GPU architectures, canonical FX
+pass implementations, and attribution edge-case guidance.  The plugin is installable without
+cloning the repository:
+
+\begin{lstlisting}[style=pystyle]
+/plugin marketplace add yottalabsai/Profiler
+/plugin install nvidia-profiler@profiler-plugins
+\end{lstlisting}

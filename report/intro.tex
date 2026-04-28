@@ -46,13 +46,16 @@ system for PyTorch. Our contributions are:
 
 \begin{enumerate}
 
-\item \textbf{Two-tier attribution pipeline (\secref{sec:attribution}).}  A
+\item \textbf{Attribution pipeline (\secref{sec:attribution}).}  A
   \texttt{StreamIntervalTree} keyed on \texttt{(stream\_id, device\_id)} pairs attributes each
-  CUDA kernel to an \texttt{aten::} operator via NVTX temporal enclosure (MEDIUM confidence) or
-  Triton kernel name heuristics (LOW confidence). A torch.profiler invocation-order join provides
-  HIGH-confidence attribution for registered operators. Invocation-order matching between \nsys and
-  \ncu avoids clock-domain joins. Eight edge cases---multi-stream execution, CUDA Graph replay, JIT
-  warm-up kernels, async launches, dynamic shapes, and fused kernels---are handled explicitly.
+  CUDA kernel to an \texttt{aten::} operator via NVTX temporal enclosure (MEDIUM confidence). A
+  torch.profiler invocation-order join provides HIGH-confidence attribution for registered operators.
+  An Inductor debug-artifact enrichment pass recovers ground-truth fused operator identity from
+  \texttt{output\_code.py} comments, upgrading previously unattributed Inductor-compiled kernels to
+  MEDIUM confidence. Kernels matching neither method are stored in \texttt{unattributed\_kernels[]}
+  and never silently dropped. Invocation-order matching between \nsys and \ncu avoids clock-domain
+  joins. Eight edge cases---multi-stream execution, CUDA Graph replay, JIT warm-up kernels, async
+  launches, dynamic shapes, and fused kernels---are handled explicitly.
 
 \item \textbf{20-counter curated metric set (\secref{sec:metrics}).}  Twenty hardware counters
   spanning all bottleneck axes are collected with architecture-specific name fallbacks for Ampere,
@@ -68,7 +71,7 @@ system for PyTorch. Our contributions are:
 \item \textbf{Closed-loop validation (\secref{sec:experiments}).}  A four-step protocol---profile
   $\to$ diagnose $\to$ transform $\to$ re-profile---verifies that hardware bottlenecks are
   eliminated, not merely shifted.  Per-operator hardware counter deltas confirm systematic
-  improvement across all five evaluated workloads.
+  improvement across all six evaluated workloads.
 
 \end{enumerate}
 
@@ -77,5 +80,6 @@ On a TransformerBlock (hidden dim 512, 8 heads, FFN ratio $4\times$) running on 
 6000 Blackwell, \sys achieves \textbf{6.3$\times$} per-sample speedup over the eager-mode FP32
 baseline. Tensor Core utilization rises from 0\% to ${\sim}85\%$; register spills from the FMHA
 kernel drop from 757,760 to zero; Waves/SM on the Q/K/V projections rises from 0.11 to 0.68.
-Across five workloads on two GPU architectures, end-to-end speedups range from 2.7$\times$ to
-6.3$\times$, each verified by hardware counter before-and-after comparison.
+Across six workloads on two GPU architectures, end-to-end speedups range from 1.8$\times$
+(cuDNN LSTM, opaque kernel path) to 6.3$\times$ (TransformerBlock), each verified by hardware
+counter before-and-after comparison.

@@ -3,12 +3,13 @@
 
 We presented \sys, a hardware-attributed GPU profiling and profile-guided optimization system that
 bridges the gap between PyTorch's operator-level abstractions and NVIDIA's kernel-level hardware
-performance counters. Our four contributions---a two-tier attribution pipeline with per-stream
-interval trees and invocation-order matching; a 20-counter curated metric set with duration-weighted
-aggregation and architecture-specific fallbacks; a custom Torch Dynamo PGO backend with six
-FX graph passes; and a closed-loop validation protocol---collectively enable the first automated,
-evidence-driven optimization loop at the intersection of PyTorch operator profiling and hardware
-counter measurement.
+performance counters. Our contributions---an attribution pipeline with per-stream interval trees,
+invocation-order matching, and Inductor debug-artifact enrichment for compiled models; a 20-counter
+curated metric set with duration-weighted aggregation and architecture-specific fallbacks; a custom
+Torch Dynamo PGO backend with six FX graph passes; a closed-loop validation protocol; and a Claude
+Code plugin that automates the full eight-stage optimization workflow via a single
+\texttt{/optimize~workload.py} command---collectively enable the first automated, evidence-driven
+optimization loop at the intersection of PyTorch operator profiling and hardware counter measurement.
 
 The key result is not the 6.3$\times$ speedup number itself, but what it is built from: every
 optimization decision is grounded in a specific hardware counter reading (e.g., \texttt{tensor\_core\_active\_pct
@@ -20,11 +21,14 @@ bottlenecks (register spill in FMHA, TN layout penalty in the FFN down-projectio
 to wall-clock profilers and require hardware counter attribution to diagnose.
 
 \paragraph{Limitations.}
-Attribution coverage degrades for heavily fused Triton models where kernel names are ambiguous or
-absent.  \ncu serializes kernels for replay, making concurrent multi-stream profiles require
-separate per-stream runs.  The FX pass set is hand-designed; automatic pass selection from
-counter evidence---for example, via learned thresholds or reinforcement learning over the
-bottleneck-to-pass mapping---is left as future work.
+Attribution coverage degrades for cuDNN-backed operators (\texttt{nn.LSTM},
+\texttt{nn.MultiheadAttention} under cuDNN) where internal kernel names carry no NVTX
+correspondence and no Inductor debug metadata is available; expected unattributed rates of
+80--90\% make hardware-counter-driven optimization inapplicable, and bottleneck diagnosis must
+fall back to kernel-name inference.  \ncu serializes kernels for replay, making concurrent
+multi-stream profiles require separate per-stream runs.  The FX pass set is hand-designed;
+automatic pass selection from counter evidence---for example, via learned thresholds or
+reinforcement learning over the bottleneck-to-pass mapping---is left as future work.
 
 \paragraph{Future work.}
 Online profiling via CUPTI Perfworks streaming would eliminate the separate \ncu pass, enabling

@@ -43,14 +43,14 @@ def add_parser(subparsers) -> None:
     )
     p.add_argument(
         "--inductor-debug-dir",
-        default=None,
+        required=True,
         metavar="DIR",
         help=(
             "Directory containing Inductor trace artifacts (output_code.py files) "
             "written when TORCH_COMPILE_DEBUG=1 is set during the capture run. "
-            "When provided, parse_inductor_debug_dir() is called after nsys capture "
-            "and the resulting fusion map is passed to ManifestBuilder so that "
-            "unattributed fused Triton kernels receive INDUCTOR_FUSION attribution."
+            "parse_inductor_debug_dir() is called after nsys capture and the resulting "
+            "fusion map is passed to ManifestBuilder so that unattributed fused Triton "
+            "kernels receive INDUCTOR_FUSION attribution."
         ),
     )
     p.set_defaults(func=_run)

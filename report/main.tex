@@ -1,134 +1,53 @@
-% -------------------------------------------------------
-% PREREQUISITE: Download neurips_2024.sty from
-%   https://neurips.cc/Conferences/2024/PaperInformation/StyleFiles
-% Place neurips_2024.sty in this directory before compiling.
-% To compile: pdflatex main && bibtex main && pdflatex main && pdflatex main
-% -------------------------------------------------------
-
 \documentclass{article}
-
-% NeurIPS 2024 style — preprint mode (remove [preprint] for double-blind submission)
-\usepackage[preprint]{neurips_2024}
-
-% -------------------------------------------------------
-% Core typography and layout
-% -------------------------------------------------------
-\usepackage{microtype}
-\usepackage{times}
-\usepackage[T1]{fontenc}
-\usepackage[utf8]{inputenc}
-\usepackage[inline]{enumitem}    % \begin{itemize}[...], \begin{enumerate*}
-\usepackage{xspace}      % \xspace for macros
-
-% -------------------------------------------------------
-% Tables
-% -------------------------------------------------------
-\usepackage{booktabs}
-\usepackage{multirow}
-\usepackage{makecell}
-\usepackage{tabularx}
-\usepackage{array}
-\usepackage{colortbl}
+\PassOptionsToPackage{table,xcdraw}{xcolor}
 \usepackage{xcolor}
+\usepackage{bbm}
+\usepackage{multirow}
+\usepackage[english]{babel}
 
-% -------------------------------------------------------
-% Math
-% -------------------------------------------------------
+\usepackage[letterpaper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+
 \usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{mathtools}
-
-% -------------------------------------------------------
-% Algorithms
-% -------------------------------------------------------
-\usepackage{algorithm}
-\usepackage{algpseudocode}
-
-% -------------------------------------------------------
-% Code listings
-% -------------------------------------------------------
-\usepackage{listings}
-\lstdefinestyle{sqlstyle}{
-  language=SQL,
-  basicstyle=\footnotesize\ttfamily,
-  keywordstyle=\color{blue!70!black}\bfseries,
-  commentstyle=\color{gray},
-  stringstyle=\color{red!60!black},
-  breaklines=true,
-  frame=single,
-  numbers=none,
-  xleftmargin=2pt,
-  xrightmargin=2pt,
-}
-\lstdefinestyle{pystyle}{
-  language=Python,
-  basicstyle=\footnotesize\ttfamily,
-  keywordstyle=\color{blue!70!black}\bfseries,
-  commentstyle=\color{gray!70},
-  stringstyle=\color{red!60!black},
-  breaklines=true,
-  frame=single,
-  numbers=none,
-  xleftmargin=2pt,
-  xrightmargin=2pt,
-}
-
-% -------------------------------------------------------
-% Graphics
-% -------------------------------------------------------
 \usepackage{graphicx}
-\usepackage{subcaption}
-\usepackage[export]{adjustbox}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+\usepackage{booktabs}
+\usepackage{caption}
+\input{macro_small}
+\input{notation}
+\usepackage{pifont}
+\usepackage{microtype}
 
-% -------------------------------------------------------
-% References and links
-% -------------------------------------------------------
-\usepackage{hyperref}
-\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black}
-\usepackage{cleveref}
-
-% -------------------------------------------------------
-% TODOs (remove before camera-ready)
-% -------------------------------------------------------
-\usepackage[colorinlistoftodos]{todonotes}
-\newcommand{\TODO}[1]{\todo[inline,color=yellow!40]{#1}}
-\newcommand{\MEASURE}[1]{\todo[inline,color=orange!40]{MEASURE: #1}}
-
-% -------------------------------------------------------
-% Convenience macros
-% -------------------------------------------------------
-\newcommand{\sys}{Operator Profiler\xspace}
-\newcommand{\nsys}{\texttt{nsys}\xspace}
-\newcommand{\ncu}{\texttt{ncu}\xspace}
-\newcommand{\aten}[1]{\texttt{aten::#1}}
-\newcommand{\figref}[1]{Figure~\ref{#1}}
-\newcommand{\tabref}[1]{Table~\ref{#1}}
-\newcommand{\secref}[1]{Section~\ref{#1}}
-\newcommand{\algref}[1]{Algorithm~\ref{#1}}
-\newcommand{\equref}[1]{Eq.~(\ref{#1})}
-\newcommand{\etal}{\textit{et~al.}\xspace}
-\newcommand{\eg}{\textit{e.g.,}\xspace}
-\newcommand{\ie}{\textit{i.e.,}\xspace}
-\definecolor{highcol}{HTML}{1f4e79}
-\definecolor{medcol}{HTML}{2e75b6}
-\definecolor{lowcol}{HTML}{9dc3e6}
-\definecolor{ucol}{HTML}{bfbfbf}
-
-% -------------------------------------------------------
-% Document
-% -------------------------------------------------------
 \title{Hardware-Attributed GPU Operator Profiling\\
        and Profile-Guided Optimization for PyTorch}
 
-\author{%
-  % Double-blind: authors omitted
+\author{
+Logan Chu$^{1}$ \quad
+Dong Li$^{2}$ \\
+\\
+$^{1}$Duke University \quad
+$^{2}$UC Merced
 }
+\date{}
+
+\renewcommand{\cite}[1]{\citep{#1}}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-\input{abstract}
+Framework profilers expose operator timing without hardware counters; GPU profilers expose hardware
+counters without operator attribution. Bridging this gap manually is error-prone and does not scale.
+We present \textbf{\sys}, which automatically links NVIDIA Nsight Compute hardware metrics to
+PyTorch \texttt{aten::} operators via NVTX temporal enclosure with per-stream interval trees and
+invocation-order matching---avoiding timestamp joins across incompatible clock domains. A curated
+20-counter metric set with duration-weighted aggregation covers all hardware bottleneck axes across
+Ampere, Hopper, and Blackwell architectures. Attributed profiles drive a custom Torch Dynamo backend
+that applies hardware-evidence-motivated FX graph passes---BF16 casting, QKV fusion, FlashAttention
+substitution, weight pre-transposition---before Inductor compilation. Across six workloads on two
+production GPUs (RTX PRO 6000 Blackwell, H100 SXM5 and PCIe), \sys achieves \textbf{1.8--6.3$\times$}
+end-to-end speedup, with hardware counters confirming bottleneck elimination in every case: Tensor
+Core utilization rises from 0\% to ${\sim}85\%$, register spills drop from 757,760 to zero, and
+achieved occupancy improves from 8.3\% to ${\sim}50\%$.
 \end{abstract}
 
 \input{intro}
@@ -137,8 +56,12 @@
 \input{main_experiment}
 \input{related_work}
 \input{conclusion}
-
+\newpage
+\bibliography{reference}
 \bibliographystyle{plainnat}
-\bibliography{refs}
+\newpage
+\appendix
+\onecolumn
+\input{appendix_exp}
 
 \end{document}

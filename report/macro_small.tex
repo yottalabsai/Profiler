@@ -1,0 +1,91 @@
+\newcommand{\FrugalToolCall}{\textsc{FrugalToolCall}}
+
+\newcommand{\eat}[1]{}
+
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage{multirow}
+\usepackage{bigstrut,morefloats}
+
+\usepackage[resetlabels,labeled]{multibib}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\usepackage[most]{tcolorbox}
+
+\newcommand{\E}{\mathbb{E}}
+
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{thmtools}
+
+\theoremstyle{definition}
+
+% algorithm2e conflicts with the algorithm+algpseudocode packages used by the
+% profiler paper — replaced below.
+%\usepackage[boxruled,linesnumbered]{algorithm2e}
+
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\usepackage{array}
+
+\usepackage[authoryear]{natbib}
+
+% -------------------------------------------------------
+% Profiler paper additions
+% -------------------------------------------------------
+
+\usepackage{xspace}
+\usepackage[inline]{enumitem}
+
+% Code listings (SQL and Python blocks in method.tex)
+\usepackage{listings}
+\lstdefinestyle{sqlstyle}{
+  language=SQL,
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{red!60!black},
+  breaklines=true,
+  frame=single,
+  numbers=none,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+}
+\lstdefinestyle{pystyle}{
+  language=Python,
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray!70},
+  stringstyle=\color{red!60!black},
+  breaklines=true,
+  frame=single,
+  numbers=none,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+}
+
+% Row colors for attribution tiers table (xcolor table option covers \rowcolor)
+\definecolor{highcol}{HTML}{1f4e79}
+\definecolor{medcol}{HTML}{2e75b6}
+\definecolor{ucol}{HTML}{bfbfbf}
+
+% TODO / MEASURE markers — remove these before final submission
+\usepackage[colorinlistoftodos]{todonotes}
+\newcommand{\TODO}[1]{\todo[inline,color=yellow!40]{#1}}
+\newcommand{\MEASURE}[1]{\todo[inline,color=orange!40]{MEASURE: #1}}
+
+% Profiler convenience macros
+\newcommand{\sys}{Operator Profiler\xspace}
+\newcommand{\nsys}{\texttt{nsys}\xspace}
+\newcommand{\ncu}{\texttt{ncu}\xspace}
+\newcommand{\aten}[1]{\texttt{aten::#1}}
+\newcommand{\figref}[1]{Figure~\ref{#1}}
+\newcommand{\tabref}[1]{Table~\ref{#1}}
+\newcommand{\secref}[1]{Section~\ref{#1}}
+\newcommand{\algref}[1]{Algorithm~\ref{#1}}
+\newcommand{\equref}[1]{Eq.~(\ref{#1})}
+\newcommand{\etal}{\textit{et~al.}\xspace}
+\newcommand{\eg}{\textit{e.g.,}\xspace}
+\newcommand{\ie}{\textit{i.e.,}\xspace}
