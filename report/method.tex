@@ -95,7 +95,82 @@ comparison:
 
 This matching is correct when the workload is deterministic and input shapes are identical between
 the \nsys capture and the \ncu replay.  Shape validation before the replay step enforces this
-invariant (\secref{sec:edgecases}).
+invariant (\secref{sec:edgecases}).  \figref{fig:iom} illustrates why timestamp joins fail and how
+invocation-order matching avoids the problem.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  arr/.style={-{Stealth[length=4pt]}, thick},
+  karr/.style={-{Stealth[length=4pt]}, thick, red!70!black},
+  garr/.style={-{Stealth[length=4pt]}, thick, green!50!black},
+  kern/.style={draw, rounded corners=2pt, fill=blue!10, draw=blue!60!black,
+               minimum width=1.6cm, minimum height=1.4em, align=center, font=\footnotesize},
+  kernncu/.style={draw, rounded corners=2pt, fill=purple!10, draw=purple!60!black,
+               minimum width=1.6cm, minimum height=1.4em, align=center, font=\footnotesize},
+  tl/.style={-{Stealth[length=5pt]}, thick, gray},
+  lbl/.style={font=\scriptsize, text=gray!80!black},
+  hl/.style={font=\footnotesize\bfseries},
+  darr/.style={-{Stealth[length=4pt]}, thick, dashed, gray!50},
+]
+
+%% ---- (a) Naive timestamp join ----
+\node[hl] at (4.5, 0.7) {(a) Naive timestamp join --- \textcolor{red!70!black}{incorrect}};
+
+\draw[tl] (0.0, 0) -- (9.8, 0) node[right,lbl] {nsys (GPU clock)};
+\node[lbl, left=2pt] at (0.0, 0) {\small nsys};
+
+\node[kern] (k1n) at (1.1, 0)  {$K_1$\;\tiny t=10};
+\node[kern] (k2n) at (4.0, 0)  {$K_2$\;\tiny t=45};
+\node[kern] (k3n) at (7.1, 0)  {$K_3$\;\tiny t=80};
+
+\draw[tl] (0.0,-1.25) -- (9.8,-1.25) node[right,lbl] {ncu (replay clock)};
+\node[lbl, left=2pt] at (0.0,-1.25) {\small ncu};
+
+\node[kernncu] (k1c) at (2.3,-1.25)  {$K_1$\;\tiny t=35};
+\node[kernncu] (k2c) at (5.1,-1.25)  {$K_2$\;\tiny t=62};
+\node[kernncu] (k3c) at (8.1,-1.25)  {$K_3$\;\tiny t=95};
+
+\draw[darr] (k1c.north) -- (k1n.south);
+\draw[karr] (k2c.north) -- (k1n.south)
+  node[near start, left=3pt, lbl, text=red!70!black] {\textbf{\ding{55}} wrong match};
+\draw[darr] (k3c.north) -- (k3n.south);
+
+\draw[decorate,decoration={brace,amplitude=5pt},gray!60]
+  (k1n.south east)++(0.1,0) -- (k1c.north east)++(0.1,0)
+  node[midway, right=6pt, lbl, align=left] {clock\\drift};
+
+%% ---- (b) IOM ----
+\node[hl] at (4.5,-2.15) {(b) Invocation-order matching (IOM) --- \textcolor{green!50!black}{correct}};
+
+\draw[tl] (0.0,-2.9) -- (9.8,-2.9) node[right,lbl] {nsys order};
+\node[lbl, left=2pt] at (0.0,-2.9) {\small nsys};
+\node[kern] (k1ni) at (1.4,-2.9) {$K_1$\;\tiny $i{=}0$};
+\node[kern] (k2ni) at (4.0,-2.9) {$K_2$\;\tiny $i{=}1$};
+\node[kern] (k3ni) at (6.7,-2.9) {$K_3$\;\tiny $i{=}2$};
+
+\draw[tl] (0.0,-4.1) -- (9.8,-4.1) node[right,lbl] {ncu order};
+\node[lbl, left=2pt] at (0.0,-4.1) {\small ncu};
+\node[kernncu] (k1ci) at (1.4,-4.1) {$K_1$\;\tiny $i{=}0$};
+\node[kernncu] (k2ci) at (4.0,-4.1) {$K_2$\;\tiny $i{=}1$};
+\node[kernncu] (k3ci) at (6.7,-4.1) {$K_3$\;\tiny $i{=}2$};
+
+\draw[garr] (k1ci.north) -- (k1ni.south) node[midway,right=1pt,lbl,text=green!50!black] {\textbf{\ding{51}}};
+\draw[garr] (k2ci.north) -- (k2ni.south) node[midway,right=1pt,lbl,text=green!50!black] {\textbf{\ding{51}}};
+\draw[garr] (k3ci.north) -- (k3ni.south) node[midway,right=1pt,lbl,text=green!50!black] {\textbf{\ding{51}}};
+
+\node[lbl, align=center] at (4.9,-4.75)
+  {Match key: \texttt{(kernel\_name, invocation\_index)} --- no timestamp comparison required};
+
+\end{tikzpicture}
+\caption{\textbf{Why timestamp joins fail and how IOM avoids them.}
+  (a)~The nsys GPU-domain clock and the \ncu replay clock diverge by $>$10\,$\mu$s; a
+  nearest-timestamp join misattributes $K_2$'s hardware counters to $K_1$.
+  (b)~IOM matches kernels by ordinal position within each \texttt{(kernel\_name,
+  invocation\_index)} sequence, making attribution clock-immune by construction.}
+\label{fig:iom}
+\end{figure}
 
 \subsection{StreamIntervalTree Attribution}
 \label{sec:intervaltree}

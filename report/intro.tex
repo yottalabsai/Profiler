@@ -38,7 +38,8 @@ For operator-level attribution, the NVTX ranges that \texttt{torch.autograd.prof
 pushes around every \texttt{aten::} dispatch form a temporal bracket on the host CPU timeline;
 per-stream interval trees over these ranges attribute each kernel to its enclosing operator in
 $O(\log n)$ per query. For Triton-fused kernels with no NVTX bracket, a regex parser extracts the
-constituent operator names from the mangled kernel identifier.
+constituent operator names from the mangled kernel identifier.  \figref{fig:overview} shows the
+complete end-to-end pipeline.
 
 \paragraph{Contributions.}
 We present \textbf{\sys}, a hardware-attributed GPU profiling and profile-guided optimization
@@ -83,3 +84,75 @@ kernel drop from 757,760 to zero; Waves/SM on the Q/K/V projections rises from 0
 Across six workloads on two GPU architectures, end-to-end speedups range from 1.8$\times$
 (cuDNN LSTM, opaque kernel path) to 6.3$\times$ (TransformerBlock), each verified by hardware
 counter before-and-after comparison.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={rounded corners=3pt, draw, align=center, minimum height=1.8em, inner sep=5pt},
+  toolbox/.style={box, fill=blue!12, draw=blue!50!black},
+  attrbox/.style={box, fill=orange!15, draw=orange!70!black},
+  outbox/.style={box, fill=green!12, draw=green!50!black},
+  pgobox/.style={box, fill=red!10, draw=red!60!black},
+  arr/.style={-{Stealth[length=5pt]}, thick},
+  darr/.style={-{Stealth[length=5pt]}, thick, dashed, gray},
+  lbl/.style={font=\scriptsize\itshape, text=gray!70!black},
+]
+
+%% ---- Row 1: Profiling stage ----
+\node[toolbox] (workload) at (0,0)   {\texttt{workload.py}};
+\node[toolbox] (nsys)     at (2.7,0) {\nsys capture\\[-1pt]\texttt{--trace=cuda,nvtx}};
+\node[toolbox] (sqlite)   at (5.5,0) {SQLite\\[-1pt]export};
+\node[toolbox] (ncu)      at (8.2,0) {\ncu replay\\[-1pt](per kernel)};
+
+\draw[arr] (workload) -- (nsys);
+\draw[arr] (nsys)     -- (sqlite);
+\draw[arr] (sqlite)   -- (ncu);
+
+\node[lbl, above=2pt of nsys]   {Stage A};
+\node[lbl, above=2pt of ncu]    {Stage B};
+
+%% ---- Row 2: Attribution engine ----
+\node[attrbox] (iom)    at (2.7,-1.65) {Invocation-Order\\[-1pt]Matching};
+\node[attrbox] (sit)    at (5.5,-1.65) {StreamIntervalTree\\[-1pt]NVTX enclosure};
+\node[outbox]  (prof)   at (8.2,-1.65) {\texttt{profile.json}\\[-1pt](20 counters)};
+
+\draw[arr] (sqlite) -- (iom);
+\draw[arr] (ncu)    -- (iom);
+\draw[arr] (iom)    -- (sit);
+\draw[arr] (sit)    -- (prof);
+
+\node[lbl, left=3pt of iom] {\S\ref{sec:attribution}};
+
+%% ---- Row 3: PGO ----
+\node[pgobox] (diag)    at (2.7,-3.3)  {Diagnosis\\[-1pt]Engine};
+\node[pgobox] (passes)  at (5.5,-3.3)  {6 FX Passes\\[-1pt](Aten IR)};
+\node[pgobox] (compile) at (8.2,-3.3)  {\texttt{torch.compile}\\[-1pt]+ Inductor};
+\node[outbox] (opt)     at (10.8,-3.3) {Optimized\\[-1pt]model};
+
+\draw[arr] (prof)    -- (diag);
+\draw[arr] (diag)    -- (passes);
+\draw[arr] (passes)  -- (compile);
+\draw[arr] (compile) -- (opt);
+
+\node[lbl, left=3pt of diag]   {\S\ref{sec:pgo}};
+\node[lbl, above=2pt of passes] {BF16 · QKV fusion · FlashAttn · pretranspose · activ.\ norm.\ · batch pad};
+
+%% ---- Feedback loop ----
+\draw[darr] (opt.south) -- ++(0,-0.45) -| (workload.south)
+  node[midway, below, lbl] {closed-loop validation (\S\ref{sec:validation})};
+
+%% ---- Stage labels on left ----
+\node[lbl, rotate=90, anchor=center] at (-1.5, 0)     {Profiling};
+\node[lbl, rotate=90, anchor=center] at (-1.5, -1.65) {Attribution};
+\node[lbl, rotate=90, anchor=center] at (-1.5, -3.3)  {Optimization};
+
+\end{tikzpicture}
+\caption{\textbf{\sys system overview.}  Two profiling stages produce \texttt{profile.json}: \nsys
+  captures the kernel timeline (Stage~A) and \ncu replays each kernel for hardware counters
+  (Stage~B).  The attribution engine bridges the two tools via invocation-order matching and
+  per-stream NVTX interval trees.  The PGO backend applies six hardware-evidence-motivated FX graph
+  passes before Inductor compilation.  A dashed feedback loop denotes closed-loop validation via
+  re-profiling.}
+\label{fig:overview}
+\end{figure}

@@ -121,11 +121,117 @@ Residual add $\times$ 2         & 789\,ns    & 498\,ns   & 1.6$\times$  \\
 \end{tabular}
 \end{table}
 
+\figref{fig:speedup_bars} visualizes the per-operator speedups; the FFN down-projection bar dominates, reflecting a doubly-penalized baseline.
 The FFN down-projection delivers the largest single-operator gain (10.8$\times$) because it
 suffered two compounding penalties: (1) the TN layout penalty of \texttt{gemmSN\_TN} on a
 $[16,2048]\times[2048,512]$ shape (poor L2 tiling for tall-$K$ matrices) and (2) FP32 SIMT instead
 of BF16 Tensor Cores.  The weight pre-transposition pass eliminates (1) and BF16 casting eliminates
 (2).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  xbar,
+  width=0.88\columnwidth,
+  height=7.6cm,
+  bar width=9pt,
+  xmin=0, xmax=13.5,
+  xlabel={Speedup ($\times$)},
+  xlabel style={font=\small},
+  ytick=data,
+  yticklabels={
+    Residual add $\times$2,
+    Softmax,
+    LayerNorm $\times$2,
+    {ReLU/GELU},
+    AV output,
+    {QK$^\top$ scores},
+    V projection,
+    Q projection,
+    Out projection,
+    {FFN up [512$\!\to\!$2048]},
+    {FFN down [2048$\!\to\!$512]}
+  },
+  yticklabel style={font=\footnotesize},
+  tick label style={font=\footnotesize},
+  nodes near coords,
+  nodes near coords style={font=\scriptsize, anchor=west},
+  nodes near coords align={horizontal},
+  every node near coord/.append style={xshift=2pt},
+  axis x line=bottom,
+  axis y line=left,
+  xmajorgrids=true,
+  grid style={gray!20},
+  extra x ticks={6.3},
+  extra x tick labels={Total 6.3$\times$},
+  extra x tick style={
+    grid=major,
+    grid style={red!60!black, dashed, thick},
+    tick label style={font=\scriptsize, text=red!70!black, rotate=90, anchor=west},
+  },
+  legend style={
+    at={(0.97,0.03)}, anchor=south east,
+    font=\scriptsize, draw=gray!50,
+    fill=white, fill opacity=0.9,
+  },
+]
+
+\addplot[fill=blue!45, draw=blue!60!black] coordinates {
+  (1.6, 0)
+  (3.1, 1)
+  (3.7, 2)
+  (3.9, 3)
+  (4.9, 4)
+  (5.5, 5)
+  (0,   6)
+  (0,   7)
+  (0,   8)
+  (0,   9)
+  (0,  10)
+};
+
+\addplot[fill=teal!50, draw=teal!70!black] coordinates {
+  (0,   0)
+  (0,   1)
+  (0,   2)
+  (0,   3)
+  (0,   4)
+  (0,   5)
+  (5.8, 6)
+  (5.9, 7)
+  (6.2, 8)
+  (7.2, 9)
+  (0,  10)
+};
+
+\addplot[fill=orange!70, draw=orange!80!black] coordinates {
+  (0,    0)
+  (0,    1)
+  (0,    2)
+  (0,    3)
+  (0,    4)
+  (0,    5)
+  (0,    6)
+  (0,    7)
+  (0,    8)
+  (0,    9)
+  (10.8,10)
+};
+
+\legend{BF16, BF16 + batch pad, BF16 + pretranspose}
+
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Per-operator speedup for TransformerBlock} (Blackwell, B=16 equivalent, all
+  values from \tabref{tab:transformer}).
+  \textcolor{blue!60!black}{Blue}: BF16 casting alone.
+  \textcolor{teal!70!black}{Teal}: BF16~+ batch padding (wider GEMM dispatch).
+  \textcolor{orange!80!black}{Orange}: BF16~+ weight pre-transposition (FFN down was doubly
+  penalized by TN layout and FP32 SIMT).
+  Dashed red line marks the \textbf{6.3$\times$} overall per-sample speedup.}
+\label{fig:speedup_bars}
+\end{figure}
 
 \subsection{Hardware Counter Validation}
 
@@ -223,6 +329,83 @@ LSTMSequenceEncoder &  5\% & 10\% & 85\% \\
 \end{tabular}
 \end{table}
 
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  xbar stacked,
+  width=0.88\columnwidth,
+  height=5.6cm,
+  bar width=13pt,
+  xmin=0, xmax=100,
+  xlabel={Kernel runtime attributed (\%)},
+  xlabel style={font=\small},
+  ytick=data,
+  yticklabels={
+    LSTM Seq.\ Enc.,
+    ConvBlock,
+    SDPA Attention,
+    Embedding Proj.,
+    MLP Activations,
+    TransformerBlock
+  },
+  yticklabel style={font=\footnotesize},
+  tick label style={font=\footnotesize},
+  axis x line=bottom,
+  axis y line=left,
+  xmajorgrids=true,
+  grid style={gray!20},
+  legend style={
+    at={(0.5,-0.22)}, anchor=north,
+    font=\scriptsize, draw=gray!50,
+    fill=white, fill opacity=0.9,
+    legend columns=3,
+  },
+]
+
+% HIGH (dark blue)
+\addplot[fill=highcol, draw=highcol!80!black] coordinates {
+  (5,  0)   % LSTM
+  (30, 1)   % ConvBlock
+  (38, 2)   % SDPA
+  (42, 3)   % Embedding
+  (40, 4)   % MLP
+  (45, 5)   % Transformer
+};
+
+% MEDIUM (medium blue)
+\addplot[fill=medcol!70, draw=medcol!80!black] coordinates {
+  (10, 0)   % LSTM
+  (55, 1)   % ConvBlock
+  (60, 2)   % SDPA
+  (57, 3)   % Embedding
+  (58, 4)   % MLP
+  (53, 5)   % Transformer
+};
+
+% UNATTRIBUTED (gray)
+\addplot[fill=ucol!80, draw=gray!60] coordinates {
+  (85, 0)   % LSTM
+  (15, 1)   % ConvBlock
+  (2,  2)   % SDPA
+  (1,  3)   % Embedding
+  (2,  4)   % MLP
+  (2,  5)   % Transformer
+};
+
+\legend{HIGH (torch.profiler IOM), MEDIUM (NVTX / Inductor), UNATTRIBUTED}
+
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Attribution coverage by workload} (fraction of total kernel runtime; all values
+  from \tabref{tab:coverage}).  For PyTorch-native workloads (TransformerBlock through SDPA),
+  $\ge$98\% of kernel runtime is attributed at HIGH or MEDIUM confidence.  The
+  LSTMSequenceEncoder is 85\% UNATTRIBUTED because \texttt{aten::\_cudnn\_rnn} dispatches all
+  computation to opaque cuDNN internals with no NVTX annotations and no Inductor debug metadata.}
+\label{fig:attribution}
+\end{figure}
+
+\figref{fig:attribution} visualizes attribution coverage across all six workloads.
 For PyTorch-native workloads (non-cuDNN), \sys attributes $\ge 90\%$ of total kernel runtime at
 HIGH or MEDIUM confidence.  The former LOW-confidence name-heuristic tier has been replaced by
 Inductor fusion enrichment (\secref{sec:heuristic}), which absorbs previously-unattributed

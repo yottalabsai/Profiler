@@ -5,7 +5,8 @@
       "Read(*)",
       "Write(*)",
       "Edit(*)",
-      "WebFetch(domain:arxiv.org)"
+      "WebFetch(domain:arxiv.org)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\s-lch\\\\AppData\\\\Local\" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'tex|latex|mik' } | Select-Object Name)"
     ]
   }
 }
