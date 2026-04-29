@@ -1,0 +1,83 @@
+{
+  "file": "/home/ubuntu/Profiler/examples/conv_block/conv_block_optimized.py",
+  "backend": "conv_block_opt",
+  "validated_at": "2026-04-29",
+  "overall": "READY FOR PROFILING",
+  "steps": {
+    "step1_syntax": {
+      "status": "PASS",
+      "command": "python -m py_compile conv_block_optimized.py",
+      "exit_code": 0
+    },
+    "step2_import": {
+      "status": "PASS",
+      "command": "python -c \"import conv_block_optimized; print('import OK')\"",
+      "exit_code": 0,
+      "output": "import OK"
+    },
+    "step3_backend_registration": {
+      "status": "PASS",
+      "backend_name": "conv_block_opt",
+      "found_in_list_backends": true
+    },
+    "step4_test_suite": {
+      "status": "PASS",
+      "tests_total": 4,
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "results": {
+        "test_import": "PASSED",
+        "test_backend_registration": "PASSED",
+        "test_get_model_and_input": "PASSED",
+        "test_forward_pass": "PASSED"
+      }
+    },
+    "step5_smoke_test": {
+      "status": "PASS",
+      "exit_code": 0,
+      "output_shape": "[16, 10]",
+      "output_dtype": "torch.bfloat16",
+      "nan_in_output": false,
+      "command": "python run_workload.py --workload conv_block_optimized.py --compile-backend conv_block_opt --warmup-iters 1 --measure-iters 1"
+    }
+  },
+  "pass_application": {
+    "get_model_and_input__channels_last_OPT1": {
+      "status": "APPLIED",
+      "detail": "model and input converted to channels_last (NHWC)"
+    },
+    "get_model_and_input__cudnn_benchmark_OPT4": {
+      "status": "APPLIED",
+      "detail": "torch.backends.cudnn.benchmark = True"
+    },
+    "get_model_and_input__tf32_OPT5_partial": {
+      "status": "APPLIED",
+      "detail": "TF32 enabled for matmul and cuDNN"
+    },
+    "get_model_and_input__bf16_OPT3": {
+      "status": "APPLIED",
+      "detail": "model and input cast to bfloat16"
+    },
+    "pass_fold_bn_into_conv_OPT2": {
+      "status": "APPLIED",
+      "detail": "Folded 3 Conv->BN pairs (batch_norm, batch_norm_1, batch_norm_2) using graph-arithmetic (FX ops on existing placeholder nodes)"
+    }
+  },
+  "fixes_applied": [
+    {
+      "issue": "ModuleNotFoundError: No module named 'conv_block' when run_workload.py loaded the file from a different cwd",
+      "fix": "Added sys.path guard at module top-level using pathlib.Path(__file__).resolve().parent to always insert the workload directory regardless of working directory",
+      "lines": "73-77"
+    },
+    {
+      "issue": "AssertionError: _w_folded_bn_fold_0 not found in gm._param_name_to_source (AOT Autograd metadata check fails for dynamically-added buffers)",
+      "fix": "Replaced register_buffer+get_attr constant injection with graph-arithmetic: BN fold is expressed entirely as FX call_function/call_method ops (torch.add, torch.sqrt, torch.div, torch.mul, torch.neg, reshape) on the existing BN/conv placeholder nodes. No new tensor constants are introduced, so FakeTensorMode and _param_name_to_source remain consistent.",
+      "lines": "217-282"
+    },
+    {
+      "issue": "NameError: name 'suffix' is not defined (stale reference after removing register_buffer block)",
+      "fix": "Removed 'suffix' from the logger.info call inside the fold loop",
+      "lines": "279-282"
+    }
+  ]
+}

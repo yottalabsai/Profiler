@@ -1,149 +1,293 @@
 {
-  "model": "DepthwiseSeparableConv",
+  "schema_version": "B-1.0",
+  "model_name": "depthwise_separable_conv",
+  "device": "NVIDIA A100-SXM4-40GB",
   "compile_mode": "inductor",
-  "profiling_summary": {
-    "total_wall_time_ms": 3.39,
-    "total_kernel_exec_ms": 1.63,
-    "total_gap_time_ms": 1.75,
-    "gpu_idle_fraction_pct": 51.8,
-    "total_kernel_launches": 130,
-    "avg_gap_per_launch_us": 13.5
-  },
+  "analysis_timestamp": "2026-04-29T02:50:12Z",
+  "total_attributed_ns": 3988261,
   "optimizations": [
     {
       "id": "OPT-001",
       "priority": 1,
-      "fx_nodes": [
-        "all aten::cudnn_convolution",
-        "all aten::batch_norm",
-        "all triton_poi_fused_* kernels"
+      "operators": [
+        "aten::_native_batch_norm_legit_no_training_0"
       ],
-      "kernel_names": ["all 130 kernel launches"],
-      "bottleneck": "Kernel launch overhead: 51.8% GPU idle time (1.75ms gaps vs 1.63ms execution across 130 launches, avg 13.5us gap/launch). CPU dispatch serializes every CUDA API call, creating per-kernel synchronization bubbles.",
-      "transformation": "Enable CUDA Graphs via torch.cuda.make_graphed_callables() or torch.compile(model, mode='reduce-overhead'). Replaces 130 discrete CUDA API calls with a single graph replay, eliminating all CPU-GPU dispatch latency. Requires static shapes and no Python control flow in the captured region — satisfied by this model at batch=16, spatial=56x56.",
-      "impact": {
-        "latency_reduction_pct": "40-50",
-        "memory_delta": "none",
-        "throughput_gain": "proportional to latency reduction",
-        "absolute_est_ms": "~1.75ms wall time recovered"
+      "bottleneck": {
+        "description": "BatchNorm (aten::_native_batch_norm_legit_no_training) consumes 41.7% of attributed time and is heavily memory-bound (DRAM throughput 74.1%). The '_legit_no_training' suffix confirms inference mode, meaning running_mean and running_var are constant across calls. Maintaining a separate BN pass materializes intermediate activation tensors between conv and BN, causing unnecessary DRAM round-trips on feature maps up to 128\u00d756\u00d756.",
+        "evidence": {
+          "dram_throughput_pct": 74.14,
+          "sm_throughput_pct": 26.31,
+          "achieved_occupancy_pct": 73.11,
+          "tensor_core_active_pct": 0.24,
+          "total_pct_of_attributed_time": 41.71,
+          "is_fused_flag": true,
+          "kernel_names": [
+            "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_1",
+            "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2",
+            "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3",
+            "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_4"
+          ]
+        }
       },
-      "confidence": "high"
+      "transformation": {
+        "type": "operator_elimination",
+        "description": "Fold BatchNorm parameters into the preceding convolution weights and biases at model initialization time. This eliminates all BN kernel launches entirely. In inference mode with fixed running_mean/running_var, the BN transform (y = (x - mean)/sqrt(var+eps) * w + b) can be absorbed into conv weight (w_new = w_conv * w_bn / sqrt(var+eps)) and bias (b_new = (b_conv - mean) * w_bn / sqrt(var+eps) + b_bn). Apply model.eval() before export and use torch.fx or manual weight surgery.",
+        "fx_steps": [
+          "Call model.eval() to freeze running_mean/running_var before any graph capture",
+          "Use torch.fx.symbolic_trace(model) to obtain the FX graph",
+          "Apply torch.nn.utils.fuse_conv_bn_eval(conv_module, bn_module) on each Conv2d+BatchNorm2d pair",
+          "Alternatively, use torch.quantization.fuse_modules(model, [['conv', 'bn', 'relu6']]) for MobileNet-style blocks",
+          "Verify output equivalence: torch.testing.assert_close(original(x), fused(x), atol=1e-4, rtol=1e-4)",
+          "Re-run torch.compile(fused_model, mode='max-autotune') to allow Inductor to re-fuse across new op boundaries"
+        ]
+      },
+      "estimated_impact": {
+        "time_savings_pct_of_total": "~38-42% (near-full elimination of the 41.7% BN budget; residual from fused hardtanh)",
+        "affected_operators": [
+          "aten::_native_batch_norm_legit_no_training_0"
+        ],
+        "note": "Hardtanh activation fused into BN kernels will need to survive as a standalone elementwise; Inductor will fuse it with neighboring conv output"
+      },
+      "confidence": "high",
+      "prerequisite_for": [
+        "OPT-002",
+        "OPT-003"
+      ]
     },
     {
       "id": "OPT-002",
       "priority": 2,
-      "fx_nodes": [
-        "aten::cudnn_convolution [weight.shape = [64,32,1,1]]",
-        "aten::cudnn_convolution [weight.shape = [128,64,1,1]]",
-        "aten::cudnn_convolution [weight.shape = [256,128,1,1]]"
+      "operators": [
+        "aten::cudnn_convolution, op_id = 141, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(128,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 168, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(155,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 195, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(182,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 222, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(209,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 249, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(236,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 145, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(139,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 172, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(166,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 199, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(193,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 226, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(220,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 253, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(247,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 149, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(143,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 176, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(170,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 203, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(197,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 230, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(224,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 257, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(251,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 153, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(147,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 180, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(174,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 207, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(201,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 234, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(228,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 261, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(255,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 157, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(151,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 184, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(178,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 211, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(205,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 238, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(232,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 265, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(259,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 161, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(155,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 188, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(182,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 215, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(209,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 242, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(236,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 269, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(263,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution_0",
+        "aten::convolution_0"
       ],
-      "kernel_names": ["Kernel2"],
-      "observed_metrics": {
-        "achieved_occupancy_pct": "8.1-8.6",
-        "tensor_core_utilization_pct": "18.7-45.3",
-        "registers_per_thread": "140-228",
-        "shared_mem_per_block_kb": 73.7,
-        "warps_per_block": 4,
-        "kernel_time_share_pct": 44.1,
-        "kernel_time_ms": 0.72,
-        "instances": 30
+      "bottleneck": {
+        "description": "All pointwise 1x1 convolutions dispatch ampere_sgemm_32x128_tn (cuBLAS FP32 SIMT, transposed-A layout) rather than a Tensor Core GEMM kernel. This occurs because: (1) inputs arrive in NCHW layout, forcing cuDNN to use im2col \u2192 sgemm rather than the NHWC-native cuDNN conv path; (2) FP32 dtype prevents Tensor Core (HMMA) dispatch. The 'tn' suffix indicates A is transposed in cuBLAS, a signature of NCHW weight layout. The 5 pw_ch32to64 instances (3.4% total, tc=0.0%) are the clearest example. The aggregate cudnn_convolution_0 (27.6%) also contains these kernels with 238 registers/thread, capping occupancy to ~35% and leaving SM throughput at only 38%.",
+        "evidence": {
+          "ampere_sgemm_32x128_tn_tensor_core_active_pct": 0.0,
+          "ampere_sgemm_32x128_tn_sm_throughput_pct": 51.9,
+          "ampere_sgemm_32x128_tn_dram_throughput_pct": 14.1,
+          "pw_ch32to64_total_pct": 3.41,
+          "cudnn_convolution_0_registers_per_thread": 238.0,
+          "cudnn_convolution_0_achieved_occupancy_pct": 34.66,
+          "kernel_name_flag": "ampere_sgemm_32x128_tn indicates FP32 SIMT path via im2col"
+        }
       },
-      "bottleneck": "Shared-memory-induced wave starvation: Kernel2 allocates 73.7 KB shmem/block with only 4 warps/block (block_dim=[128,1,1]). On Blackwell (~192 KB shmem/SM) only 1-2 blocks fit per SM, yielding 4-8 active warps vs 64 max. Occupancy locked at 8.1-8.6% across all 30 instances. This kernel is 44.1% of total kernel execution time.",
-      "transformation": "Force Inductor to emit a Triton GEMM instead of falling back to cuDNN for 1x1 convolutions. Set torch._inductor.config.conv_1x1_as_mm = True, or in the FX graph replace aten::cudnn_convolution nodes where weight.shape[-2:] == (1,1) with aten::mm after reshaping activations to [N*H*W, C_in]. Triton tiles to 64x64 or 128x128 with configurable shmem, avoiding the 73 KB per-block cuDNN allocation and enabling multiple concurrent blocks per SM. Alternatively, torch.compile(mode='max-autotune') will autotune tile configs.",
-      "impact": {
-        "latency_reduction_pct": "25-35 on 1x1 conv kernels",
-        "net_wall_time_reduction_pct": "~15",
-        "occupancy_target_pct": "50+",
-        "tc_utilization_target_pct": "60+"
+      "transformation": {
+        "type": "memory_format_change",
+        "description": "Apply torch.channels_last memory format to the model and input tensors. This causes cuDNN to select NHWC-native kernels for both depthwise and pointwise convolutions, eliminating im2col overhead and routing 1x1 pointwise convolutions to cuDNN's NHWC GEMM path which is eligible for Tensor Core dispatch on Ampere with BF16/FP16. The depthwise kernels already use conv2d_c1_k1_nhwc_kernel (NHWC-aware), so they benefit immediately from layout consistency; pointwise kernels will switch from sgemm to cuDNN implicit GEMM with NHWC layout, enabling potential HMMA engagement.",
+        "fx_steps": [
+          "model = model.to(memory_format=torch.channels_last) at model creation, before torch.compile",
+          "x = x.to(memory_format=torch.channels_last) for each input batch",
+          "If using torch.export or TorchScript, annotate input memory format in the export spec",
+          "Add torch._inductor.config.layout_optimization = True (default in newer Inductor builds) to allow Inductor to propagate channels_last through the graph",
+          "Verify cuDNN kernel selection changed: check that 'ampere_sgemm' no longer appears in ncu output",
+          "Benchmark: channels_last typically gives 10-30% speedup on conv-heavy models on Ampere"
+        ]
       },
-      "confidence": "high"
+      "estimated_impact": {
+        "time_savings_pct_of_total": "~5-15% on conv operators (pw convolutions: 3.4% + 4.3% + 10.2% = 17.9% of budget affected); indirect benefit to BN fusion after OPT-001",
+        "affected_operators": [
+          "aten::cudnn_convolution, op_id = 141, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(128,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 168, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(155,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 195, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(182,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 222, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(209,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 249, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(236,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 145, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(139,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 172, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(166,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 199, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(193,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 226, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(220,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 253, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(247,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 149, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(143,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 176, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(170,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 203, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(197,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 230, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(224,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 257, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(251,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 153, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(147,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 180, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(174,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 207, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(201,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 234, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(228,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 261, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(255,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 157, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(151,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 184, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(178,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 211, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(205,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 238, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(232,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 265, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(259,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 161, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(155,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 188, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(182,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 215, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(209,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 242, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(236,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 269, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(263,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution_0",
+          "aten::convolution_0"
+        ],
+        "note": "Benefit is partially unlocked; full benefit requires OPT-003 (BF16) to engage Tensor Cores"
+      },
+      "confidence": "high",
+      "prerequisite_for": [
+        "OPT-003"
+      ]
     },
     {
       "id": "OPT-003",
       "priority": 3,
-      "fx_nodes": [
-        "aten::cudnn_convolution [weight.shape = [32,1,3,3], groups=32]",
-        "aten::cudnn_convolution [weight.shape = [64,1,3,3], groups=64]",
-        "aten::cudnn_convolution [weight.shape = [128,1,3,3], groups=128]"
+      "operators": [
+        "aten::cudnn_convolution, op_id = 145, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(139,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 172, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(166,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 199, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(193,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 226, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(220,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 253, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(247,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 153, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(147,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 180, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(174,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 207, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(201,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 234, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(228,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 261, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(255,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 161, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(155,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 188, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(182,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 215, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(209,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 242, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(236,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 269, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(263,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution_0"
       ],
-      "kernel_names": ["conv2d_c1_k1_nhwc"],
-      "observed_metrics": {
-        "tensor_core_utilization_pct": 0.0,
-        "achieved_occupancy_pct": "70.8-86.5",
-        "dram_throughput_pct_of_peak": "47.8-73.3",
-        "registers_per_thread": 40,
-        "instances": 30,
-        "kernel_time_share_pct": 15.9,
-        "kernel_time_ms": 0.26
+      "bottleneck": {
+        "description": "Pointwise 1x1 convolutions at all channel widths run in FP32 with Tensor Cores completely idle (tc=0.0%) for pw_ch32to64 and at 23-39% for larger sizes (partial Tensor Core use constrained by register pressure with 236-238 registers/thread). On A100 (Ampere), BF16 matmul tiles are 16\u00d716\u00d716 minimum; the current FP32 sgemm path uses 32x128 tiles without HMMA. Casting to BF16 routes cuBLAS/cuDNN to sm80_xmma_gemm_bf16bf16 kernels which fully engage HMMA units, delivering up to 16\u00d7 higher theoretical throughput (312 TFLOPS BF16 vs 19.5 TFLOPS FP32 on A100). Even at memory-bound regime, fewer arithmetic cycles free HBM bandwidth headroom.",
+        "evidence": {
+          "pw_ch32to64_tensor_core_active_pct": 0.0,
+          "pw_ch32to64_sm_throughput_pct": 51.5,
+          "pw_ch64to128_tensor_core_active_pct": 23.4,
+          "pw_ch64to128_registers_per_thread": 236.0,
+          "pw_ch128to256_tensor_core_active_pct": 38.7,
+          "pw_ch128to256_registers_per_thread": 238.0,
+          "pw_ch128to256_achieved_occupancy_pct": 12.4,
+          "pw_ch128to256_l1_hit_rate": 0.0,
+          "pw_ch128to256_l2_hit_rate": 25.3,
+          "expected_kernel_after_fix": "sm80_xmma_gemm_bf16bf16_bf16_tn_n_* (HMMA Ampere TC)"
+        }
       },
-      "bottleneck": "Zero tensor core utilization across all 30 depthwise instances. cuDNN's depthwise path (groups=C_in) does not decompose into a GEMM and never engages Blackwell tensor cores. Kernels are memory-bound at 47-73% DRAM peak with no arithmetic intensity to hide latency.",
-      "transformation": "Replace cuDNN depthwise dispatch with a custom Triton kernel: intercept aten::convolution[groups==in_channels] in the FX graph via a custom lowering and dispatch to a Triton kernel using float4 vectorized loads (128-bit transactions per thread). The Triton kernel can also fuse the BN+HardTanh epilog (see OPT-004), eliminating the DRAM round-trip at the conv-BN boundary. TC cannot be engaged structurally for depthwise (no large GEMM), but vectorized loads reduce effective memory latency.",
-      "impact": {
-        "memory_throughput_gain_pct": "30-40",
-        "latency_reduction_pct_on_depthwise": "~20",
-        "note": "TC utilization remains 0 (depthwise GEMM is structurally rank-deficient); gains are purely from memory access efficiency"
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Cast model weights and input activations to torch.bfloat16. BF16 has the same exponent range as FP32 (8 bits) with reduced mantissa (7 vs 23 bits), making it numerically safe for inference without calibration. On A100 this engages HMMA Tensor Core units for all matmul/conv operations meeting minimum tile dimensions (16\u00d716\u00d716 for Ampere). The register count for the BF16 cuDNN GEMM kernel on Ampere is typically 64-96 registers, vs 236-238 for FP32 sgemm, which directly fixes the occupancy collapse seen in pw_ch64to128 and pw_ch128to256.",
+        "fx_steps": [
+          "model = model.to(torch.bfloat16)",
+          "x = x.to(torch.bfloat16) for all input tensors",
+          "Ensure BatchNorm (or its folded replacement) uses BF16 accumulators \u2014 torch.nn.BatchNorm2d with dtype=bfloat16 accumulates in FP32 internally by default; after OPT-001 folding this is moot",
+          "Set torch.backends.cudnn.allow_tf32 = True (should be default on Ampere) to also benefit FC layers",
+          "With torch.compile: pass torch.compile(model, mode='max-autotune') after dtype cast; Inductor will auto-select BF16 GEMM tiles",
+          "Validate: run allclose check on a test batch between FP32 and BF16 outputs; for MobileNet-style models BF16 error is typically <0.5% top-1 accuracy"
+        ]
       },
-      "confidence": "medium"
+      "estimated_impact": {
+        "time_savings_pct_of_total": "~10-18% on pointwise conv operators (17.9% of budget); register reduction from 238 to ~64-96 raises occupancy from 12% to ~50%+ on pw_ch64to128 and pw_ch128to256",
+        "affected_operators": [
+          "aten::cudnn_convolution, op_id = 145, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(139,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 172, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(166,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 199, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(193,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 226, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(220,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 253, sizes = [[16, 32, 56, 56], [64, 32, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(247,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 153, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(147,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 180, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(174,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 207, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(201,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 234, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(228,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 261, sizes = [[16, 64, 56, 56], [128, 64, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(255,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 161, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(155,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 188, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(182,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 215, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(209,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 242, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(236,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 269, sizes = [[16, 128, 56, 56], [256, 128, 1, 1], [], [], [], [], [], [], []], input_op_ids = [(263,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution_0"
+        ],
+        "note": "Synergistic with OPT-002 (channels_last): both changes together determine which cuDNN kernel path is selected; apply both before benchmarking either"
+      },
+      "confidence": "high",
+      "prerequisite_for": []
     },
     {
       "id": "OPT-004",
       "priority": 4,
-      "fx_nodes": [
-        "aten::convolution → aten::native_batch_norm → aten::hardtanh (all DSC block stages)"
+      "operators": [
+        "aten::cudnn_convolution, op_id = 157, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(151,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 184, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(178,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 211, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(205,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 238, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(232,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 265, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(259,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 149, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(143,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 176, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(170,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 203, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(197,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 230, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(224,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+        "aten::cudnn_convolution, op_id = 257, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(251,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0"
       ],
-      "kernel_names": [
-        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_1",
-        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2",
-        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3",
-        "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_4"
-      ],
-      "observed_metrics": {
-        "bn_act_kernel_time_share_pct": 34.0,
-        "bn_act_kernel_time_ms": 0.55,
-        "l1_hit_rate_pct": "59.4-82.8",
-        "lts_hit_rate_pct": "47.9-51.4",
-        "instances": 60,
-        "fusion_status": "BN+hardtanh already fused by Inductor; conv output NOT fused"
+      "bottleneck": {
+        "description": "Depthwise 3x3 convolutions at ch=128 (5.7% total) are borderline memory-bound with DRAM throughput at 60.4-60.9%. The conv2d_c1_k1_nhwc_kernel (cuDNN's NHWC depthwise kernel) achieves 65% occupancy and moderate SM throughput (48-49%), indicating the kernel is already well-structured but data movement between conv output and subsequent BN/ReLU6 passes is the dominant overhead. Fusing BN directly into the depthwise conv epilogue would eliminate the intermediate tensor write and re-read from HBM. For ch=64 depthwise (2.6%), DRAM is 40% and occupancy 63% \u2014 these are 'well_optimized' but will further benefit from BN elimination reducing memory pressure.",
+        "evidence": {
+          "dw_ch128_dram_throughput_pct": 60.5,
+          "dw_ch128_sm_throughput_pct": 48.6,
+          "dw_ch128_achieved_occupancy_pct": 65.3,
+          "dw_ch128_tensor_core_active_pct": 0.57,
+          "dw_ch128_registers_per_thread": 40.0,
+          "dw_ch128_total_pct": 5.68,
+          "kernel_name": "conv2d_c1_k1_nhwc_kernel",
+          "note": "tc=0.57% is near-zero; depthwise ops have no GEMM structure so TC engagement is not expected and tc_active_pct is not a bottleneck indicator here"
+        }
       },
-      "bottleneck": "Redundant DRAM round-trip at conv-BN boundary: Inductor correctly fused BN+hardtanh into single Triton kernels, but the conv output is written to global memory, then immediately read back by the BN kernel. At [16,C,56,56] fp32, each intermediate tensor is 3-13 MB. Across 30 blocks this generates significant avoidable DRAM traffic.",
-      "transformation": "Register a custom Inductor fusion pass that pattern-matches convolution + native_batch_norm_legit_no_training + hardtanh in the post-lowering FX graph and emits a single Triton kernel with BN/clip as the conv epilog. For the cuDNN Kernel2 path: after applying OPT-002 (Triton GEMM), the epilog fusion is straightforward via a tl.store with inline BN scaling and tl.clamp. For the depthwise path: combine with OPT-003's custom Triton kernel. If hardtanh(min=0, max=6), aten::cudnn_convolution_with_bias_and_relu is also a candidate for the pointwise path.",
-      "impact": {
-        "dram_traffic_reduction_pct": "30-40",
-        "latency_reduction_pct_on_bn_act_kernels": "~10",
-        "note": "Eliminates one full activation read + write per DSC block at the conv-BN boundary"
+      "transformation": {
+        "type": "operator_fusion",
+        "description": "After BN folding (OPT-001), the hardtanh (ReLU6) activation that was fused with BN becomes a standalone elementwise op. Enable Inductor's conv-epilogue fusion to merge the depthwise conv output with the subsequent activation: set torch._inductor.config.epilogue_fusion = True (default True in recent builds). Verify Inductor emits a single triton_poi_fused_convolution_hardtanh_* kernel rather than separate conv + hardtanh kernels. Also consider using torch.compile(model, mode='max-autotune') which enables Inductor's autotuning to select the optimal tile size for the fused depthwise kernel.",
+        "fx_steps": [
+          "After applying OPT-001 (BN folding) and OPT-002 (channels_last), run torch.compile(model, mode='max-autotune')",
+          "Inspect Inductor-generated kernel names: look for triton_poi_fused_convolution_hardtanh or similar that combines conv+activation",
+          "If epilogue fusion does not fire automatically, explicitly set torch._inductor.config.epilogue_fusion = True before compile",
+          "For the depthwise conv specifically: if cuDNN is used (not Triton), check that cudnn_convolution with bias is issued rather than separate bias-add kernel \u2014 pass bias directly to F.conv2d",
+          "Benchmark with and without epilogue_fusion to confirm HBM round-trip reduction"
+        ]
       },
-      "confidence": "medium"
-    },
-    {
-      "id": "OPT-005",
-      "priority": 5,
-      "fx_nodes": [
-        "all aten::cudnn_convolution (1x1 pointwise)",
-        "all aten::cudnn_convolution (depthwise)"
-      ],
-      "kernel_names": ["Kernel2", "conv2d_c1_k1_nhwc"],
-      "observed_metrics": {
-        "dtype": "fp32 (inferred: no fp16/bf16 kernels appear in profile)",
-        "kernel2_tc_utilization_pct": "18.7-45.3 (FP32 TC rate)",
-        "depthwise_tc_utilization_pct": 0.0,
-        "depthwise_dram_throughput_pct": "47.8-73.3"
+      "estimated_impact": {
+        "time_savings_pct_of_total": "~2-4% (eliminates post-conv activation read-write cycle; dw_ch128 at 5.7% currently, reduction depends on activation kernel duration)",
+        "affected_operators": [
+          "aten::cudnn_convolution, op_id = 157, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(151,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 184, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(178,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 211, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(205,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 238, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(232,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 265, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(259,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 149, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(143,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 176, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(170,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 203, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(197,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 230, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(224,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+          "aten::cudnn_convolution, op_id = 257, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(251,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0"
+        ],
+        "note": "This optimization is a downstream benefit of OPT-001; cannot be realized without BN folding first. Impact is modest compared to OPT-001 through OPT-003 but contributes to overall memory-traffic reduction."
       },
-      "bottleneck": "FP32 arithmetic throughout: Blackwell tensor cores deliver 2x higher throughput on BF16 vs FP32. Kernel2 TC utilization of 18-45% reflects FP32 TC rate, not the higher BF16 rate. conv2d_c1_k1_nhwc is memory-bound; halving dtype width from FP32 to BF16 directly halves DRAM pressure.",
-      "transformation": "Cast model weights and activations to BF16: model.to(torch.bfloat16) before inference, or wrap the forward pass in torch.autocast('cuda', dtype=torch.bfloat16). BF16 preferred over FP16 on Blackwell (same TC throughput, wider dynamic range, no loss scaling required). In the FX graph, insert to(torch.bfloat16) on all aten::convolution inputs/weights via a torch.fx.passes type promotion pass. Keep BN running_mean/running_var buffers in FP32 — cast only conv inputs and weights.",
-      "impact": {
-        "throughput_gain_on_pointwise_pct": "40-80",
-        "memory_reduction_on_activations_pct": 50,
-        "net_latency_reduction_pct": "25-35 on total kernel time",
-        "note": "Highest arithmetic impact item; should be combined with OPT-002 for maximum effect on Kernel2"
-      },
-      "confidence": "high"
+      "confidence": "medium",
+      "prerequisite_for": []
     }
-  ],
-  "assumptions": [
-    "device_name is null in capture metadata; GPU assumed to be RTX PRO 6000 Blackwell (GB202) with ~170 SMs and ~192 KB shmem/SM. Occupancy estimates will shift if SM count differs, but the root cause is independent of SM count.",
-    "Most kernel attributions use name_heuristic (confidence: low). Kernel2 entries use NVTX (confidence: medium). Install torch.profiler NVTX markers (with torch.autograd.profiler.emit_nvtx()) for high-confidence operator-to-kernel mapping.",
-    "CUDA Graphs (OPT-001) requires static shapes and no Python control flow inside the captured region. The profiled model at batch=16, spatial=56x56 satisfies this constraint.",
-    "BF16 cast (OPT-005) assumes inference mode. For training, BF16 mixed-precision requires GradScaler and careful handling of BN statistics accumulation.",
-    "hardtanh bounds not confirmed from profiling data. If min=0 and max=6, the ReLU6 path via cudnn_convolution_with_bias_and_relu is available as an alternative epilog fusion strategy in OPT-004."
   ]
 }

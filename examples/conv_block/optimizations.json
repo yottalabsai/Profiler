@@ -1,216 +1,431 @@
 {
   "analysis": {
-    "model": "ConvBlock",
+    "model": "conv_block",
+    "device": "NVIDIA A100-SXM4-40GB",
     "compile_mode": "inductor",
     "dtype": "FP32",
-    "batch_size": 16,
-    "spatial_size": "64x64",
-    "total_profiled_wall_time_ms": 2.12,
-    "iterations": 10,
+    "total_attributed_wall_time_ns": 4572254,
+    "total_kernel_count": 190,
     "time_budget": {
-      "aten::cudnn_convolution": { "pct": 81.9, "duration_ns": 1740320, "kernel_count": 90 },
-      "aten::batch_norm":        { "pct": 15.6, "duration_ns": 330944,  "kernel_count": 70 },
-      "aten::addmm":             { "pct": 1.4,  "duration_ns": 29024,   "kernel_count": 10 },
-      "aten::conv2d":            { "pct": 1.1,  "duration_ns": 23520,   "kernel_count": 20 }
-    }
+      "aten::cudnn_convolution_0": {
+        "pct": 34.34,
+        "duration_ns": 1570035,
+        "kernel_count": 45,
+        "bottleneck_class": "register_pressure",
+        "dominant_kernel": "cuDNN implicit-GEMM (NCHW path)"
+      },
+      "aten::_native_batch_norm_legit_no_training_0": {
+        "pct": 24.76,
+        "duration_ns": 1131993,
+        "kernel_count": 70,
+        "bottleneck_class": "memory_bound",
+        "dominant_kernel": "triton_poi_fused__native_batch_norm_legit_no_training_relu_4"
+      },
+      "aten::cudnn_convolution_64to128ch_group": {
+        "pct": 15.29,
+        "duration_ns": 699086,
+        "kernel_count": 15,
+        "bottleneck_class": "register_pressure",
+        "note": "Five [16,64,64,64]x[128,64,3,3] conv nodes (op_ids 122,144,166,188,210), each 3.05-3.07%"
+      },
+      "aten::cudnn_convolution_128to256ch_group": {
+        "pct": 14.92,
+        "duration_ns": 682097,
+        "kernel_count": 15,
+        "bottleneck_class": "register_pressure",
+        "note": "Five [16,128,32,32]x[256,128,3,3] conv nodes (op_ids 128,150,172,194,216), each 2.98-2.99%"
+      },
+      "aten::addmm_0": {
+        "pct": 2.51,
+        "duration_ns": 114783,
+        "kernel_count": 5,
+        "bottleneck_class": "tensor_core_idle",
+        "dominant_kernel": "ampere_sgemm_32x128_tn"
+      },
+      "aten::convolution_0": {
+        "pct": 1.54,
+        "duration_ns": 70335,
+        "kernel_count": 20,
+        "bottleneck_class": "wave_starvation",
+        "dominant_kernel": "triton_poi_fused_convolution_0"
+      },
+      "aten::addmm_below_threshold_group": {
+        "pct": 2.50,
+        "duration_ns": 114720,
+        "kernel_count": 5,
+        "bottleneck_class": "tensor_core_idle",
+        "note": "Five [16,256]x[256,10] addmm nodes (op_ids 131,153,175,197,219), each 0.50%"
+      },
+      "aten::cudnn_convolution_3to64ch_group": {
+        "pct": 4.15,
+        "duration_ns": 189150,
+        "kernel_count": 15,
+        "bottleneck_class": "layout_overhead",
+        "note": "Five [16,3,64,64]x[64,3,3,3] conv nodes; below_threshold=true; already using nhwckrsc_nhwc NHWC kernel (112 regs, 34% occupancy) — these convs auto-selected NHWC and are NOT affected by OPT-1"
+      }
+    },
+    "top3_pct_of_total": 74.39,
+    "architecture_notes": "A100 SXM4-40GB (Ampere sm80): 108 SMs, 19.5 TFLOP/s FP32, 312 TFLOP/s BF16 Tensor Core, ridge point 156 FLOP/byte (BF16). Tensor Core path for GEMM: sm80_xmma_gemm_bf16bf16. All ncu replay durations are 2-5x inflated vs actual wall time — use relative comparisons only."
+  },
+  "dependency_dag": {
+    "edges": [
+      {
+        "from": "OPT-1",
+        "to": "OPT-2",
+        "reason": "Fold BN weights after layout is fixed so that the folded conv weight buffers are registered in channels_last format from creation"
+      },
+      {
+        "from": "OPT-1",
+        "to": "OPT-3",
+        "reason": "Apply channels_last before BF16 cast to avoid a redundant weight copy (layout conversion + dtype conversion can be merged into a single .to() call)"
+      },
+      {
+        "from": "OPT-2",
+        "to": "OPT-3",
+        "reason": "Fold BN in FP32 first to preserve numerical accuracy of the scale/bias computation, then cast the folded buffers to BF16 via the global model.to(bfloat16)"
+      },
+      {
+        "from": "OPT-3",
+        "to": "OPT-5",
+        "reason": "Inductor max-autotune must see the final runtime dtype to select BF16-optimized tile configs and split-K strategies"
+      }
+    ]
   },
   "optimizations": [
     {
       "id": "OPT-1",
+      "priority": 1,
       "operators": [
-        "aten::cudnn_convolution (all 30 FX nodes)"
+        "aten::cudnn_convolution_0 (34.34%, 1,570,035 ns, [16,64,64,64]x[64,64,3,3])",
+        "aten::cudnn_convolution 64ch→128ch group (15.29%, 699,086 ns, five nodes [16,64,64,64]x[128,64,3,3])",
+        "aten::cudnn_convolution 128ch→256ch group (14.92%, 682,097 ns, five nodes [16,128,32,32]x[256,128,3,3])"
       ],
       "bottleneck": {
-        "description": "convertTensor_kernel fires twice per conv call (FP32->TF32 layout coercion), totalling 60 extra kernel launches and 222us (12.8% of all cudnn_conv wall time). Both kernels show 0% tensor core activity. They exist because cuDNN HMMA path requires NHWC TF32 layout; FP32 NCHW inputs trigger a layout/dtype cast before dispatch.",
+        "description": "cuDNN selects the NCHW implicit-GEMM algorithm for all 64-channel and 128-channel convolutions, producing a kernel with 238 registers/thread and achieved_occupancy of only 24%. On an A100 SM with 65,536 registers, 238 regs/thread × 128 threads/warp = 30,464 regs/warp, which limits concurrent warps to floor(65536 / 30464) = 2 warps per SM — far below the 64-warp maximum. The low occupancy prevents latency hiding and artificially suppresses SM utilisation even though sm_throughput_pct reaches 58-62% within active warp slots. The root cause is the NCHW memory layout: cuDNN must convert NCHW activations to its internal NHWC layout before running the Tensor Core kernel, which selects a high-register-count variant to perform this conversion in-register. The 3ch→64ch convolutions in the same model already auto-selected the NHWC kernel family (sm80_xmma_fprop_implicit_gemm_indexed_wo_smem_..._nhwckrsc_nhwc) at 112 registers/thread and 34% occupancy, confirming that channels_last input directly unlocks a lighter kernel path for these operators.",
         "evidence": {
-          "kernel": "convertTensor_kernel",
-          "launches_per_call": 2,
-          "total_launches": 60,
-          "total_duration_ns": 222176,
-          "tensor_core_pct": 0.0,
-          "fraction_of_cudnn_conv_time_pct": 12.8
+          "registers_per_thread_nchw": 238.0,
+          "achieved_occupancy_nchw_pct": 24.09,
+          "eligible_cycles_pct": 36.97,
+          "sm_throughput_pct": 57.85,
+          "dram_throughput_pct": 14.05,
+          "waves_per_sm": 5,
+          "nhwc_reference_kernel": "sm80_xmma_fprop_implicit_gemm_indexed_wo_smem_tf32f32_tf32f32_f32_nhwckrsc_nhwc_tilesize128x32x16_stage1_warpsize4x1x1_g1_tensor16x8x8_aligna4",
+          "nhwc_reference_registers_per_thread": 112.0,
+          "nhwc_reference_achieved_occupancy_pct": 34.48,
+          "nhwc_reference_sm_throughput_pct": 29.55,
+          "total_affected_duration_ns": 2951218,
+          "total_affected_pct": 64.55,
+          "kernel_count_affected": 75
+        }
+      },
+      "transformation": {
+        "type": "memory_layout",
+        "description": "Convert model and input tensor to channels_last (NHWC) memory format. This is NOT an FX graph pass — memory_format is a tensor property that torch.compile / Dynamo traces through without rewriting. Apply before torch.compile() so that Inductor's layout propagation pass sees NHWC from the start and propagates it through the full graph.",
+        "location": "get_model_and_input() — BEFORE torch.compile()",
+        "fx_steps": [
+          "model = model.to(memory_format=torch.channels_last)",
+          "x = x.to(memory_format=torch.channels_last)",
+          "# Effect: cuDNN selects nhwckrsc_nhwc NHWC kernel family for all 4-D conv ops",
+          "# Expected: registers/thread drops from 238 → ~112",
+          "# Expected: achieved_occupancy rises from 24% → ~34-50%",
+          "# The 3ch→64ch convs (already using NHWC kernel) are unaffected by this change"
+        ],
+        "code_hint": "channels_last applies only to 4-D tensors. The linear layer input (2-D) is unaffected. If the model contains any 3-D convolutions they must be excluded with a guard: x = x.to(memory_format=torch.channels_last) if x.dim() == 4 else x. Apply before torch.compile() — Inductor's layout propagation will propagate channels_last through the graph and may merge format-conversion nodes."
+      },
+      "estimated_impact": {
+        "mechanism": "Occupancy improvement from 24% to ~40% reduces stall cycles proportionally. Conservative estimate: 30% latency reduction on the 64.55% of attributed time covered by the three affected conv groups.",
+        "latency_reduction_ns": 885000,
+        "latency_reduction_pct_of_total": 19.4,
+        "kernel_launches_eliminated": 0,
+        "occupancy_improvement": "24% → ~34-50% (based on NHWC reference kernel observed in same profile)"
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-2", "OPT-3"]
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": [
+        "aten::_native_batch_norm_legit_no_training_0 (24.76%, 1,131,993 ns, 70 kernel launches)",
+        "aten::convolution_0 (1.54%, 70,335 ns, 20 kernel launches) — absorbed as a side-effect"
+      ],
+      "bottleneck": {
+        "description": "BatchNorm runs in inference mode (confirmed by the _legit_no_training suffix, which maps to training=False). Inductor has already performed a first-level fusion by merging BN and ReLU into a single Triton pointwise kernel (triton_poi_fused__native_batch_norm_legit_no_training_relu_4). Despite this fusion, the kernel is DRAM-bound at 65.2% memory throughput and 70 kernel launches with 152 waves/SM — high traffic from reading activations, BN statistics, and writing normalised outputs. In inference mode BN is a fixed affine transform: out = (x - mean) / sqrt(var + eps) * gamma + beta. The scale per channel s_c = gamma_c / sqrt(var_c + eps) and shifted bias b_c = beta_c - mean_c * s_c are compile-time constants that can be folded into the preceding conv's weight and bias tensors, eliminating the BN kernel entirely. The preceding aten::convolution_0 Triton bias-add kernel (70,335 ns, 20 launches) is also eliminated when the conv bias is absorbed into the folded BN bias formula.",
+        "evidence": {
+          "dram_throughput_pct": 65.18,
+          "sm_throughput_pct": 24.58,
+          "achieved_occupancy_pct": 70.16,
+          "waves_per_sm": 152,
+          "kernel_count": 70,
+          "training_mode": false,
+          "total_duration_ns": 1131993,
+          "pct_of_total": 24.76,
+          "convolution_bias_kernel_duration_ns": 70335,
+          "convolution_bias_kernel_pct": 1.54,
+          "convolution_bias_kernel_count": 20
+        }
+      },
+      "transformation": {
+        "type": "constant_folding",
+        "description": "FX pass: for each Conv2d → BatchNorm(training=False) pair, compute folded weight and bias offline on CPU parameter tensors, register them as new graph buffers, and erase the BN node from the FX graph. The conv bias is incorporated into the fold formula, which also eliminates the standalone bias-add Triton kernel.",
+        "location": "FX graph pass — apply to the captured graph BEFORE Inductor lowering",
+        "fx_steps": [
+          "# Step 1: Walk graph and collect (conv_node, bn_node) pairs",
+          "for node in gm.graph.nodes:",
+          "    if node.target != torch.ops.aten._native_batch_norm_legit_no_training.default:",
+          "        continue",
+          "    conv_node = node.args[0]",
+          "    if conv_node.target not in (",
+          "        torch.ops.aten.convolution.default,",
+          "        torch.ops.aten.cudnn_convolution.default,",
+          "    ):",
+          "        continue",
+          "",
+          "    # Step 2: Retrieve parameter tensors from get_attr nodes",
+          "    # BN args: (input, weight=gamma, bias=beta, running_mean, running_var, eps)",
+          "    gamma    = _get_attr_value(gm, node.args[1])",
+          "    beta     = _get_attr_value(gm, node.args[2])",
+          "    run_mean = _get_attr_value(gm, node.args[3])",
+          "    run_var  = _get_attr_value(gm, node.args[4])",
+          "    eps      = node.args[5]",
+          "    W_conv   = _get_attr_value(gm, conv_node.args[1])",
+          "    b_conv   = _get_attr_value(gm, conv_node.args[2])  # may be None",
+          "",
+          "    # Step 3: Compute folded constants (all on CPU, FP32)",
+          "    scale    = gamma / torch.sqrt(run_var + eps)   # shape: [out_channels]",
+          "    W_folded = W_conv * scale.view(-1, 1, 1, 1)   # shape: [out_ch, in_ch, kH, kW]",
+          "    b_conv_eff = b_conv if b_conv is not None else torch.zeros(W_conv.shape[0])",
+          "    b_folded = (b_conv_eff - run_mean) * scale + beta  # shape: [out_channels]",
+          "",
+          "    # Step 4: Register folded buffers and insert get_attr nodes",
+          "    suffix = node.name",
+          "    gm.register_buffer(f'w_folded_{suffix}', W_folded)",
+          "    gm.register_buffer(f'b_folded_{suffix}', b_folded)",
+          "    with gm.graph.inserting_before(conv_node):",
+          "        w_node = gm.graph.get_attr(f'w_folded_{suffix}')",
+          "        b_node = gm.graph.get_attr(f'b_folded_{suffix}')",
+          "",
+          "    # Step 5: Rewire conv node to use folded weight and folded bias",
+          "    # aten.convolution args: (input, weight, bias, stride, padding, dilation,",
+          "    #                         transposed, output_padding, groups)",
+          "    conv_node.args = (",
+          "        conv_node.args[0], w_node, b_node,",
+          "        *conv_node.args[3:]",
+          "    )",
+          "",
+          "    # Step 6: Replace all uses of BN node output with conv node output",
+          "    # BN returns a tuple (output, save_mean, save_rstd); index 0 is the activation",
+          "    bn_out = node  # users of node consume node[0]",
+          "    for user in list(node.users):",
+          "        # Replace getitem(bn_node, 0) uses with conv_node",
+          "        if user.target == operator.getitem and user.args[1] == 0:",
+          "            user.replace_all_uses_with(conv_node)",
+          "            gm.graph.erase_node(user)",
+          "    gm.graph.erase_node(node)",
+          "",
+          "gm.graph.eliminate_dead_code()",
+          "gm.graph.lint()",
+          "gm.recompile()"
+        ],
+        "code_hint": "assert not model.training, 'BN fold is only safe for inference mode (training=False)'. After folding, Inductor re-encounters a conv with a non-None bias; it will absorb the bias into the conv epilogue (cuDNN bias epilogue support) and emit no separate bias-add kernel. The previously separate triton_poi_fused_convolution_0 is therefore also eliminated. The trailing ReLU (previously fused with BN in the Triton kernel) becomes a standalone aten.relu; Inductor will fuse it into the conv epilogue or into the next operator's pointwise pass."
+      },
+      "estimated_impact": {
+        "mechanism": "Direct elimination of the DRAM-bound BN Triton kernel (1,131,993 ns) and the wave-starved bias-add kernel (70,335 ns). Total: 1,202,328 ns. A small portion of BN arithmetic is absorbed into the conv epilogue at negligible marginal cost. Net estimate: ~95% of the 1,202,328 ns is recovered.",
+        "latency_reduction_ns": 1142000,
+        "latency_reduction_pct_of_total": 25.0,
+        "kernel_launches_eliminated": 90,
+        "secondary_effects": [
+          "Eliminates aten::convolution_0 (1.54%, 70,335 ns, 20 launches) bias-add kernel as a side-effect",
+          "ReLU re-fused by Inductor into conv epilogue — no net kernel count increase for ReLU"
+        ]
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-3"]
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": [
+        "aten::addmm_0 (2.51%, 114,783 ns, 5 launches)",
+        "aten::addmm op_id=131 (0.50%, 22,912 ns)",
+        "aten::addmm op_id=153 (0.50%, 23,072 ns)",
+        "aten::addmm op_id=175 (0.50%, 23,040 ns)",
+        "aten::addmm op_id=197 (0.50%, 22,912 ns)",
+        "aten::addmm op_id=219 (0.50%, 22,784 ns)",
+        "All aten::cudnn_convolution nodes (secondary beneficiary)"
+      ],
+      "bottleneck": {
+        "description": "All ten addmm (linear layer forward) invocations dispatch to ampere_sgemm_32x128_tn — the cuBLAS FP32 SIMT path on Ampere. tensor_core_active_pct=0.0 on every invocation is the definitive indicator: zero Tensor Core utilisation on a GPU with 432 third-generation Tensor Cores. The kernel name suffix _tn encodes the transpose layout (row-major A, column-major B); the sgemm prefix confirms single-precision (FP32) SIMT execution. Matrix dimensions are M=16 (batch), N=10 (output classes), K=256 (features). Casting to BF16 changes the cuBLAS dispatch path from ampere_sgemm_32x128_tn (SIMT) to sm80_xmma_gemm_bf16bf16 (HMMA Tensor Core) on Ampere, guaranteed by cuBLAS dtype routing. The sm_throughput_pct of 0.58% and waves_per_sm=1 confirm severe wave starvation on top of the idle Tensor Cores — the matrix is too small to fill even 1 SM wave. BF16 routing helps primarily by reducing per-thread instruction latency and enabling Tensor Core warp-level scheduling, but the fundamental wave starvation (OPT-5) remains.",
+        "evidence": {
+          "dominant_kernel": "ampere_sgemm_32x128_tn",
+          "tensor_core_active_pct": 0.0,
+          "achieved_occupancy_pct": 12.48,
+          "sm_throughput_pct": 0.58,
+          "waves_per_sm": 1,
+          "eligible_cycles_pct": 50.39,
+          "registers_per_thread": 57.0,
+          "matrix_dims_M_N_K": [16, 10, 256],
+          "total_addmm_duration_ns": 229503,
+          "total_addmm_pct": 5.01,
+          "kernel_count": 10
         }
       },
       "transformation": {
         "type": "dtype_promotion",
-        "description": "Insert a cast to torch.float16 or torch.bfloat16 at graph input before the first placeholder->conv edge. With FP16/BF16 inputs, cuDNN selects the HMMA kernel directly, skipping both convertTensor_kernel invocations.",
+        "description": "Convert model and input to BF16. On Ampere this guarantees routing from ampere_sgemm_32x128_tn (SIMT, FP32) to sm80_xmma_gemm_bf16bf16 (HMMA Tensor Core) for all mm/addmm operations. Conv operators also benefit: cuDNN selects sm80_xmma_fprop_implicit_gemm NHWC BF16 variants. Not an FX pass — apply via model.to(bfloat16) after channels_last (OPT-1) and after BN fold (OPT-2) so that folded buffers are cast together in a single operation.",
+        "location": "get_model_and_input() — AFTER OPT-1 (channels_last) and OPT-2 (BN fold)",
         "fx_steps": [
-          "Intercept placeholder/get_attr nodes feeding into aten::cudnn_convolution",
-          "Insert call_function node for aten.to.dtype(torch.float16) after each placeholder",
-          "Run dtype propagation pass to ensure downstream BN running stats remain FP32",
-          "Verify no FP32 accumulation regression in BN/addmm nodes"
+          "# Apply AFTER model.to(memory_format=torch.channels_last) and BN fold pass",
+          "model = model.to(torch.bfloat16)",
+          "x = x.to(torch.bfloat16)",
+          "# Routes addmm: ampere_sgemm_32x128_tn → sm80_xmma_gemm_bf16bf16 (Tensor Core)",
+          "# Routes conv: cuDNN selects sm80_xmma_fprop_implicit_gemm NHWC BF16 variant",
+          "# No tied embeddings in this VGG-style architecture — BF16 cast is unconditionally safe",
+          "",
+          "# Validation gate (run once, not in hot path):",
+          "# out_fp32 = model_fp32(x_fp32)",
+          "# out_bf16 = model_bf16(x_fp32.bfloat16()).float()",
+          "# assert torch.allclose(out_fp32, out_bf16, atol=1e-2), 'BF16 precision regression'"
         ],
-        "code_hint": "with torch.autocast(device_type='cuda', dtype=torch.float16): output = model(x)"
+        "code_hint": "After OPT-2 (BN fold), the model no longer contains BatchNorm modules, so there is no risk of BF16 running statistics accumulation error. The folded conv bias (b_folded) is computed at FP32 and then cast to BF16 by the model.to(bfloat16) call — this ordering ensures maximum folding precision."
       },
-      "impact": {
-        "latency_reduction_ns": 222176,
-        "latency_reduction_pct_of_total": 10.5,
-        "kernel_launches_eliminated": 60,
-        "memory_traffic_reduction": "~2x on conv I/O"
+      "estimated_impact": {
+        "mechanism": "Tensor Core activation on addmm. At M=16, N=10, K=256 the primary constraint is wave starvation (OPT-5 addresses this separately). BF16 dispatch reduces per-operation latency by eliminating the SIMT scalar execution path. Conservative 20% reduction on addmm time. Conv ops gain additional benefit on top of OPT-1 from cuDNN BF16 kernel selection.",
+        "latency_reduction_ns": 46000,
+        "latency_reduction_pct_of_total": 1.0,
+        "kernel_launches_eliminated": 0,
+        "note": "Primary limiter for addmm is wave starvation (M*N=160 outputs across 108 SMs), not dtype. OPT-5 addresses the wave starvation. BF16 and OPT-5 are complementary — apply both."
       },
-      "confidence": "high"
-    },
-    {
-      "id": "OPT-2",
-      "operators": [
-        "aten::cudnn_convolution sizes=[16,64,64,64]x[128,64,3,3] (10 FX nodes)",
-        "aten::cudnn_convolution sizes=[16,128,32,32]x[256,128,3,3] (10 FX nodes)"
-      ],
-      "bottleneck": {
-        "description": "cuDNN implicit GEMM kernel runs at 8.3% warp occupancy due to 150 registers/thread. At 150 regs/warp, each SM can schedule at most floor(max_regs_per_SM / (128_threads * 150_regs)) = 1 warp block. Grid of 512-1024 blocks leaves most SMs idle. Tensor core activity reaches 67-73% within active SMs but SM throughput is only 54-60% because latency cannot be hidden with so few in-flight warps.",
-        "evidence": {
-          "kernel": "Kernel (cuDNN implicit GEMM)",
-          "registers_per_thread": 150,
-          "warp_occupancy_pct": 8.3,
-          "tensor_core_active_pct": 66.0,
-          "sm_throughput_pct": 54.4,
-          "grid_dim_128x64_conv": [1024, 1, 1],
-          "grid_dim_256x128_conv": [512, 1, 1]
-        }
-      },
-      "transformation": {
-        "type": "algorithm_selection + batch_size_increase",
-        "description": "Enable cudnn.benchmark to allow cuDNN to select a lower-register-count algorithm for these tile shapes. If algorithm remains high-register, replace these FX nodes with aten.convolution dispatched through Triton via torch.compile + max_autotune=True for occupancy-aware block shapes. Increasing batch size to 32+ raises grid to 1024-2048 and fills the wave pipeline.",
-        "fx_steps": [
-          "Set torch.backends.cudnn.benchmark = True before torch.compile",
-          "If Kernel still dispatches with 150 regs, register FX substitution pass replacing these two aten::cudnn_convolution nodes",
-          "Replace with aten.convolution + torch._inductor.config.max_autotune = True",
-          "Alternatively, increase batch size to saturate SM wave count"
-        ],
-        "assumption": "GPU has >=64 SMs based on observed sm_throughput behavior"
-      },
-      "impact": {
-        "latency_reduction_ns_estimate": "250000-430000",
-        "latency_reduction_pct_of_total_estimate": "12-20",
-        "note": "Wide estimate range; re-profile after cudnn.benchmark to narrow"
-      },
-      "confidence": "medium"
-    },
-    {
-      "id": "OPT-3",
-      "operators": [
-        "aten::batch_norm (single FX node, 7 Triton kernels per iteration, 70 total)"
-      ],
-      "bottleneck": {
-        "description": "Inductor decomposed inference-mode BN (_native_batch_norm_legit_no_training) into 7 Triton kernels including two redundant reduction passes (triton_red and triton_per) that re-read the activation tensor to accumulate channel means. At inference with frozen running_mean/running_var, these reductions are unnecessary. DRAM throughput at 67.6% confirms bandwidth-bound execution from extra passes.",
-        "evidence": {
-          "total_kernels_per_call": 7,
-          "total_kernel_launches": 70,
-          "dram_throughput_pct": 67.6,
-          "tensor_core_pct": 0.0,
-          "reduction_kernels": [
-            {
-              "name": "triton_red_fused__native_batch_norm_legit_no_training_mean_relu_7",
-              "avg_duration_ns": 4224,
-              "sm_warps_pct": 73.5
-            },
-            {
-              "name": "triton_per_fused__native_batch_norm_legit_no_training_mean_relu_8",
-              "avg_duration_ns": 1856,
-              "sm_warps_pct": 15.9
-            }
-          ]
-        }
-      },
-      "transformation": {
-        "type": "constant_folding + operator_fusion",
-        "description": "Match aten.batch_norm(training=False) in FX graph and decompose in-place to a single aten.mul + aten.add using pre-computed scale and bias_eff constants. This produces a single elementwise x*scale+bias_eff node that inductor fuses with adjacent relu into one triton_poi kernel, eliminating the two reduction passes and all split tile kernels.",
-        "fx_steps": [
-          "Symbolic trace model and locate aten.batch_norm nodes where training=False",
-          "Compute scale = weight / sqrt(running_var + eps) as get_attr constant",
-          "Compute bias_eff = bias - running_mean * scale as get_attr constant",
-          "Replace batch_norm node with call_function(aten.add, call_function(aten.mul, x, scale), bias_eff)",
-          "Allow inductor to re-fuse the resulting aten.mul -> aten.add -> aten.relu chain"
-        ],
-        "code_hint": "torch.fx.passes.graph_transform.replace_pattern(gm, bn_pattern, fused_elementwise_pattern)"
-      },
-      "impact": {
-        "kernel_launches_eliminated_per_iteration": "5-6 of 7",
-        "latency_reduction_ns_estimate": 260000,
-        "latency_reduction_pct_of_total": 12.3,
-        "dram_traffic_reduction_pct": 40
-      },
-      "confidence": "high"
+      "confidence": "high",
+      "prerequisite_for": ["OPT-5"]
     },
     {
       "id": "OPT-4",
+      "priority": 4,
       "operators": [
-        "aten::conv2d (1 FX node, triton_poi_fused_convolution_0 and triton_poi_fused_convolution_1)"
+        "aten::cudnn_convolution_0 (34.34%, secondary optimisation after OPT-1)",
+        "aten::cudnn_convolution 64ch→128ch group (15.29%)",
+        "aten::cudnn_convolution 128ch→256ch group (14.92%)"
       ],
       "bottleneck": {
-        "description": "The aten::conv2d node emits two standalone Triton elementwise kernels per iteration: a bias-add scatter onto the conv output (convolution_0, grid 128x2x1) and a weight normalization read on the 3-channel weight tensor (convolution_1, grid 1x3x1). The convolution_1 kernel reads only ~12 bytes from DRAM (3-channel bias scalar), meaning kernel launch latency (~900ns) completely dominates execution time. Both kernels show 0% tensor core and <10% occupancy. Inductor did not fold these bias-add ops.",
+        "description": "After channels_last (OPT-1), cuDNN will select an NHWC kernel with lower register pressure (~112 regs/thread, ~34% occupancy based on the reference nhwckrsc_nhwc kernel observed in this profile). However, cuDNN may have multiple NHWC algorithm candidates for each tensor shape, and its default heuristic does not always choose the fastest one for the specific batch size (16) and spatial dimensions (64x64, 32x32) on the A100. Enabling torch.backends.cudnn.benchmark=True triggers cuDNN to benchmark all eligible algorithms for each unique (input_shape, weight_shape, stride, padding) combination and cache the winner, potentially finding Winograd F(2,3) or a higher-tile NHWC implicit-GEMM variant that further increases SM throughput.",
         "evidence": {
-          "kernel_convolution_0": {
-            "avg_duration_ns": 1440,
-            "grid": [128, 2, 1],
-            "tensor_core_pct": 0.0,
-            "occupancy_pct": 9.8,
-            "dram_throughput_pct": 13.8
-          },
-          "kernel_convolution_1": {
-            "avg_duration_ns": 912,
-            "grid": [1, 3, 1],
-            "dram_bytes_read": 12.29,
-            "tensor_core_pct": 0.0,
-            "occupancy_pct": 8.3
-          }
+          "sm_throughput_pct_before_opt1": 57.85,
+          "eligible_cycles_pct_before_opt1": 36.97,
+          "achieved_occupancy_before_opt1_pct": 24.09,
+          "nhwc_reference_sm_throughput_pct": 29.55,
+          "note": "nhwc_reference sm_throughput is lower than nchw because the reference conv is 3ch (input-bound); after OPT-1 the 64ch and 128ch convs have adequate input data to drive higher SM throughput"
         }
       },
       "transformation": {
-        "type": "bias_folding_into_batchnorm",
-        "description": "Detect the aten::conv2d(bias=True) -> aten::batch_norm subgraph in the FX graph. Zero conv.bias and absorb it into bn.bias via: bn.bias += conv.bias_orig * bn.weight / sqrt(bn.running_var + eps). This is a constant folding on the get_attr nodes that is semantics-preserving under training=False. Eliminates both triton_poi_fused_convolution_* kernels entirely.",
+        "type": "algorithm_selection",
+        "description": "Enable cuDNN benchmark mode to trigger algorithm search over all shapes in the model. For fixed-shape inference (constant batch=16, spatial=64x64 and 32x32), the search is a one-time cost that is cached per (shape, dtype, device) tuple.",
+        "location": "Model initialisation or inference setup — AFTER channels_last (OPT-1)",
         "fx_steps": [
-          "Match subgraph: aten.convolution(bias!=None) -> aten.batch_norm(training=False)",
-          "Extract conv_bias from get_attr node",
-          "Compute absorbed_bias = conv_bias * bn_weight / sqrt(bn_running_var + eps)",
-          "Add absorbed_bias to bn_bias get_attr constant in-place",
-          "Replace conv bias with zeros (or set bias=False in aten.convolution node)"
-        ]
+          "torch.backends.cudnn.benchmark = True",
+          "",
+          "# Run a warmup pass to trigger and cache the benchmark search",
+          "with torch.no_grad():",
+          "    _ = model(x)   # cuDNN benchmarks all candidate algorithms and caches result",
+          "",
+          "# All subsequent calls use the cached, benchmarked algorithm — zero search overhead"
+        ],
+        "code_hint": "cudnn.benchmark=True assumes FIXED input shapes. If inference batch size varies at runtime (e.g., online serving), benchmark=True will re-search on each new shape and add tail latency. In that case use torch.backends.cudnn.benchmark_limit=0 (PyTorch >= 2.0) to cap the search or disable benchmark and rely on OPT-5 (max-autotune) for global kernel selection."
       },
-      "impact": {
-        "kernel_launches_eliminated": 20,
-        "latency_reduction_ns": 23520,
-        "latency_reduction_pct_of_total": 1.1,
-        "note": "Small absolute gain but removes degenerate 12-byte DRAM read kernel"
+      "estimated_impact": {
+        "mechanism": "cuDNN may select Winograd F(2,3) for the 3x3 convolutions or a larger-tile NHWC implicit-GEMM variant. Conservatively estimated at 10% additional latency reduction on the three conv groups after OPT-1 is applied.",
+        "latency_reduction_ns": 206000,
+        "latency_reduction_pct_of_total": 4.5,
+        "kernel_launches_eliminated": 0,
+        "note": "Impact is on top of OPT-1. Total conv improvement with OPT-1 + OPT-4 estimated at ~23% of total time."
       },
-      "confidence": "high"
+      "confidence": "medium",
+      "prerequisite_for": []
     },
     {
       "id": "OPT-5",
+      "priority": 5,
       "operators": [
-        "aten::addmm (10 FX nodes, each dispatching gemmSN_TN_kernel)"
+        "aten::addmm_0 (2.51%, M=16, N=10, K=256, waves_per_sm=1)",
+        "All ten aten::addmm nodes (5.01% combined)"
       ],
       "bottleneck": {
-        "description": "gemmSN_TN_kernel is the cuBLAS serial-N GEMM path, selected when output matrix dimension N is below the tensor-core tiling threshold. Grid is [2,2,1] = 4 thread blocks, SM throughput 0.2%, 0% tensor core activity, achieved occupancy 8.2%. 4 active thread blocks cannot hide memory latency on a high-SM GPU — each call is wave-starved. The _TN suffix indicates transpose-N layout (row-major A, column-major B).",
+        "description": "The linear classifier operates on M=16 (batch size), N=10 (output classes), K=256 (feature dimension). With the default cuBLAS tile of 32x128 (as indicated by the ampere_sgemm_32x128_tn name), the output matrix requires ceil(16/32) * ceil(10/128) = 1 * 1 = 1 CTA. This single CTA is scheduled on 1 out of 108 available A100 SMs — SM utilisation is 0.9%. waves_per_sm=1 and sm_throughput_pct=0.58% confirm the diagnosis. Dtype promotion (OPT-3) routes to Tensor Cores but cannot solve the structural under-parallelism. The correct remediation is to (a) use torch.compile(mode='max-autotune') which allows Inductor to search for split-K tile configurations that decompose K=256 across multiple SMs, or (b) increase the batch size to raise M and generate more CTAs. Option (a) is applicable without changing the model API.",
         "evidence": {
-          "kernel": "gemmSN_TN_kernel",
-          "grid": [2, 2, 1],
-          "block": [128, 1, 1],
-          "tensor_core_pct": 0.0,
-          "sm_throughput_pct": 0.2,
-          "achieved_occupancy_pct": 8.2,
-          "avg_duration_ns": 2902
+          "dominant_kernel": "ampere_sgemm_32x128_tn",
+          "waves_per_sm": 1,
+          "sm_count_a100": 108,
+          "output_elements_M_N": 160,
+          "ctms_per_sm_estimate": 0.009,
+          "sm_throughput_pct": 0.58,
+          "eligible_cycles_pct": 50.39,
+          "achieved_occupancy_pct": 12.48,
+          "total_addmm_duration_ns": 229503,
+          "total_addmm_pct": 5.01
         }
       },
       "transformation": {
-        "type": "matrix_padding + batched_gemm",
-        "description": "Inspect aten::addmm node weight tensor shapes in the FX graph. If any dimension is not a multiple of 16 (FP16) or 8 (BF16), add a graph pass to pad the weight matrix to the next multiple-of-16 boundary and slice the output post-GEMM. If the 10 addmm ops are independent (no data dependency chain), batch them into a single aten::bmm with stacked inputs along batch dim to give cuBLAS a larger effective tile and promote tensor core dispatch.",
+        "type": "algorithm_selection",
+        "description": "Enable torch.compile(mode='max-autotune') to allow Inductor to search for split-K configurations that decompose the K dimension across multiple SMs, and to apply persistent kernel strategies. Additionally, enable TF32 as a zero-risk fallback for the FP32 mm path if BF16 dtype promotion (OPT-3) is not applied.",
+        "location": "torch.compile() call site — AFTER dtype promotion (OPT-3)",
         "fx_steps": [
-          "Inspect weight shape for each aten::addmm node",
-          "If dim not multiple of 16: insert aten.constant_pad_nd before addmm, aten.slice after",
-          "Check for independent addmm nodes (topological sort to verify no inter-dependencies)",
-          "If independent: stack weight get_attr nodes, replace with single aten::bmm",
-          "Alternatively: wrap with torch.compile + torch.nn.functional.linear for Triton GEMM dispatch"
+          "# Primary: max-autotune for split-K and persistent kernel search",
+          "compiled_model = torch.compile(model, mode='max-autotune')",
+          "",
+          "# Secondary: TF32 (optional, applies if FP32 path is retained)",
+          "torch.backends.cuda.matmul.allow_tf32 = True",
+          "torch.backends.cudnn.allow_tf32 = True",
+          "",
+          "# Batch padding (if caller controls batch size):",
+          "# Padding from 16 to 64 gives ceil(64*10/tile) >= 4 CTAs, improving SM coverage",
+          "# x_padded = F.pad(x, (0, 0, 0, 48))  # pad batch dimension",
+          "# out = compiled_model(x_padded)[:16]   # slice real outputs"
         ],
-        "assumption": "Actual matrix dimensions not logged in profile; shapes must be inspected at FX trace time"
+        "code_hint": "max-autotune compilation takes 30 seconds to 5 minutes on first run due to kernel search. For production, compile once and serialise via torch.export or torch._inductor.aot_compile. TF32 is a global toggle with immediate effect and zero compilation overhead — enable it unconditionally for Ampere inference unless exact FP32 bit-accuracy is required by a downstream validation suite."
       },
-      "impact": {
-        "speedup_per_kernel_estimate": "2-4x if tensor core path activated",
-        "latency_reduction_ns_estimate": "15000-20000",
-        "latency_reduction_pct_of_total": 0.7,
-        "note": "Low absolute impact at current 1.4% share; becomes more relevant after OPT-1/3 reduce total time"
+      "estimated_impact": {
+        "mechanism": "Split-K decomposition distributes K=256 across up to 16 SMs (K/16=16 splits), increasing SM utilisation from ~1% to ~15%. Combined with persistent kernel scheduling: estimated 30-40% reduction on addmm time.",
+        "latency_reduction_ns": 69000,
+        "latency_reduction_pct_of_total": 1.5,
+        "kernel_launches_eliminated": 0,
+        "note": "Absolute impact is small (5% of total time). Primary global value: max-autotune also improves tile selection for conv operators beyond what cuDNN benchmark alone provides."
       },
-      "confidence": "medium"
+      "confidence": "medium",
+      "prerequisite_for": []
     }
+  ],
+  "cumulative_impact_summary": {
+    "warning": "Impacts are non-additive. BN fold (OPT-2) changes conv epilogue cost; channels_last (OPT-1) changes BN kernel selection. Figures below are independent contributions before interaction effects.",
+    "opt_1_channels_last_ns": 885000,
+    "opt_1_channels_last_pct": 19.4,
+    "opt_2_bn_fold_plus_bias_absorption_ns": 1142000,
+    "opt_2_bn_fold_plus_bias_absorption_pct": 25.0,
+    "opt_3_bf16_dtype_ns": 46000,
+    "opt_3_bf16_dtype_pct": 1.0,
+    "opt_4_cudnn_benchmark_ns": 206000,
+    "opt_4_cudnn_benchmark_pct": 4.5,
+    "opt_5_max_autotune_ns": 69000,
+    "opt_5_max_autotune_pct": 1.5,
+    "estimated_total_reduction_ns": 2348000,
+    "estimated_total_reduction_pct": 51.4,
+    "baseline_total_attributed_ns": 4572254,
+    "projected_post_optimization_ns": 2224254,
+    "caveat": "OPT-4 impact is on top of OPT-1 (both target conv; listed separately as they address different mechanisms). OPT-2 impact dominates because BN accounts for 26.3% of time including the bias kernel. ncu replay durations are 2-5x inflated vs wall clock — validate against nsys timeline captures for absolute figures."
+  },
+  "application_order": [
+    "Step 1 — OPT-1: model.to(memory_format=torch.channels_last); x.to(memory_format=torch.channels_last)",
+    "Step 2 — OPT-2: Apply BN fold FX pass (includes bias absorption as part of the b_folded formula)",
+    "Step 3 — OPT-3: model.to(torch.bfloat16); x.to(torch.bfloat16)  [casts folded buffers together]",
+    "Step 4 — OPT-4: torch.backends.cudnn.benchmark = True  [set before first inference call]",
+    "Step 5 — OPT-5: compiled_model = torch.compile(model, mode='max-autotune')  [replaces base torch.compile]"
+  ],
+  "global_notes": [
+    "All ncu replay duration values are 2-5x longer than actual kernel wall-clock time due to the ncu_replay_timing edge case flag. Use percentage comparisons for bottleneck prioritisation; validate absolute ns figures against the nsys wall-clock timeline.",
+    "A100 SXM4-40GB (Ampere sm80): 108 SMs, ridge point 156 FLOP/byte for BF16, 312 TFLOP/s BF16 Tensor Core peak. SM occupancy is the primary lever for conv operators at this workload size.",
+    "The 3ch→64ch convolutions (five nodes, 4.15% combined) auto-selected the NHWC kernel (nhwckrsc_nhwc) without explicit channels_last being required — cuDNN falls back to NHWC for very narrow input channels. This is the in-profile proof that channels_last unlocks NHWC algorithm selection for the wider-channel conv groups (OPT-1 hypothesis validated).",
+    "aten::addmm matrix dimensions are M=16, N=10, K=256. With 108 SMs and M*N=160 output elements, the GPU is structurally under-loaded for this layer. The correct long-term fix is to increase batch size (16 → 64+) in the serving infrastructure, not to change the model graph.",
+    "warp_cycles_per_instruction returned null for all kernels — this is a profiler collection issue (likely ncu section set does not include the required L1TEX hardware counter). eligible_cycles_pct (range 11-50%) was used as a latency-bound proxy throughout this analysis.",
+    "No tied embeddings detected in this VGG-style architecture (Conv-BN-ReLU-Pool-Linear topology). BF16 dtype promotion (OPT-3) is unconditionally safe with respect to weight sharing.",
+    "fused_kernel_double_count edge case flag: the BN+ReLU fused Triton kernel (triton_poi_fused__native_batch_norm_legit_no_training_relu_4) may be double-counted between the BN and ReLU operators in the attribution. The 24.76% figure for BN may include ReLU time. After OPT-2 (BN fold), the ReLU is separated; Inductor will likely fuse it into the conv epilogue at no additional kernel launch cost."
   ]
 }
