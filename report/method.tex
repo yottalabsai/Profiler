@@ -259,18 +259,19 @@ and are surfaced explicitly in the profile output.
   varies widely with compile mode and operator backend.}
 \label{tab:tiers}
 \small
-\begin{tabular}{llp{4.2cm}c}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{2.0cm}p{2.6cm}p{4.8cm}p{1.6cm}}
 \toprule
-\textbf{Method} & \textbf{Evidence} & \textbf{Trigger Condition} & \textbf{Typical Runtime Coverage} \\
+\textbf{Method} & \textbf{Evidence} & \textbf{Trigger Condition} & \textbf{Coverage} \\
 \midrule
 \rowcolor{highcol!15}
-HIGH & torch.profiler invocation-order join & Kineto trace available; kernel count agrees with operator dispatch count & 35--45\% \\
+HIGH & torch.profiler IOM & Kineto trace available; kernel count agrees with dispatch count & 35--45\% \\
 \rowcolor{medcol!15}
 MEDIUM (NVTX) & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range & 45--55\% \\
 \rowcolor{medcol!10}
-MEDIUM (Inductor) & Inductor \texttt{output\_code.py} debug comments & Kernel name in Inductor fusion map; NVTX enclosure absent & 5--15\% (Inductor mode) \\
+MEDIUM (Inductor) & Inductor \texttt{output\_code.py} comments & Kernel name in Inductor fusion map; NVTX enclosure absent & 5--15\% \\
 \rowcolor{ucol!15}
-UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN convolutions); eager Triton without NVTX & 1--85\% \\
+UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN conv.); eager Triton without NVTX & 1--85\% \\
 \bottomrule
 \end{tabular}
 \end{table}

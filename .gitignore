@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.pyo
 *.pyd
@@ -52,6 +53,7 @@ desktop.ini
 *.sqlite
 *.qdstrm
 *.qdrep
+*.ptx
 
 # Provenance sidecars (generated at runtime)
 *.provenance.jsonl
@@ -63,6 +65,9 @@ desktop.ini
 # ncu temporary replay files
 /ncu_replays/
 /ncu_output/
+
+# TorchInductor debug/compile artifacts
+**/profiler_output/
 
 # Logs
 *.log

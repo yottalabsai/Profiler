@@ -100,7 +100,7 @@ equivalent (multiplied by 16/64 = 0.25) for fair per-sample comparison.
   Median over 200 iterations.  Optimized configuration: B=64, BF16, PGO backend.}
 \label{tab:transformer}
 \small
-\begin{tabular}{lrrr}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lrrr}
 \toprule
 \textbf{Operation} & \textbf{Baseline (B=16, FP32)} & \textbf{Optimized (B=16 equiv.)} & \textbf{Speedup} \\
 \midrule
@@ -118,7 +118,7 @@ Residual add $\times$ 2         & 789\,ns    & 498\,ns   & 1.6$\times$  \\
 \midrule
 \textbf{Total}                  & \textbf{47,893\,ns} & \textbf{7,585\,ns} & \textbf{6.3$\times$} \\
 \bottomrule
-\end{tabular}
+\end{tabular*}
 \end{table}
 
 \figref{fig:speedup_bars} visualizes the per-operator speedups; the FFN down-projection bar dominates, reflecting a doubly-penalized baseline.

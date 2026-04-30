@@ -1,290 +1,289 @@
 # ConvBlock Optimized Workload
 
 Custom `torch.compile()` backend implementing 5 operator-level optimizations
-derived from NCU profiling of the baseline `conv_block.py` workload.
+derived from NCU/nsys profiling of the baseline `conv_block.py` workload on an
+NVIDIA A100-SXM4-40GB.
 
 ---
 
 ## Overview
 
-The baseline ConvBlock profile (FP32, batch=16, 64×64 spatial) shows four
+The baseline ConvBlock profile (FP32, batch=16, 64x64 spatial) reveals four
 dominant cost buckets:
 
-| Operator | Wall time share | Key pathology |
+| Operator | Wall-time share | Pathology |
 |---|---|---|
-| `aten::cudnn_convolution` | 81.9% | `convertTensor_kernel` overhead (FP32→TF32 coercion), low-occupancy GEMM |
-| `aten::batch_norm` | 15.6% | 7 Triton kernels per call including redundant reductions |
-| `aten::addmm` | 1.4% | `gemmSN_TN_kernel` (4 thread blocks, 0% tensor core) |
-| `aten::conv2d` | 1.1% | Degenerate bias-scatter kernel reading 12 bytes |
+| `aten::cudnn_convolution` (64ch, 128ch groups) | 64.55% | NCHW implicit-GEMM kernel: 238 regs/thread, 24% occupancy — occupancy starvation, not compute bound |
+| `aten::_native_batch_norm_legit_no_training` | 24.76% | DRAM-bound Triton kernel (65% DRAM throughput, 70 launches) — constant arithmetic that can be folded |
+| `aten::convolution` (bias-add) | 1.54% | 20 standalone bias-scatter kernels from wave-starved Triton |
+| `aten::addmm` (linear head) | 5.01% | `ampere_sgemm_32x128_tn` SIMT path, 0% Tensor Core utilisation, 1 wave across 108 SMs |
 
-This workload applies targeted FX graph transformations and runtime flags to
-address each pathology.
+The five optimizations together target ~51.4% of baseline wall time.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Smoke test (no profiler needed)
+# Navigate to the workload directory
+cd /home/ubuntu/Profiler/examples/conv_block
+
+# Smoke test (no profiler required, ~10 seconds)
 python conv_block_optimized.py
 
-# Full test suite
+# Run the 4-test validation suite
 python test_conv_block_optimized.py
+# or with pytest
+python -m pytest test_conv_block_optimized.py -v
 
-# Profile (requires operator-profiler + ncu)
+# Profile baseline vs. optimized (requires operator-profiler + ncu with sudo)
+operator-profiler profile conv_block.py \
+    --model-name ConvBlock --compile-mode inductor \
+    --output runs/conv_block_baseline
+
 operator-profiler profile conv_block_optimized.py \
-    --model-name ConvBlock \
-    --compile-mode inductor \
+    --model-name ConvBlock --compile-mode inductor \
     --output runs/conv_block_optimized
 
-operator-profiler map runs/conv_block_optimized.manifest.json \
-    --script scripts/run_workload.py \
-    --ncu-sudo \
-    --script-args --workload conv_block_optimized.py \
-                  --compile-backend convblock_opt
+# Side-by-side timing comparison
+python scripts/run_workload.py \
+    --workload examples/conv_block/conv_block.py \
+    --compile-backend inductor \
+    --warmup-iters 5 --measure-iters 20
 
-# Side-by-side comparison
-python scripts/run_workload.py --workload conv_block.py --compile-backend inductor
-python scripts/run_workload.py --workload conv_block_optimized.py --compile-backend convblock_opt
+python scripts/run_workload.py \
+    --workload examples/conv_block/conv_block_optimized.py \
+    --compile-backend conv_block_opt \
+    --warmup-iters 5 --measure-iters 20
 ```
 
 ---
 
-## Optimization Summary
+## Optimizations Table
 
-| ID | Target operators | Pathology | Transformation | Expected gain | Confidence |
+| ID | Operators targeted | Pathology | Transformation | Estimated gain | Confidence |
 |---|---|---|---|---|---|
-| OPT-1 | All 30 `aten::cudnn_convolution` | `convertTensor_kernel` fires 2× per conv call (FP32→TF32 coercion), 60 launches, 222 µs | Cast model + input to FP16 in `get_model_and_input()` via `model.to(torch.float16)` | −222 µs (10.5% of total) | High |
-| OPT-2 | Conv stages 2 & 3 (64→128, 128→256) | cuDNN implicit GEMM at 8.3% warp occupancy (150 regs/thread, grid 512–1024 blocks) | `cudnn.benchmark = True` + `max_autotune=True`; Triton conv substitution is a future-work stub | −12–20% estimated | Medium |
-| OPT-3 | `aten::batch_norm` (all 3 BN nodes) | Inductor decomposes to 7 Triton kernels including 2 redundant reduction passes; DRAM at 67.6% | Constant-fold BN to `x * scale + bias_eff` in FX graph; inductor fuses with ReLU into 1 triton_poi | −260 µs (12.3%); 40% DRAM reduction | High |
-| OPT-4 | `aten::conv2d` (stage 1 bias-scatter) | Two degenerate triton_poi kernels; `convolution_1` reads only 12 bytes from DRAM, dominated by launch latency | Absorb conv bias into adjacent BN bias constant; zero out conv bias | −23 µs (1.1%); 20 kernel launches eliminated | High |
-| OPT-5 | `aten::addmm` (linear classifier, 10 nodes) | `gemmSN_TN_kernel`: 4 thread blocks, 0.2% SM throughput, 0% tensor core | Pad weight N-dim to multiple of 16 (10→16); slice output post-GEMM | 2–4× per kernel; −15–20 µs absolute | Medium |
+| OPT-1 | All `aten::cudnn_convolution` (64ch, 128ch, 256ch groups, 64.55% combined) | NCHW layout forces cuDNN to select high-register-count GEMM variant (238 regs/thread, 24% occupancy). 3ch conv already auto-selects NHWC kernel (112 regs, 34% occupancy) as proof. | Non-graph: `model.to(memory_format=torch.channels_last)` + `x.to(memory_format=torch.channels_last)` in `get_model_and_input()` before `torch.compile()`. Inductor propagates NHWC layout through full graph. | ~885,000 ns / **19.4%** of total | **High** |
+| OPT-2 | `aten::_native_batch_norm_legit_no_training` (24.76%, 70 launches) + `aten::convolution` bias-add (1.54%, 20 launches) | BN in inference mode is a fixed affine transform: constant per-channel scale and bias that can be pre-computed and absorbed into the preceding conv's weight and bias, eliminating the kernel entirely. | FX pass `pass_fold_bn_into_conv()`: compute `W_folded = W_conv * (gamma / sqrt(var + eps)).view(-1,1,1,1)` and `b_folded = (b_conv - mean) * scale + beta`, register as buffers, rewire conv, erase BN node. | ~1,202,000 ns / **25.0%** of total (eliminates 90 launches) | **High** |
+| OPT-3 | `aten::addmm` (linear classifier, 5.01% combined, 10 launches) + all conv ops as secondary beneficiary | All addmm dispatch to `ampere_sgemm_32x128_tn` (SIMT, 0% Tensor Core). On Ampere, BF16 dtype guarantees routing to `sm80_xmma_gemm_bf16bf16` (HMMA Tensor Core). | Non-graph: `model.to(torch.bfloat16)` + `x.to(torch.bfloat16)` in `get_model_and_input()`, applied AFTER OPT-1 (channels_last) and AFTER the BN fold runs at compile time so that folded buffers are cast together. | ~46,000 ns / **1.0%** of total | **High** |
+| OPT-4 | All `aten::cudnn_convolution` (complementary to OPT-1) | After channels_last, cuDNN may have multiple NHWC algorithm candidates per shape; default heuristic does not always choose the fastest for batch=16 and fixed spatial dims. | Non-graph: `torch.backends.cudnn.benchmark = True` in `get_model_and_input()`. Triggers one-time cuDNN algorithm search cached per (shape, dtype, device). Assumes fixed input shapes. | ~206,000 ns / **4.5%** of total (on top of OPT-1) | **Medium** |
+| OPT-5 | `aten::addmm` (M=16, N=10, K=256 — 1 CTA on 108 SMs, sm_throughput 0.58%) | Structural wave starvation: 160 output elements / 108 SMs = 0.009 CTAs/SM. BF16 alone cannot fix under-parallelism. split-K decomposes K=256 across up to 16 SMs. | Compile-time: `torch.compile(model, backend='conv_block_opt', mode='max-autotune')` at call site. Also sets `torch.backends.cuda.matmul.allow_tf32 = True` for any residual FP32 paths. | ~69,000 ns / **1.5%** of total | **Medium** |
 
-**Total estimated savings: ~23–25% wall time reduction** (after OPT-1 and OPT-3 dominate).
+**Cumulative estimated improvement: ~51.4% wall-time reduction** (non-additive;
+OPT-2 dominates due to BN elimination, OPT-1 second).
 
 ---
 
 ## Architecture
 
-### FX Graph Passes
-
-Each optimization is an independent function with signature
-`(gm: fx.GraphModule) -> fx.GraphModule`.  Passes operate at the Aten IR
-level and are model-agnostic — they match on `torch.ops.aten.*` targets, not
-on PyTorch module class names.
+### Dependency Order
 
 ```
-get_model_and_input()          ← non-graph: FP16 cast, cudnn.benchmark
+get_model_and_input()
+    OPT-1: model.to(channels_last)            ← must be first (layout before dtype)
+    OPT-4: cudnn.benchmark = True              ← before first inference call
+    OPT-5 (partial): allow_tf32 = True        ← global flag, zero cost
+    OPT-3: model.to(bfloat16)                 ← after channels_last, before compile
          │
          ▼
-torch.compile(model, backend="convblock_opt")
+torch.compile(model, backend='conv_block_opt', mode='max-autotune')  ← OPT-5
          │
          ▼
-convblock_opt(gm, example_inputs)
-    │
-    ├─ pass_absorb_conv_bias_into_bn   [OPT-4]
-    ├─ pass_fold_bn_constants          [OPT-3]
-    ├─ pass_pad_linear_weights         [OPT-5]
-    ├─ pass_cudnn_autotune_stub        [OPT-2 — detection + logging only]
-    │
-    └─ compile_fx(gm, example_inputs) ← inductor backend
+conv_block_opt(gm: fx.GraphModule, example_inputs)
+    OPT-2: pass_fold_bn_into_conv(gm)         ← FX pass: BN elimination
+         │
+         ▼
+    compile_fx(gm, example_inputs)            ← Inductor backend
 ```
 
-### Pass Order Rationale
+### FX Pass: pass_fold_bn_into_conv (OPT-2)
 
-`pass_absorb_conv_bias_into_bn` must run **before** `pass_fold_bn_constants`
-because absorption updates the `bn_bias` buffer.  If the BN folder runs
-first, it reads the old (pre-absorption) bias and the conv bias never gets
-folded.
+Detection target: `aten._native_batch_norm_legit_no_training.default` nodes
+whose first argument is an `aten.convolution.default` node.
+
+Transformation steps (graph surgery):
+
+1. Walk `list(gm.graph.nodes)` (snapshot — never mutate while iterating live).
+2. For each `(conv_node, bn_node)` pair, retrieve `gamma`, `beta`,
+   `running_mean`, `running_var`, and `eps` via `_get_param_or_buffer()`.
+3. Compute `W_folded` and `b_folded` on CPU in FP32 for numerical precision.
+4. Register `W_folded` and `b_folded` as buffers on `gm` with unique names.
+5. Insert `get_attr` nodes for the buffers using `gm.graph.inserting_before()`.
+6. Insert a new `aten.convolution.default` node with folded weight and bias
+   using `gm.graph.inserting_after()`.
+7. Walk `bn_node.users`: replace `getitem(bn_node, 0)` uses with `new_conv_node`,
+   erase the getitem node. Erase `bn_node` and old `conv_node`.
+8. After all pairs: `gm.graph.eliminate_dead_code()` → `gm.graph.lint()` → `gm.recompile()`.
+
+Effect on the kernel timeline:
+- `triton_poi_fused__native_batch_norm_legit_no_training_relu_4` → eliminated
+- `triton_poi_fused_convolution_0` (bias-add) → eliminated
+- The trailing ReLU becomes a standalone node that Inductor will fuse into the
+  conv epilogue or next pointwise pass at no extra kernel launch cost.
 
 ### Backend Registration
 
 ```python
 from torch._dynamo import register_backend
+from torch._inductor.compile_fx import compile_fx  # function, not module
 
 @register_backend
-def convblock_opt(gm, example_inputs):
-    ...
+def conv_block_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+    gm = pass_fold_bn_into_conv(gm)
     return compile_fx(gm, example_inputs)
 ```
 
-The `@register_backend` decorator makes `"convblock_opt"` available as a
+The `@register_backend` decorator makes `"conv_block_opt"` available as a
 `torch.compile(backend=...)` string and in `torch._dynamo.list_backends()`.
-
----
-
-## Why a Custom Backend
-
-| Approach | Tradeoff |
-|---|---|
-| Edit model source | Couples optimization to a specific architecture; breaks when the model class changes |
-| Post-hoc `state_dict` manipulation | Cannot eliminate kernel launches; operates on weights, not graph |
-| Custom FX passes + inductor delegate | Model-agnostic, operates at Aten IR, each pass is independently removable, inductor handles codegen |
-
-The custom backend approach matches the `operator-profiler` workflow: profile
-→ identify bottleneck → write targeted pass → re-profile to verify.  Passes
-degrade gracefully (log + skip) if the pattern isn't present, making them
-safe to apply across model variants.
 
 ---
 
 ## Key Design Decisions
 
-### FP16 Outside the FX Graph (OPT-1)
+### Why OPT-1 and OPT-3 are non-graph
 
-`model.to(torch.float16)` and `x.to(torch.float16)` are applied in
-`get_model_and_input()` rather than as an FX pass.  Dtype is a property of
-tensors returned by `get_attr` nodes, not an operation in the graph.
-Inserting a `to(dtype)` node before every placeholder would work but is
-fragile across dynamo trace modes.  The autocast approach is idempotent and
-composable with `torch.autocast`.
+Memory format (`channels_last`) and dtype (`bfloat16`) are tensor properties,
+not operations visible in the Aten IR graph. Applying them before `torch.compile()`
+allows Inductor's layout propagation pass to see NHWC from the start and
+propagate it through the full graph — more effective than inserting
+format-conversion nodes in the FX backend.
 
-### Idempotency Guards
+### Why BN fold runs in the FX backend (not in get_model_and_input)
 
-Both non-graph optimizations check current state before applying:
+`pass_fold_bn_into_conv` operates on the Aten IR graph produced by Dynamo
+tracing, which exposes the exact `aten._native_batch_norm_legit_no_training`
+and `aten.convolution` nodes with their parameter `get_attr` connections. At
+the `nn.Module` level, the Conv2d and BatchNorm2d are separate sub-modules
+with no direct connection visible to pre-compile Python code.
 
-```python
-# Only cast if not already half-precision
-if next(model.parameters()).dtype not in (torch.float16, torch.bfloat16):
-    model = model.to(torch.float16)
-```
+### Why BN fold precedes BF16 cast
 
-This prevents silent double-casting if the baseline is later updated to
-include its own precision changes.
+The fold arithmetic is done in FP32 to preserve numerical accuracy of the
+scale/bias computation (`gamma / sqrt(var + eps)`). The model-level BF16 cast
+(`model.to(bfloat16)`) then casts all parameters including the folded buffers
+together in a single operation, which is efficient and ensures the folded
+buffers are in the same dtype as the conv weights they correspond to.
 
-### BN Constant Folding Strategy (OPT-3)
+### Idempotency guards
 
-Rather than using `torch.fx.subgraph_rewriter.replace_pattern` (which
-requires an exact structural match on the pattern graph), the pass walks
-nodes directly and resolves `get_attr` constants from `gm.named_buffers()`
-and `gm.named_parameters()`.  This is more robust to inductor's
-decomposition variants (`_native_batch_norm_legit_no_training`,
-`batch_norm`, etc.).
-
-### Defensive Error Handling
-
-Every pass wraps its body in `try/except Exception`:
+All non-graph optimizations check current state before applying:
 
 ```python
-try:
-    # pattern detection and surgery
-    gm.graph.lint()
-    gm.recompile()
-except Exception as exc:
-    logger.warning("pass_X failed: %s — skipping", exc)
-return gm
+# OPT-1: only if not already channels_last
+if not first_param.is_contiguous(memory_format=torch.channels_last):
+    model = model.to(memory_format=torch.channels_last)
+
+# OPT-3: only if not already reduced precision
+if next(model.parameters()).dtype not in (torch.bfloat16, torch.float16):
+    model = model.to(torch.bfloat16)
 ```
 
-A pass that fails to match (e.g. because inductor already folded the
-operator) silently returns the unmodified graph rather than crashing the
-compilation pipeline.
+This prevents redundant conversions if the baseline is later updated.
 
-### OPT-2 as Stub
+### OPT-5 at call site, not inside the backend
 
-The cuDNN implicit GEMM occupancy problem (OPT-2) requires either:
-- `cudnn.benchmark = True` to select a lower-register algorithm (applied as a flag), or
-- A custom Triton convolution kernel with occupancy-aware block shapes
-
-The Triton path is left as a stub (`pass_cudnn_autotune_stub`) that detects
-the conv nodes and logs a TODO.  `cudnn.benchmark` alone may resolve the
-occupancy issue for standard tile shapes; re-profiling after OPT-1 and OPT-3
-will determine whether the additional Triton investment is warranted.
-
----
-
-## Comparison Against Baseline
-
-```bash
-# Baseline
-python scripts/run_workload.py \
-    --workload conv_block.py \
-    --compile-backend inductor \
-    --warmup-iters 5 --measure-iters 20
-
-# Optimized
-python scripts/run_workload.py \
-    --workload conv_block_optimized.py \
-    --compile-backend convblock_opt \
-    --warmup-iters 5 --measure-iters 20
-```
-
-Key metrics to compare in the resulting profiles:
-
-- **Total wall time** — target: 23–25% reduction
-- **`convertTensor_kernel` launches** — target: 0 (was 60)
-- **Triton kernels per BN call** — target: 1 (was 7)
-- **`triton_poi_fused_convolution_*` launches** — target: 0 (was 20)
-- **`gemmSN_TN_kernel` tensor core %** — target: >0% (was 0%)
-- **cuDNN conv warp occupancy** — target: >8.3% (was 8.3%)
-
----
-
-## Verification Checklist
-
-After profiling the optimized workload, confirm:
-
-- [ ] `convertTensor_kernel` does not appear in kernel timeline (OPT-1)
-- [ ] Total `aten::cudnn_convolution` duration is ≥10% lower
-- [ ] `aten::batch_norm` dispatches ≤2 Triton kernels per call (OPT-3)
-- [ ] No `triton_poi_fused_convolution_0` or `_1` kernels (OPT-4)
-- [ ] `gemmSN_TN_kernel` grid is `[2,2,1]` or larger — or replaced by a tensor-core kernel (OPT-5)
-- [ ] `cudnn.benchmark` log line appears at startup
-- [ ] `convblock_opt backend: all passes complete` appears in logs
-- [ ] No `pass_* failed` warnings in logs
-- [ ] Output shape is `(16, 10)` and no NaN/Inf values
+`mode='max-autotune'` is a `torch.compile()` option that instructs Inductor
+to run a broader tile-config search before emitting Triton kernels. It must be
+set at the `torch.compile()` call site, not inside the custom backend, because
+the custom backend receives the already-configured `gm` and has no way to
+re-trigger Inductor's autotuning search from within its callback.
 
 ---
 
 ## Troubleshooting
 
-**`ModuleNotFoundError: No module named 'conv_block'`**  
-Ensure `conv_block.py` is on `PYTHONPATH` or in the same directory as
-`conv_block_optimized.py`.
+**`ModuleNotFoundError: No module named 'conv_block'`**
 
-**`TypeError: 'module' object is not callable` at compile time**  
-Wrong import: `from torch._inductor import compile_fx` imports the module.
-Correct: `from torch._inductor.compile_fx import compile_fx`.
+`conv_block_optimized.py` imports from `conv_block`. Both files must be in the
+same directory, and that directory must be on `PYTHONPATH` or you must run
+from that directory.
 
-**`convblock_opt` not in `torch._dynamo.list_backends()`**  
-The module must be imported before `torch.compile` is called.  Import
-`conv_block_optimized` explicitly before constructing the compiled model.
+```bash
+cd /home/ubuntu/Profiler/examples/conv_block
+python conv_block_optimized.py
+```
 
-**`pass_fold_bn_constants: could not resolve constant tensors`**  
-Inductor may have already folded or decomposed BN differently.  This is a
-warning, not an error — the pass skips gracefully and inductor's default BN
-handling applies.
+**`TypeError: 'module' object is not callable` at compile time**
 
-**FP16 overflow / NaN outputs**  
-Some Conv+BN weight initializations can overflow FP16 range.  Try
-`torch.bfloat16` instead by changing `torch.float16` to `torch.bfloat16` in
-`get_model_and_input()`.  BF16 has the same exponent range as FP32 and is
-less prone to overflow.
+Wrong import form. This always means:
+```python
+# WRONG — imports the module object, not the function
+from torch._inductor import compile_fx
 
-**`--script-args` parse error with operator-profiler**  
-`--script-args` uses `nargs=REMAINDER` and must be the **last** flag.  Place
-all `operator-profiler map` flags (`--ncu-sudo`, `--ncu-env`, etc.) before
-`--script-args`.
+# CORRECT — imports the callable function
+from torch._inductor.compile_fx import compile_fx
+```
+
+**`conv_block_opt` not in `torch._dynamo.list_backends()`**
+
+The `@register_backend` decorator runs at import time. The module must be
+imported before `torch.compile()` is called:
+```python
+import conv_block_optimized  # triggers registration
+compiled = torch.compile(model, backend="conv_block_opt")
+```
+
+**`gm.graph.lint()` raises `RuntimeError: use of dead node`**
+
+A node was erased before all its users were replaced. The `pass_fold_bn_into_conv`
+implementation handles this by: (1) replacing all `getitem` users of `bn_node`
+before erasing them, (2) calling `conv_node.replace_all_uses_with(new_conv_node)`
+before `erase_node(conv_node)`. If you extend the pass, always call
+`replace_all_uses_with()` before `erase_node()`.
+
+**`[pass_fold_bn_into_conv] No Conv→BN patterns found`**
+
+This warning is logged when the Aten IR graph does not contain a
+`_native_batch_norm_legit_no_training` node directly following a
+`convolution` node. Possible causes:
+- The model was traced in training mode (BN uses a different op in training).
+- Inductor already fused the BN into a pointwise kernel before the backend ran.
+- The `compile_mode` is not `"inductor"` (e.g., `"eager"` produces no FX graph).
+
+The pass skips gracefully — compilation continues with the unfused graph.
+
+**NaN or Inf in output after BN fold**
+
+The folded scale `gamma / sqrt(var + eps)` can produce large values if
+`running_var` is near zero (undertrained BN). This is very rare for
+pre-trained or eval-mode models. Check:
+```python
+# Inspect running variance of each BN layer
+for name, m in model.named_modules():
+    if isinstance(m, torch.nn.BatchNorm2d):
+        print(name, m.running_var.min().item())
+```
+If any variance is <1e-4, increase the BN `eps` parameter before compilation.
+
+**max-autotune compilation is slow (30 s – 5 min)**
+
+This is expected on first run. Inductor benchmarks all tile configurations.
+For production, serialize the compiled model:
+```python
+# Serialize
+torch._inductor.aot_compile(model, (x,), options={"max_autotune": True})
+# or use torch.export + ExecuTorch for deployment
+```
 
 ---
 
 ## Future Work
 
-- **OPT-2 full implementation**: Register a Triton convolution kernel
-  (`triton.autotune` with block shapes targeting <128 registers/thread) as an
-  FX substitution for the two high-register cuDNN kernels in stages 2 and 3.
+- **OPT-2 full Triton conv**: Register a Triton convolution kernel with
+  occupancy-aware block shapes (<128 regs/thread) as an FX substitution for
+  the cuDNN implicit-GEMM kernels in conv stages 2 and 3. Requires validating
+  correctness across all tile shapes at batch=16 and verifying that Inductor's
+  layout propagation does not re-insert format conversions.
 
-- **Fuse Conv+BN+ReLU into a single Triton kernel**: After BN constant
-  folding, the `conv → mul → add → relu` chain is a candidate for a single
-  fused Triton pointwise kernel, eliminating all intermediate tensor
-  materializations.
+- **Conv+BN+ReLU fused Triton epilogue**: After BN fold, the
+  `conv → mul → add → relu` chain is a candidate for a single fused Triton
+  pointwise kernel that eliminates all intermediate tensor materializations.
+  Can be implemented as a custom Triton kernel registered via
+  `torch._custom_ops` or `torch.library`.
 
-- **Multi-stage batched addmm**: If the 10 `addmm` nodes in the classifier
-  head are topologically independent, stack them into a single `aten::bmm`
-  to give cuBLAS a larger effective tile and improve wave occupancy beyond
-  what dimension padding alone achieves.
-
-- **NHWC layout propagation**: Switching convolutions to channels-last layout
-  (`model = model.to(memory_format=torch.channels_last)`) eliminates the
-  remaining NCHW→NHWC permutations that cuDNN inserts for HMMA dispatch.
-  This is complementary to OPT-1 and can be implemented as a pre-pass that
-  inserts `aten.contiguous(memory_format=NHWC)` on conv input/weight nodes.
+- **Batch padding for addmm wave starvation**: Padding the batch dimension
+  from 16 to 64 would produce `ceil(64*10 / tile) >= 4` CTAs, raising SM
+  coverage from 0.9% to ~3.7%. This trades latency for throughput and is only
+  appropriate in batched-inference serving scenarios where the caller controls
+  batch size. Implement in `get_model_and_input()` with a corresponding
+  `out[:BATCH_SIZE]` slice after the forward pass.
