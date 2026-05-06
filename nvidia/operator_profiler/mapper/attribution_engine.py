@@ -165,27 +165,24 @@ class AttributionEngine:
             call_counters[op_name] += 1
             operator_id = f"{op_name}_{call_idx}"
 
-            kernel_records = [self._entry_to_kernel_record(e) for e in entries]
-
-            # Determine if any kernel is fused
-            is_fused = any(e.attribution.is_fused for e in entries)
+            kernel_records: list[KernelRecord] = []
+            is_fused = False
             fused_with: list[str] = []
+            nvtx_range: NvtxRangeInfo | None = None
+
             for e in entries:
+                kernel_records.append(self._entry_to_kernel_record(e))
+                a = e.attribution
+                if a.is_fused:
+                    is_fused = True
+                if nvtx_range is None and a.nvtx_range:
+                    nvtx_range = a.nvtx_range
                 # Prefer Inductor ground-truth fused_ops; fall back to NVTX
                 # stack ops from source_operators[1:] when fused_ops is absent.
-                ops_source = e.attribution.fused_ops or (
-                    e.attribution.source_operators[1:] if e.attribution.is_fused else []
-                )
+                ops_source = a.fused_ops or (a.source_operators[1:] if a.is_fused else [])
                 for op in ops_source:
                     if op not in fused_with and op != op_name:
                         fused_with.append(op)
-
-            # NVTX range info from first attributed kernel
-            nvtx_range: NvtxRangeInfo | None = None
-            for e in entries:
-                if e.attribution.nvtx_range:
-                    nvtx_range = e.attribution.nvtx_range
-                    break
 
             records.append(
                 OperatorRecord(

@@ -29,6 +29,12 @@ Where `{module_name}` is the file stem with dots replacing slashes.
 Expected: exit code 0, no traceback.
 If fails: report full traceback. Common causes: missing `from torch._inductor.compile_fx import compile_fx` (wrong import), circular import, missing dependency.
 
+Also verify the dedup imports are available (required for dedup-aware backends):
+```bash
+python -c "import sys; sys.path.insert(0, '{project_root}'); from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner; print('OK')"
+```
+If this fails: `pip install -e .` from project root, or check PYTHONPATH includes project root.
+
 ### Step 3: Backend Registration Check
 ```bash
 python -c "
@@ -73,6 +79,13 @@ INFO  ... [pass_name] Fused N nodes        → APPLIED
 WARNING ... [pass_name] Pattern not found  → NOT_APPLIED (graceful)
 WARNING ... [pass_name] Failed: ...        → FAILED (exception caught)
 ```
+
+For dedup-aware backends, passes emit per-partition log messages rather than a single entry. Accept these as evidence of application:
+```
+INFO  ... {model_name}_opt: 31 duplicate partitions, dedup path   → dedup path taken
+INFO  ... [_pass_replace_sdpa] applied to partition modules_0     → APPLIED (per rep)
+```
+If the log shows `no repeated layers, flat compile path`, the backend used the flat path (model has no repeated layers) — this is correct behavior, not an error.
 
 Report a table:
 ```

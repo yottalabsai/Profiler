@@ -53,6 +53,17 @@ def add_parser(subparsers) -> None:
             "survive the run and can be inspected or re-imported later."
         ),
     )
+    p.add_argument(
+        "--partition-map",
+        default=None,
+        metavar="PART_JSON",
+        help=(
+            "Path to the .part.json equivalence map produced by "
+            "run_workload.py --layer-deduplicate. When provided, ncu replays "
+            "only the unique-partition kernels and propagates metrics to all "
+            "structural duplicates, giving an N-layer speedup on the replay step."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -88,6 +99,12 @@ def _run(args) -> None:
         import os
         os.makedirs(ncu_output_dir, exist_ok=True)
 
+    partition_equivalence_map: dict[str, str] = {}
+    if args.partition_map:
+        import json
+        partition_equivalence_map = json.loads(Path(args.partition_map).read_text())
+        log.info("Loaded partition equivalence map: %d duplicate(s)", len(partition_equivalence_map))
+
     replay_config = KernelProfileConfig(
         replay_script=args.script,
         replay_script_args=args.script_args or [],
@@ -96,6 +113,7 @@ def _run(args) -> None:
         ncu_sudo=args.ncu_sudo,
         ncu_extra_env=ncu_extra_env,
         expected_input_shapes=manifest.capture_metadata.input_shapes,
+        partition_equivalence_map=partition_equivalence_map,
     )
     orch = KernelProfileOrchestrator(manifest, operator_records, replay_config)
     ncu_output_dir = orch.run()

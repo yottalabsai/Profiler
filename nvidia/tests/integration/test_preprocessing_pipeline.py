@@ -27,25 +27,52 @@ pytestmark = pytest.mark.integration
 # Availability helpers
 # ---------------------------------------------------------------------------
 
+_NSYS_FALLBACK_PATHS = [
+    "/usr/local/cuda-12.8/bin/nsys",
+    "/usr/local/cuda/bin/nsys",
+    "/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys",
+]
+
+_NCU_FALLBACK_PATHS = [
+    "/opt/nvidia/nsight-compute/2025.1.1/ncu",
+    "/usr/local/cuda-12.8/bin/ncu",
+    "/usr/local/cuda/bin/ncu",
+    "/opt/nvidia/nsight-compute/2025.4.1/ncu",
+]
+
+
+def _nsys_executable() -> str | None:
+    """Return the nsys executable path, checking PATH then known install locations."""
+    import shutil
+    found = shutil.which("nsys")
+    if found:
+        return found
+    for p in _NSYS_FALLBACK_PATHS:
+        if Path(p).exists():
+            return p
+    return None
+
+
 def _nsys_available() -> bool:
+    exe = _nsys_executable()
+    if exe is None:
+        return False
     try:
-        result = subprocess.run(["nsys", "--version"], capture_output=True, timeout=10)
+        result = subprocess.run([exe, "--version"], capture_output=True, timeout=10)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-_NCU_FALLBACK_PATH = "/opt/nvidia/nsight-compute/2025.4.1/ncu"
-
-
 def _ncu_executable() -> str | None:
-    """Return the ncu executable path, checking PATH first then the fallback."""
+    """Return the ncu executable path, checking PATH then known install locations."""
     import shutil
     found = shutil.which("ncu")
     if found:
         return found
-    if Path(_NCU_FALLBACK_PATH).exists():
-        return _NCU_FALLBACK_PATH
+    for p in _NCU_FALLBACK_PATHS:
+        if Path(p).exists():
+            return p
     return None
 
 
@@ -137,11 +164,12 @@ def full_pipeline_profile(tmp_path_factory):
     """
     if not _cuda_available():
         pytest.skip("CUDA not available (torch not installed or no GPU)")
-    if not _nsys_available():
-        pytest.skip("nsys not available on PATH")
+    nsys_exe = _nsys_executable()
+    if nsys_exe is None:
+        pytest.skip("nsys not available on PATH or known install locations")
     ncu_exe = _ncu_executable()
     if ncu_exe is None:
-        pytest.skip("ncu not available on PATH or fallback path")
+        pytest.skip("ncu not available on PATH or known install locations")
 
     tmp = tmp_path_factory.mktemp("pipeline_e2e")
 
@@ -157,7 +185,7 @@ def full_pipeline_profile(tmp_path_factory):
 
     subprocess.run(
         [
-            "nsys", "profile",
+            nsys_exe, "profile",
             "--trace=cuda,nvtx",
             f"--output={output_prefix}",
             "--force-overwrite=true",
@@ -176,31 +204,7 @@ def full_pipeline_profile(tmp_path_factory):
         nsys_rep = candidates[0]
 
     # ------------------------------------------------------------------
-    # Stage 2: nsys export → SQLite
-    # ------------------------------------------------------------------
-    sqlite_path = tmp / "profile.sqlite"
-
-    subprocess.run(
-        [
-            "nsys", "export",
-            "--type=sqlite",
-            f"--output={sqlite_path}",
-            "--force-overwrite=true",
-            str(nsys_rep),
-        ],
-        check=True,
-        timeout=60,
-        capture_output=True,
-    )
-
-    if not sqlite_path.exists():
-        candidates = list(tmp.glob("*.sqlite"))
-        if not candidates:
-            pytest.fail(f"nsys export produced no .sqlite file in {tmp}")
-        sqlite_path = candidates[0]
-
-    # ------------------------------------------------------------------
-    # Stage 3: Manifest build (real nsys I/O — no mocks)
+    # Stage 2 / 3: Manifest build — exports .nsys-rep → .sqlite internally.
     # ------------------------------------------------------------------
     import torch
     from nvidia.operator_profiler.mapper.manifest_builder import ManifestBuilder
@@ -213,7 +217,7 @@ def full_pipeline_profile(tmp_path_factory):
         nsys_report_path=str(nsys_rep),
         capture_timestamp_utc="2026-04-01T00:00:00+00:00",
     )
-    manifest = ManifestBuilder(nsys_rep_path=nsys_rep, metadata=metadata).build()
+    manifest = ManifestBuilder(nsys_rep_path=nsys_rep, metadata=metadata, nsys_executable=nsys_exe).build()
 
     # ------------------------------------------------------------------
     # Stage 4: Attribution engine
@@ -409,7 +413,7 @@ class TestPreprocessingPipelineIntegration:
         - kernel_count matches the number of kernels in the record
         - total_duration_ns > 0 for all operators
         - dominant_kernel_id refers to a real kernel in the operator
-        - linear/mm operators with ncu metrics have mean_achieved_occupancy > 0
+        - linear/mm operators with ncu metrics have achieved_occupancy > 0
         """
         profile, _, _, _ = full_pipeline_profile
 
@@ -441,12 +445,12 @@ class TestPreprocessingPipelineIntegration:
                     for k in op.kernels
                 )
                 if has_ncu:
-                    assert op.aggregated.mean_achieved_occupancy is not None, (
-                        f"mean_achieved_occupancy is None for '{op.operator_name}' "
+                    assert op.aggregated.achieved_occupancy is not None, (
+                        f"achieved_occupancy is None for '{op.operator_name}' "
                         "despite kernels having achieved_occupancy set"
                     )
-                    assert op.aggregated.mean_achieved_occupancy > 0, (
-                        f"mean_achieved_occupancy is 0 for '{op.operator_name}'"
+                    assert op.aggregated.achieved_occupancy > 0, (
+                        f"achieved_occupancy is 0 for '{op.operator_name}'"
                     )
 
     def test_unattributed_kernels_not_in_operator_records(self, full_pipeline_profile):
@@ -545,8 +549,9 @@ def complex_pipeline_profile(tmp_path_factory):
     """
     if not _cuda_available():
         pytest.skip("CUDA not available")
-    if not _nsys_available():
-        pytest.skip("nsys not available")
+    nsys_exe = _nsys_executable()
+    if nsys_exe is None:
+        pytest.skip("nsys not available on PATH or known install locations")
     ncu_exe = _ncu_executable()
     if ncu_exe is None:
         pytest.skip("ncu not available")
@@ -567,7 +572,7 @@ def complex_pipeline_profile(tmp_path_factory):
     nsys_rep = tmp / "profile.nsys-rep"
 
     subprocess.run(
-        ["nsys", "profile", "--trace=cuda,nvtx",
+        [nsys_exe, "profile", "--trace=cuda,nvtx",
          f"--output={output_prefix}", "--force-overwrite=true",
          sys.executable, str(script)],
         check=True, timeout=120, capture_output=True,
@@ -576,16 +581,6 @@ def complex_pipeline_profile(tmp_path_factory):
         candidates = list(tmp.glob("*.nsys-rep"))
         nsys_rep = candidates[0] if candidates else pytest.fail("no .nsys-rep produced")
 
-    sqlite_path = tmp / "profile.sqlite"
-    subprocess.run(
-        ["nsys", "export", "--type=sqlite",
-         f"--output={sqlite_path}", "--force-overwrite=true", str(nsys_rep)],
-        check=True, timeout=60, capture_output=True,
-    )
-    if not sqlite_path.exists():
-        candidates = list(tmp.glob("*.sqlite"))
-        sqlite_path = candidates[0] if candidates else pytest.fail("no .sqlite produced")
-
     metadata = CaptureManifestMetadata(
         model_name="MLPBlock",
         torch_version=torch.__version__,
@@ -593,7 +588,7 @@ def complex_pipeline_profile(tmp_path_factory):
         nsys_report_path=str(nsys_rep),
         capture_timestamp_utc="2026-04-01T00:00:00+00:00",
     )
-    manifest = ManifestBuilder(nsys_rep_path=nsys_rep, metadata=metadata).build()
+    manifest = ManifestBuilder(nsys_rep_path=nsys_rep, metadata=metadata, nsys_executable=nsys_exe).build()
     engine = AttributionEngine(manifest)
     operator_records, unattributed = engine.run()
 

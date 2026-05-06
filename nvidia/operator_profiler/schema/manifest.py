@@ -22,6 +22,12 @@ class KernelManifestEntry(BaseModel):
     grid_dim: tuple[int, int, int] | None = None
     block_dim: tuple[int, int, int] | None = None
     attribution: KernelAttribution
+    # Set by ManifestBuilder._tag_layer_partitions() when the nsys trace contains
+    # layer::unique:: / layer::duplicate:: NVTX ranges (from run_workload.py
+    # --layer-deduplicate).  Both fields default to None/False so all existing
+    # callers are unaffected when partition tagging is absent.
+    layer_partition: str | None = None       # e.g. "modules_0", "prologue"
+    is_unique_partition: bool = False         # True → profiled by ncu; False → inferred
 
 
 class KernelAttribution(BaseModel):

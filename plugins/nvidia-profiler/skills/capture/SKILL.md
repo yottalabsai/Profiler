@@ -15,6 +15,7 @@ Runs the complete profiling pipeline on your `workload.py` and produces `profile
 /capture workload.py --ncu-sudo=true                 # force sudo for ncu
 /capture workload.py --profile-name=optimized        # produces profile_optimized.json
 /capture workload.py --warmup-iters=10 --measure-iters=20
+/capture workload.py --layer-deduplicate             # profile unique layers only (transformers)
 ```
 
 ## Workload Interface
@@ -45,10 +46,13 @@ PYTHONPATH={project_root} python nvidia/scripts/run_workload.py \
     --measure-iters 10 \
     --correlation-pass \
     --output-prefix profiler_output/{stem} \
-    --inductor-debug-dir profiler_output/{stem}_inductor_debug
+    --inductor-debug-dir profiler_output/{stem}_inductor_debug \
+    [--layer-deduplicate]   # add for transformer/repeated-layer models
 ```
 
 Output: `profiler_output/{stem}.corr.json`, Inductor compiled artifacts in `profiler_output/{stem}_inductor_debug/`
+
+If `--layer-deduplicate` is set: also produces `profiler_output/{stem}.part.json` with the partition equivalence map (duplicate → unique representative). Pass this to Stage 0d via `--partition-map`.
 
 ### Stage 0a: nsys Capture (WITHOUT --correlation-pass)
 Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing. The correlation pass already ran in Stage 0a-pre; do not include `--correlation-pass` here. Pass the same `--inductor-debug-dir` so Inductor reuses the cached compilation and produces the same kernel names in the trace.
@@ -60,7 +64,8 @@ PYTHONPATH={project_root} nsys profile --trace=cuda,nvtx --output=profiler_outpu
         --compile-backend inductor \
         --warmup-iters 5 \
         --measure-iters 10 \
-        --inductor-debug-dir profiler_output/{stem}_inductor_debug
+        --inductor-debug-dir profiler_output/{stem}_inductor_debug \
+        [--layer-deduplicate]   # must match Stage 0a-pre
 ```
 
 Output: `profiler_output/{stem}.nsys-rep`
@@ -195,3 +200,4 @@ If `unattributed_kernels` exceeds 10%, check:
 | `--output-dir` | `profiler_output/` | Directory for intermediate files (nsys-rep, sqlite, manifest) |
 | `--profile-name` | `baseline` | `baseline` → `profile.json`, `optimized` → `profile_optimized.json` |
 | `--inductor-debug-dir` | `auto` | Directory for Inductor compiled artifacts. Auto-set to `profiler_output/{stem}_inductor_debug/` when `compile_backend=inductor`. Passed to all three stages (0a-pre, 0a, 0d) for consistent compilation caching and Triton kernel attribution. |
+| `--layer-deduplicate` | `false` | Profile only structurally unique layer partitions; propagate metrics to structural duplicates. Recommended for transformer and other repeated-layer models. Produces `profiler_output/{stem}.part.json`. Must be set consistently in Stages 0a-pre and 0a. |

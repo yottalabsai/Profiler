@@ -53,6 +53,12 @@ log = logging.getLogger(__name__)
 # Ratio above which a kernel duration is flagged as a warm-up outlier
 _WARMUP_OUTLIER_RATIO = 10.0
 
+# NVTX range text prefixes pushed by run_workload.py --layer-deduplicate.
+# These are transparent to _attribute(): both contain "::" so the existing
+# "elif '::' not in r.text: break" rule does not fire on them.
+_LAYER_UNIQUE_PREFIX    = "layer::unique::"
+_LAYER_DUPLICATE_PREFIX = "layer::duplicate::"
+
 
 class ManifestBuilder:
     """
@@ -168,6 +174,12 @@ class ManifestBuilder:
         # method — only supplements fused_ops and upgrades UNATTRIBUTED entries.
         if self._inductor_fusion_map:
             entries = self._apply_inductor_fusion(entries)
+
+        # Step 6: Layer partition tagging (optional, no-op when absent)
+        # Tags each entry with its layer partition label and uniqueness flag when
+        # the nsys trace contains layer::unique:: / layer::duplicate:: NVTX ranges
+        # pushed by run_workload.py --layer-deduplicate.
+        entries = self._tag_layer_partitions(entries, forest, kernel_rows)
 
         high_count = sum(
             1 for e in entries if e.attribution.confidence == Confidence.HIGH
@@ -296,6 +308,69 @@ class ManifestBuilder:
         n_enriched = sum(1 for e in enriched if e.attribution.fused_ops)
         log.info("Inductor fusion enrichment: %d kernel(s) enriched", n_enriched)
         return enriched
+
+    def _tag_layer_partitions(
+        self,
+        entries: list[KernelManifestEntry],
+        forest: NvtxIntervalForest,
+        kernel_rows: list[KernelRow],
+    ) -> list[KernelManifestEntry]:
+        """
+        Tag each manifest entry with its layer partition label and uniqueness flag.
+
+        Queries the NVTX interval forest for each kernel and looks for an enclosing
+        range whose text starts with ``layer::unique::`` or ``layer::duplicate::``.
+        These ranges are pushed by ``run_workload.py --layer-deduplicate`` around
+        each split-module partition forward.
+
+        Entries with no matching enclosure pass through unchanged — this method is
+        a pure no-op when partition NVTX ranges are absent from the trace.
+
+        ``kernel_rows`` and ``entries`` must be the same length and in the same order
+        (both built from the same kernel_rows list in ``build()``).
+        """
+        tagged: list[KernelManifestEntry] = []
+        n_unique = 0
+        n_duplicate = 0
+
+        for entry, kr in zip(entries, kernel_rows):
+            nvtx_tid = kr.host_tid if kr.host_tid else kr.stream_id
+            nvtx_query_ts = kr.cpu_launch_start_ns if kr.cpu_launch_start_ns else kr.start_ns
+            all_ranges = forest.query_enclosing(nvtx_tid, kr.device_id, nvtx_query_ts)
+
+            partition_label: str | None = None
+            is_unique = False
+
+            for r in all_ranges:
+                if r.text.startswith(_LAYER_UNIQUE_PREFIX):
+                    partition_label = r.text[len(_LAYER_UNIQUE_PREFIX):]
+                    is_unique = True
+                    break
+                if r.text.startswith(_LAYER_DUPLICATE_PREFIX):
+                    partition_label = r.text[len(_LAYER_DUPLICATE_PREFIX):]
+                    is_unique = False
+                    break
+
+            if partition_label is not None:
+                tagged.append(entry.model_copy(update={
+                    "layer_partition": partition_label,
+                    "is_unique_partition": is_unique,
+                }))
+                if is_unique:
+                    n_unique += 1
+                else:
+                    n_duplicate += 1
+            else:
+                tagged.append(entry)
+
+        if n_unique or n_duplicate:
+            log.info(
+                "Layer partition tagging: %d unique, %d duplicate kernel(s) tagged",
+                n_unique,
+                n_duplicate,
+            )
+
+        return tagged
 
     def _detect_initialization_kernels(
         self, kernel_rows: list[KernelRow], nvtx_rows: list[NvtxRow]

@@ -38,9 +38,11 @@ The single command that drives the complete GPU optimization pipeline. Pass your
 ### Stage 0: Capture (→ profile.json)
 Runs nsys+ncu pipeline on `workload.py`. Auto-detects executables, sudo requirement, and PYTHONPATH. Produces `profile.json` with per-operator hardware metrics.
 
+If `--layer-deduplicate` is set: also produces `profiler_output/{stem}.part.json` (partition equivalence map), passed to ncu replay via `--partition-map` to skip duplicate-partition kernel replay and propagate metrics.
+
 ```
 Delegates to: capture-agent
-Output: profile.json
+Output: profile.json (+ .part.json if --layer-deduplicate)
 Skip if: profile.json exists and --resume is set
 ```
 
@@ -154,6 +156,7 @@ Without `--resume`, all stages run even if artifacts exist (fresh run).
 | `--resume` | `false` | Skip stages with existing artifacts |
 | `--from` | `capture` | Which stage to resume from |
 | `--audience` | `team` | Report audience for Stage 7 |
+| `--layer-deduplicate` | `false` | Stages 0, 5 — profile only unique layer reps; propagate metrics to structural duplicates. Recommended for transformer models. Produces `.part.json` in Stage 0. |
 
 ## Progress Output
 

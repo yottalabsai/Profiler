@@ -110,10 +110,13 @@ PYTHONPATH={project_root}:{pythonpath} python3 {project_root}/nvidia/scripts/run
     --measure-iters {measure_iters} \
     --correlation-pass \
     --output-prefix {output_dir}/{workload_stem} \
-    --inductor-debug-dir {inductor_debug_dir}
+    --inductor-debug-dir {inductor_debug_dir} \
+    [--layer-deduplicate]   # optional: add when --layer-deduplicate is requested
 ```
 
 Output: `{output_dir}/{workload_stem}.corr.json`, Inductor compiled `.py` artifacts in `{inductor_debug_dir}/`.
+
+**If `--layer-deduplicate` is set:** also produces `{output_dir}/{workload_stem}.part.json`, a JSON object mapping each duplicate partition label to its unique representative label (e.g. `{"modules_1": "modules_0", "modules_2": "modules_0"}`). This file is read in Stage 0d to skip replaying duplicate-partition kernels and propagate metrics.
 
 **Why `--inductor-debug-dir` here:** Compilation happens on the first run (Stage 0a-pre). Setting `TORCHINDUCTOR_CACHE_DIR` here writes hash-named compiled `.py` files to `{inductor_debug_dir}` instead of the default system cache. These files contain `# Original ATen: [...]` comments that map each Triton kernel to the aten ops it was fused from — the ground-truth fusion metadata needed in Stage 0c. Subsequent stages reuse the cached compilation from the same directory, so kernel names stay identical across stages.
 
@@ -135,10 +138,13 @@ PYTHONPATH={project_root}:{pythonpath} {nsys_executable} profile \
         --compile-backend {compile_backend} \
         --warmup-iters {warmup_iters} \
         --measure-iters {measure_iters} \
-        --inductor-debug-dir {inductor_debug_dir}
+        --inductor-debug-dir {inductor_debug_dir} \
+        [--layer-deduplicate]   # include if --layer-deduplicate was set in Stage 0a-pre
 ```
 
 Defaults: `compile_backend=inductor`, `warmup_iters=5`, `measure_iters=10`.
+
+**If `--layer-deduplicate` is set:** the NVTX trace will contain `layer::unique::*` and `layer::duplicate::*` ranges. The manifest builder reads these and sets `layer_partition` / `is_unique_partition` on each `KernelManifestEntry`. The `--layer-deduplicate` flag must be used consistently in both Stage 0a-pre and Stage 0a — mismatched tagging causes incorrect metric propagation in Stage 0d.
 
 **CRITICAL:** `--warmup-iters` and `--measure-iters` here MUST match the values used in Stage 0d (ncu replay). Mismatches cause kernel count mismatches and silent metric corruption.
 
@@ -203,8 +209,11 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     --ncu-output-dir {ncu_reps_dir} \
     --model-name {model_name} \
     --output {profile_path} \
+    [--partition-map {output_dir}/{workload_stem}.part.json] \
     --script-args --workload {workload_path} --compile-backend {compile_backend} --warmup-iters {warmup_iters} --measure-iters {measure_iters} --inductor-debug-dir {inductor_debug_dir}
 ```
+
+**`--partition-map`:** Include when `{output_dir}/{workload_stem}.part.json` exists (i.e., `--layer-deduplicate` was used in Stages 0a-pre and 0a). Passes the `partition_equivalence_map` to `KernelProfileConfig`, causing ncu to skip replaying duplicate-partition kernels and propagate hardware counter metrics from unique representatives to all their duplicates. Omit when not using layer deduplication.
 
 Where `{pythonpath}` is the **full** `sys.path` output from Step 5 of Pre-Run System Detection (must include `~/.local/lib/python3.x/site-packages` so torch is found under sudo). The `PYTHONPATH={project_root}:{pythonpath}` prefix ensures the CLI itself can import `nvidia.operator_profiler` when launched.
 
@@ -222,6 +231,7 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     --ncu-output-dir {ncu_reps_dir} \
     --model-name {model_name} \
     --output {profile_path} \
+    [--partition-map {output_dir}/{workload_stem}.part.json] \
     --script-args --workload {workload_path} --compile-backend {compile_backend} --warmup-iters {warmup_iters} --measure-iters {measure_iters} --inductor-debug-dir {inductor_debug_dir}
 ```
 
@@ -237,6 +247,8 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
 | `metrics.raw is empty` | `--script-args` was not last flag | Rebuild command with `--script-args` strictly at the end |
 | `ncu: command not found` | ncu not in PATH | Use full path: `/opt/nvidia/nsight-compute/*/ncu` |
 | `operator-profiler: command not found` | Package not installed | Run `pip install .` from project root (requires `pyproject.toml` with `where = ["nvidia"]`) |
+| `.part.json` missing after Stage 0a-pre | `--layer-deduplicate` used in one stage but not the other | Ensure `--layer-deduplicate` is set consistently in both Stage 0a-pre and Stage 0a |
+| Duplicate partition metrics identical to zero | `--partition-map` not passed but `.part.json` exists | Pass `--partition-map {output_dir}/{workload_stem}.part.json` to `operator-profiler map` |
 
 ## Success Verification
 
@@ -282,6 +294,7 @@ When invoked by `/capture` or `/optimize`, respect these flags:
 | `--output-dir` | `auto` | Directory for intermediate files (default: sibling `profiler_output/`) |
 | `--profile-name` | `baseline` | Output file name: `baseline` → `profile.json`, `optimized` → `profile_optimized.json` |
 | `--inductor-debug-dir` | `auto` | Directory for Inductor compiled artifacts. Auto-set to `{output_dir}/{workload_stem}_inductor_debug/` when `compile_backend=inductor`. Omit for `none`/`cudagraphs`. |
+| `--layer-deduplicate` | `false` | Split FX graph by auto-detected repeated layer indices. Profiles only structurally unique layer representatives; propagates hardware counter metrics to all structural duplicates. Produces `{output_dir}/{workload_stem}.part.json`. Recommended for transformer and other repeated-layer models. Must be passed consistently to Stages 0a-pre, 0a, and 0d. |
 
 ## Output
 

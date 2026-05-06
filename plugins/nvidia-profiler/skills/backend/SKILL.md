@@ -38,16 +38,45 @@ To profile:
 from torch._inductor.compile_fx import compile_fx  # function, not module
 from torch._dynamo import register_backend
 import torch.fx as fx
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
 
-# FX graph passes (one function per optimization)
-def pass_optimization_name(gm: fx.GraphModule) -> fx.GraphModule: ...
+# replace_pattern-compatible pass functions (traced by FxPassRunner)
+def _pattern_fn(...): ...
+def _replacement_fn(...): ...
+
+# Manual per-rep pass functions (applied to each subgraph individually)
+def _pass_manual(gm: fx.GraphModule) -> fx.GraphModule: ...
+
+# Utility: capture real input tensors for each partition (see fx-patterns.md)
+def _capture_partition_inputs(split_gm, example_inputs): ...
 
 # Backend registration
 @register_backend
 def {model_name}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
-    gm = pass_one(gm)
-    gm = pass_two(gm)
-    return compile_fx(gm, example_inputs)
+    registry = UniqueSubgraphRegistry(gm)
+    equiv_map = registry.build_partition_equivalence_map()
+
+    if not equiv_map:
+        # No repeated layers — flat compile preserves cross-layer Inductor fusion
+        gm = _pass_manual(gm)
+        return compile_fx(gm, example_inputs)
+
+    runner = FxPassRunner(registry)
+    runner.apply_pass(_pattern_fn, _replacement_fn)   # propagates to duplicates
+
+    for rep_name, rep_mod in registry.unique_reps:    # manual passes per unique rep
+        _pass_manual(rep_mod)
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            _pass_manual(dup_mod)
+
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:    # compile unique reps; share with dups
+        compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    return lambda *args: registry.split(*args)
 
 # Workload interface (with non-graph optimizations)
 def get_model_and_input() -> tuple[nn.Module, torch.Tensor]: ...
@@ -98,6 +127,9 @@ Use `knowledge/fx-patterns.md` implementations for:
 - Pre-transposed weights (`pass_pretranspose_weights`)
 - Activation substitution (`pass_tanh_to_gelu`)
 
+### Dedup-Aware Backend Structure
+ALWAYS use `UniqueSubgraphRegistry` + `FxPassRunner`. Check `equiv_map = registry.build_partition_equivalence_map()` — if empty, fall back to flat compile; if non-empty, use the dedup compile path. Use `FxPassRunner.apply_pass` for `replace_pattern`-compatible passes (pure functional, no tuple outputs, no `register_buffer`); use explicit per-rep loops for manual passes (SDPA, BN fold, pre-transposed weights). See Pass Taxonomy in `knowledge/fx-patterns.md`.
+
 ### Non-Graph Optimizations
 Apply in `get_model_and_input()`, NOT in the backend function:
 - BF16/FP16 dtype cast: check `next(model.parameters()).dtype` before applying
@@ -138,6 +170,7 @@ def test_forward_pass():     # uncompiled forward, no NaN/Inf, no exception
 | `Compiled output identical to baseline` | Backend not registered | Verify `@register_backend` decorator; call `torch._dynamo.reset()` before recompiling |
 | `AssertionError: shape mismatch` | Batch padding applied but output not sliced | Slice output: `out[:original_batch_size]` |
 | `AttributeError: 'NoneType' has no attribute 'target'` | Node graph traversal hit placeholder | Add `if node is None: continue` guards |
+| `TypeError` or shape error in registry split | Partition input shapes don't match original model inputs | Use `_capture_partition_inputs` to capture real partition inputs; never pass original `example_inputs` directly to `compile_fx` for partitions |
 
 ## Validation After Generation
 

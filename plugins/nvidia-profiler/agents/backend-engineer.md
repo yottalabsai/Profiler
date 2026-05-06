@@ -130,15 +130,7 @@ Apply passes in this order in the backend function:
 4. All passes must respect `prerequisite_for[]` ordering from `optimizations.json`
 
 ### Rule 7: Backend Registration
-```python
-@register_backend
-def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
-    logger.info("{model_name_snake}_opt backend: starting")
-    gm = pass_one(gm)
-    gm = pass_two(gm)
-    logger.info("{model_name_snake}_opt backend: delegating to Inductor")
-    return compile_fx(gm, example_inputs)
-```
+Use the `@register_backend` decorator with the name `{model_name_snake}_opt`. See Rule 10 for the complete backend function structure — the flat-graph body shown in earlier versions of this rule has been superseded by the dedup-aware pattern.
 
 ### Rule 8: Non-Graph Optimizations in get_model_and_input()
 Always check current state before applying (baseline may already have the optimization):
@@ -164,6 +156,59 @@ Read `optimizations.json analysis.compile_mode`:
 - `"inductor"` — standard FX pass approach; write full backend
 - `"eager"` — **NO FX graph is traced**; warn user; propose `torch.compile` migration instead; generate a simplified workload that adds `torch.compile(model, backend='inductor')`
 - `"cudagraphs"` — FX passes apply at capture time; flag any padding or dynamic-shape passes as risky (may cause re-captures); add comment in code
+
+### Rule 10: Dedup-Aware Backend Structure
+
+ALWAYS import and use `UniqueSubgraphRegistry` + `FxPassRunner`. The backend function must follow this structure exactly:
+
+```python
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+
+@register_backend
+def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+    logger.info("{model_name_snake}_opt backend: starting")
+    registry = UniqueSubgraphRegistry(gm)
+    equiv_map = registry.build_partition_equivalence_map()
+
+    if not equiv_map:
+        # No repeated layers detected — flat compile preserves cross-layer Inductor fusion
+        logger.info("{model_name_snake}_opt: no repeated layers, flat compile path")
+        gm = _pass_replace_sdpa(gm)        # apply manual passes to the full flat graph
+        logger.info("{model_name_snake}_opt: delegating to Inductor")
+        return compile_fx(gm, example_inputs)
+
+    logger.info(f"{model_name_snake}_opt: {len(equiv_map)} duplicate partitions, dedup path")
+    runner = FxPassRunner(registry)
+
+    # replace_pattern-compatible passes (FxPassRunner applies to unique reps + propagates)
+    runner.apply_pass(_qkv_pattern, _qkv_replacement)
+
+    # Manual passes (apply to each unique rep, then propagate to its duplicates)
+    for rep_name, rep_mod in registry.unique_reps:
+        _pass_replace_sdpa(rep_mod)
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            _pass_replace_sdpa(dup_mod)
+
+    # Compile each unique rep with its actual partition inputs; share callable with duplicates
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:
+        compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    # Return callable: registry.split has partitions with compiled .forward methods
+    return lambda *args: registry.split(*args)
+```
+
+**Return value note:** `registry.split` is a `GraphModule` whose child partitions have their `.forward` patched with Inductor-compiled callables. `lambda *args: registry.split(*args)` routes each forward call through this assembled graph via `nn.Module.__call__`.
+
+**Classify each optimization before writing code:**
+- `replace_pattern`-compatible (pure functional, no tuple outputs, no `register_buffer`) → `runner.apply_pass()`
+- Manual per-rep (tuple outputs, decomposed ops, `register_buffer`) → per-rep loop
+- Non-graph (dtype, layout, batch shape) → `get_model_and_input()` only
+
+Refer to `knowledge/fx-patterns.md` Pass Taxonomy section for canonical classifications and the `_capture_partition_inputs` utility implementation.
 
 ## Test Script Requirements
 

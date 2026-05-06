@@ -1,0 +1,297 @@
+{
+  "analysis": {
+    "model": "TransformerStack",
+    "device": "NVIDIA A100-SXM4-80GB",
+    "compile_mode": "inductor",
+    "dtype": "FP32",
+    "total_attributed_wall_time_ns": 61133937,
+    "architecture": "8-layer GPT-2-style decoder: HIDDEN=512, N_HEADS=8, FFN_DIM=2048, SEQ_LEN=128, BATCH=4",
+    "time_budget": {
+      "aten::mm_0": {
+        "pct": 48.9,
+        "duration_ns": 29896967,
+        "kernel_count": 432,
+        "dominant_kernel": "ampere_sgemm_128x32_tn",
+        "bottleneck_class": "tensor_core_idle"
+      },
+      "aten::bmm_0": {
+        "pct": 6.94,
+        "duration_ns": 4240060,
+        "kernel_count": 144,
+        "dominant_kernel": "ampere_sgemm_128x128_nn",
+        "bottleneck_class": "tensor_core_idle + wave_starvation"
+      }
+    }
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "priority": 1,
+      "operators": ["aten::mm_0 (all 432 launches)", "aten::bmm_0 (all 144 launches)"],
+      "bottleneck": {
+        "description": "FP32 dtype forces cuBLAS to select SIMT paths on all GEMM and BMM operations. smsp__pipe_tensor_cycles_active = 0.0 on both dominant kernels (ampere_sgemm_128x32_tn for linear projections, ampere_sgemm_128x128_nn for attention matmuls) confirms Tensor Cores are completely idle. A100 HMMA BF16 delivers ~312 TFLOP/s vs ~19.5 TFLOP/s FP32 SIMT — a 16x peak ratio. On these shapes a 4-6x realized improvement is conservative.",
+        "evidence": {
+          "mm_tensor_core_active_pct": 0.0,
+          "mm_dominant_kernel": "ampere_sgemm_128x32_tn",
+          "mm_sm_throughput_pct": 50.761,
+          "mm_eligible_cycles_pct": 44.423,
+          "mm_waves_per_sm": 7.111,
+          "bmm_tensor_core_active_pct": 0.0,
+          "bmm_dominant_kernel": "ampere_sgemm_128x128_nn",
+          "bmm_sm_throughput_pct": 21.131,
+          "bmm_waves_per_sm": 0.296,
+          "bmm_achieved_occupancy_pct": 12.476
+        }
+      },
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Cast model parameters and input tensor to torch.bfloat16. On A100 (Ampere sm80) this switches the cuBLAS dispatch from ampere_sgemm_* (FP32 SIMT) to sm80_xmma_gemm_bf16bf16_* (HMMA Tensor Core). No graph changes are needed — dtype is resolved at cuBLAS kernel selection time, below the FX IR level.",
+        "location": "get_model_and_input() in transformer_stack.py",
+        "fx_steps": [
+          "model = model.to(torch.bfloat16)",
+          "x = x.to(torch.bfloat16)"
+        ],
+        "code_hint": "Apply BEFORE torch.compile(). Dynamo traces dtype as a static property; changing dtype after compilation will trigger a recompile. The TransformerStack has no tied embeddings (q_proj, k_proj, v_proj, out_proj, fc_up, fc_down are all independent nn.Linear modules), so the BF16 cast is safe across all parameters.",
+        "contraindications_checked": "No tied embeddings detected in SelfAttention or FeedForward. LayerNorm operates element-wise and is dtype-agnostic. F.gelu path in FeedForward is BF16-compatible."
+      },
+      "estimated_impact": {
+        "mm_latency_before_ns": 29896967,
+        "mm_latency_after_ns_estimate": 7474242,
+        "mm_latency_reduction_ns_estimate": 22422725,
+        "mm_latency_reduction_pct_of_total": 36.7,
+        "bmm_latency_before_ns": 4240060,
+        "bmm_latency_after_ns_estimate": 1060015,
+        "bmm_latency_reduction_ns_estimate": 3180045,
+        "bmm_latency_reduction_pct_of_total": 5.2,
+        "combined_latency_reduction_pct_of_total": 41.9,
+        "speedup_model": "4x realized on GEMM shapes (512x512, 512x2048) at SEQ_LEN=128, BATCH=4 — conservative vs. 16x TFLOP/s ratio due to memory bandwidth and kernel launch overhead at this batch size"
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-2", "OPT-3"]
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": [
+        "aten::mm for q_proj (x → Q)",
+        "aten::mm for k_proj (x → K)",
+        "aten::mm for v_proj (x → V)",
+        "repeated across all 8 TransformerLayer instances"
+      ],
+      "bottleneck": {
+        "description": "After BF16 dtype correction, the Q/K/V projections remain three separate GEMM calls each of shape (512, 512). On A100 with 108 SMs, a single (512, 512) BF16 GEMM produces approximately 0.09 waves per SM — well below the ~1.0 threshold for full SM utilization. Three separate calls serialize this under-occupancy. Fusing into a single (512, 1536) GEMM triples the wave count to ~0.27 and reduces kernel launch overhead from 3 to 1 per layer.",
+        "evidence": {
+          "pre_fusion_waves_per_sm_per_proj": "~0.09 (estimated post-BF16 on 512x512 shape, 108 SMs)",
+          "post_fusion_waves_per_sm_fused": "~0.27 (512x1536 fused weight)",
+          "kernel_launch_overhead_eliminated_per_layer": 2,
+          "total_kernel_launches_eliminated": 16
+        }
+      },
+      "transformation": {
+        "type": "qkv_fusion",
+        "description": "Fuse q_proj, k_proj, v_proj weight matrices into a single fused_qkv_weight buffer. Replace the three separate aten::mm calls (which all operate on the same post-LayerNorm input x) with a single aten::mm followed by a chunk/split to recover Q, K, V. This is an FX graph pass applied after torch.compile captures the graph.",
+        "location": "FX pass on the compiled graph, applied after get_model_and_input() returns the BF16 model",
+        "fx_steps": [
+          "# Step 1: Identify the 3 mm nodes sharing the same input activation (output of ln1).",
+          "# In the Inductor FX graph each nn.Linear(bias=False) becomes: weight_t = aten.t(get_attr(weight)); out = aten.mm(x, weight_t)",
+          "# Group mm nodes by their first argument (the shared x).",
+          "from collections import defaultdict",
+          "groups = defaultdict(list)",
+          "for node in gm.graph.nodes:",
+          "    if node.op == 'call_function' and node.target == torch.ops.aten.mm.default:",
+          "        activation_arg = node.args[0]",
+          "        groups[activation_arg].append(node)",
+          "",
+          "# Step 2: For each group of exactly 3 mm nodes with identical activation, proceed with fusion.",
+          "for activation_node, mm_nodes in groups.items():",
+          "    if len(mm_nodes) != 3:",
+          "        continue  # only fuse complete Q/K/V triples",
+          "",
+          "    # Step 3: Extract weight tensors. Each mm arg[1] is an aten.t() node wrapping a get_attr.",
+          "    # The weight matrix after t() is shape (HIDDEN, HIDDEN) = (512, 512).",
+          "    weights = []",
+          "    for mm_node in mm_nodes:",
+          "        t_node = mm_node.args[1]  # aten.t(get_attr(...))",
+          "        assert t_node.target == torch.ops.aten.t.default",
+          "        attr_node = t_node.args[0]",
+          "        W = gm.get_parameter(attr_node.target)  # shape (512, 512)",
+          "        weights.append(W)",
+          "",
+          "    # Step 4: Concatenate along the output dimension to produce (1536, 512).",
+          "    # After fused mm: output is (B*T, 1536); chunk(3, dim=-1) recovers Q, K, V each (B*T, 512).",
+          "    W_fused = torch.cat(weights, dim=0).contiguous()  # shape (1536, 512)",
+          "    buf_name = f'fused_qkv_weight_{id(activation_node)}'",
+          "    gm.register_buffer(buf_name, W_fused)",
+          "",
+          "    # Step 5: Insert the fused mm node before the first of the three mm nodes.",
+          "    with gm.graph.inserting_before(mm_nodes[0]):",
+          "        fused_weight_node = gm.graph.get_attr(buf_name)",
+          "        # fused_weight_node is (1536, 512); mm expects (B*T, 512) @ (512, 1536) -> (B*T, 1536)",
+          "        # We need to transpose W_fused for mm(x, W_fused.T) convention",
+          "        fused_weight_t_node = gm.graph.call_function(torch.ops.aten.t.default, args=(fused_weight_node,))",
+          "        fused_mm_node = gm.graph.call_function(",
+          "            torch.ops.aten.mm.default,",
+          "            args=(activation_node, fused_weight_t_node)",
+          "        )  # output shape: (B*T, 1536)",
+          "",
+          "    # Step 6: Split the fused output back into Q, K, V via chunk.",
+          "    with gm.graph.inserting_after(fused_mm_node):",
+          "        chunk_node = gm.graph.call_function(",
+          "            torch.ops.aten.chunk.default,",
+          "            args=(fused_mm_node, 3),",
+          "            kwargs={'dim': -1}",
+          "        )  # returns list of 3 tensors each (B*T, 512)",
+          "",
+          "    # Step 7: Replace each original mm node's uses with the corresponding chunk slice.",
+          "    for i, mm_node in enumerate(mm_nodes):",
+          "        with gm.graph.inserting_after(chunk_node):",
+          "            slice_node = gm.graph.call_function(",
+          "                operator.getitem,",
+          "                args=(chunk_node, i)",
+          "            )",
+          "        mm_node.replace_all_uses_with(slice_node)",
+          "        gm.graph.erase_node(mm_node)",
+          "",
+          "gm.graph.lint()",
+          "gm.recompile()"
+        ],
+        "code_hint": "Apply this FX pass via torch.compile custom backend or as a post-processing step on the captured graph. The weight order in weights[] must match the order q_proj, k_proj, v_proj as they appear in the graph to keep chunk slices semantically correct. If Inductor reorders the mm nodes, sort by the get_attr target name (q_proj, k_proj, v_proj lexicographic order) before concatenating."
+      },
+      "estimated_impact": {
+        "kernel_launches_eliminated_per_forward": 16,
+        "wave_occupancy_improvement": "~3x increase in waves per SM per attention block (from ~0.09 to ~0.27 per projection)",
+        "latency_reduction_pct_of_total": "2-4 (incremental over OPT-1, primarily from reduced kernel overhead and improved SM saturation)",
+        "note": "OPT-2 impact is modest at BATCH=4. At BATCH>=32 the wave occupancy improves further and the fusion delivers larger gains. Primary value here is launch overhead elimination."
+      },
+      "confidence": "high",
+      "prerequisite_for": []
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": [
+        "aten::bmm_0 (q @ k^T matmul, 144 launches)",
+        "aten::bmm_0 (attn @ v matmul, 144 launches)",
+        "triton_per_fused__softmax_amax_mul_sub_view_3 (fused softmax kernel)"
+      ],
+      "bottleneck": {
+        "description": "The attention computation in SelfAttention.forward() runs as 2 separate BMM calls plus a fused Triton softmax kernel (observed in profile: triton_per_fused__softmax_amax_mul_sub_view_3). The BMM shape is (B*N_HEADS, SEQ_LEN, HEAD_DIM) = (32, 128, 64) — extremely small. With 108 SMs on A100, a single (32, 128, 64) BMM fills only 0.296 waves per SM (from triage). Even post-BF16 this remains wave-starved. torch.nn.functional.scaled_dot_product_attention routes to cuDNN FlashAttention (or the efficient-attention backend), collapsing the 2 BMMs + softmax into a single fused kernel with tiled SRAM reuse, eliminating the intermediate (B, N_HEADS, SEQ_LEN, SEQ_LEN) attention score matrix write to DRAM.",
+        "evidence": {
+          "bmm_waves_per_sm": 0.296,
+          "bmm_achieved_occupancy_pct": 12.476,
+          "bmm_sm_throughput_pct": 21.131,
+          "softmax_kernel_observed": "triton_per_fused__softmax_amax_mul_sub_view_3",
+          "attention_score_matrix_size_bytes": "32 heads * 128 * 128 * 4 bytes = 2097152 (FP32) → 1048576 (BF16) per forward"
+        }
+      },
+      "transformation": {
+        "type": "sdpa_replacement",
+        "description": "Replace the manual attention computation (q @ k.T * scale → softmax → @ v) in SelfAttention.forward() with a direct call to torch.nn.functional.scaled_dot_product_attention. This is most cleanly done as a source-level change to transformer_stack.py, since the pattern in the FX graph has already been decomposed by Inductor's lowering passes before an FX pass would see it.",
+        "location": "SelfAttention.forward() in transformer_stack.py — source level change preferred over FX pass",
+        "fx_steps": [
+          "# PREFERRED: Source-level change to SelfAttention.forward().",
+          "# Replace the manual attention block with F.scaled_dot_product_attention.",
+          "",
+          "# BEFORE (in transformer_stack.py SelfAttention.forward):",
+          "# scale = 1.0 / math.sqrt(HEAD_DIM)",
+          "# attn = torch.softmax(q @ k.transpose(-2, -1) * scale, dim=-1)",
+          "# out  = (attn @ v).transpose(1, 2).contiguous().view(B, T, C)",
+          "",
+          "# AFTER:",
+          "# out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)",
+          "# out = out.transpose(1, 2).contiguous().view(B, T, C)",
+          "",
+          "# The scale parameter defaults to 1/sqrt(head_dim) when not provided,",
+          "# matching the existing 1.0/math.sqrt(HEAD_DIM) formula exactly.",
+          "",
+          "# ALTERNATIVE: FX-level SDPA replacement if source change is not permissible.",
+          "# Note: Inductor decomposes softmax into exp+sum+div BEFORE the FX pass sees the graph.",
+          "# Manual graph traversal is required to find: bmm -> mul/div -> exp -> sum -> div -> bmm",
+          "# Find the two bmm nodes that share the same batch dimension and are connected through",
+          "# the softmax decomposition chain. Replace the entire subgraph with a single",
+          "# torch.ops.aten.scaled_dot_product_attention.default call.",
+          "# This is significantly more fragile than the source-level change."
+        ],
+        "code_hint": "Source-level SDPA replacement is strongly preferred. torch.compile with mode='max-autotune' will then select the optimal FlashAttention or efficient-attention kernel automatically. On A100 with BF16 and SEQ_LEN=128, the efficient_attention backend (memory-efficient attention) or flash_attention backend will be selected by the SDPA dispatcher. The is_causal=False setting is correct here since no causal mask is applied in the original SelfAttention."
+      },
+      "estimated_impact": {
+        "kernels_eliminated": "2 BMM launches + 1 softmax launch per layer per batch → 24 kernels eliminated per forward (8 layers)",
+        "kernels_added": "8 FlashAttention/efficient-attention kernels (1 per layer)",
+        "net_kernel_launches_eliminated": 16,
+        "dram_reduction": "Eliminates the (B, N_HEADS, SEQ_LEN, SEQ_LEN) attention score write/read; at BF16 this is ~1 MB per forward across all 8 layers",
+        "latency_reduction_pct_of_total": "3-6 (incremental, after OPT-1 has already reduced the absolute bmm time)",
+        "wave_occupancy_note": "FlashAttention kernel tile sizes are tuned for the (32, 128, 64) shape; will have higher SM utilization than the raw bmm path"
+      },
+      "confidence": "medium",
+      "prerequisite_for": []
+    },
+    {
+      "id": "OPT-4",
+      "priority": 4,
+      "operators": ["aten::mm_0 (all GEMM ops)"],
+      "bottleneck": {
+        "description": "Even with BF16 dtype, sm_throughput_pct for the mm operator is currently 50.8% (FP32 baseline). At BATCH=4 and SEQ_LEN=128 the effective token batch is 512 tokens — moderate for A100. max-autotune enables Triton autotuning of GEMM tile sizes specifically for the (512, 512) and (512, 2048) shapes in this model, which may select better block tilings than Inductor's default heuristic.",
+        "evidence": {
+          "mm_sm_throughput_pct": 50.761,
+          "eligible_cycles_pct": 44.423,
+          "compile_mode_current": "inductor (default, not max-autotune)"
+        }
+      },
+      "transformation": {
+        "type": "algorithm_selection",
+        "description": "Switch torch.compile mode from 'inductor' (default) to 'max-autotune'. This enables the Triton GEMM autotuner to sweep tile configurations for the specific (M, N, K) shapes in this model and cache the optimal config.",
+        "location": "Call site of torch.compile()",
+        "fx_steps": [
+          "# Change compile invocation:",
+          "# BEFORE: model = torch.compile(model)",
+          "# AFTER:  model = torch.compile(model, mode='max-autotune')",
+          "",
+          "# Also add TF32 allowance for any residual FP32 ops (e.g., accumulation in BF16 matmuls):",
+          "torch.backends.cuda.matmul.allow_tf32 = True"
+        ],
+        "code_hint": "max-autotune increases compilation time by 2-5 minutes on first run. The tuned configs are cached in the Triton/Inductor cache (~/.cache/triton/ and ~/.inductor_cache/). This is a low-risk, no-correctness-impact change."
+      },
+      "estimated_impact": {
+        "latency_reduction_pct_of_total": "2-5 (shape-dependent; gains are typically larger for non-power-of-2 or unusual K dimensions)",
+        "compilation_overhead": "2-5 minutes on first compile, cached afterward"
+      },
+      "confidence": "medium",
+      "prerequisite_for": []
+    }
+  ],
+  "application_order": [
+    {
+      "step": 1,
+      "opt_id": "OPT-1",
+      "action": "Add model.to(torch.bfloat16) and x.to(torch.bfloat16) in get_model_and_input()",
+      "rationale": "Dtype change must be applied first. OPT-2 (QKV fusion) registers a BF16 fused weight buffer; if applied before OPT-1 it would create an FP32 fused buffer that mismatches BF16 activations at runtime."
+    },
+    {
+      "step": 2,
+      "opt_id": "OPT-3",
+      "action": "Replace manual attention with F.scaled_dot_product_attention in SelfAttention.forward()",
+      "rationale": "Source-level change, independent of OPT-2. Apply before OPT-2 so the graph seen by the QKV fusion pass does not include the now-eliminated BMM nodes, simplifying pattern matching."
+    },
+    {
+      "step": 3,
+      "opt_id": "OPT-2",
+      "action": "Apply pass_fuse_qkv() FX pass on the compiled graph",
+      "rationale": "After SDPA replacement the graph contains exactly 3 mm nodes per layer sharing the same post-LayerNorm activation. Apply QKV fusion at BF16 dtype."
+    },
+    {
+      "step": 4,
+      "opt_id": "OPT-4",
+      "action": "Switch torch.compile(mode='max-autotune')",
+      "rationale": "Apply last — autotuning is most effective after the final graph shape is determined by OPT-2 and OPT-3."
+    }
+  ],
+  "global_notes": [
+    "All ncu replay duration values are 2-5x longer than actual device execution — use for relative comparison only. The triage percentages (48.9%, 6.94%) are computed from attributed replay times and reflect operator proportions accurately, not absolute wall-clock values.",
+    "A100 SXM4 ridge point: ~250 FLOP/byte (FP32), ~156 FLOP/byte (BF16). At BATCH=4, SEQ_LEN=128, the (512, 512) GEMM arithmetic intensity is ~170 FLOP/byte — above the BF16 ridge point, confirming these are compute-bound once TC is active.",
+    "Dedup note: The profile captures layer::unique::modules_0 and propagates to modules_1 through modules_7. The 432 mm launches = 54 per layer × 8 layers (9 replay iterations × 6 linear ops per layer). Latency savings estimates above use 8x layer multiplier.",
+    "high_unattributed flag: 720 of 2176 kernels are unattributed (~33%). These are predominantly Inductor-fused Triton kernels (LayerNorm, softmax, view/transpose ops). They account for a small fraction of total time given the GEMM dominance, but should be investigated if post-optimization profiles show unexpected residual latency.",
+    "OPT-3 confidence is medium because the FX-level SDPA pattern is fragile post-Inductor-lowering. The source-level change is high-confidence; only the FX alternative carries medium confidence.",
+    "No batch norm layers exist in this model — BN folding is not applicable.",
+    "FeedForward already uses F.gelu (not tanh) — the tanh-to-GELU substitution is not applicable."
+  ]
+}

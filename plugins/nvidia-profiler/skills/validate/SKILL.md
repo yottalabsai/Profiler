@@ -40,6 +40,12 @@ python -c "import sys; sys.path.insert(0, '/home/ubuntu/Profiler'); sys.path.ins
 ```
 Catches: missing imports, wrong `compile_fx` import path, circular imports, missing PYTHONPATH for the `nvidia` package.
 
+For dedup-aware backends, also verify the dedup imports load cleanly:
+```bash
+python -c "import sys; sys.path.insert(0, '{project_root}'); from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner; print('OK')"
+```
+If this fails with `ModuleNotFoundError: nvidia`: run `pip install -e .` from project root.
+
 ### Step 3: Backend Registration
 ```bash
 python -c "
@@ -84,6 +90,13 @@ WARNING [pass_fuse_qkv]    Pattern not found — pass not applied
 ```
 
 A `WARNING ... Pattern not found` is NOT a failure — passes are designed to degrade gracefully. It means that optimization will not contribute to the speedup. Re-check whether the FX graph actually contains the expected pattern (Inductor may have fused or decomposed it).
+
+For dedup-aware backends, look for per-partition log lines instead of single-entry lines:
+```
+INFO  model_opt: 31 duplicate partitions, dedup path   ← dedup path was taken
+INFO  [_pass_replace_sdpa] applied to partition modules_0
+```
+If you see `no repeated layers, flat compile path`, the backend used the flat fallback (model has no repeated layers) — this is correct behavior for non-transformer models.
 
 ## Common Failures and Fixes
 

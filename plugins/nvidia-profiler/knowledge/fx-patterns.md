@@ -16,6 +16,58 @@ logger = logging.getLogger(__name__)
 
 ---
 
+## Pass Taxonomy
+
+Before writing any FX pass, classify each optimization into one of three categories. The category determines exactly how the backend-engineer applies it.
+
+| Category | Criteria | How to apply |
+|---|---|---|
+| **`replace_pattern`-compatible** | Pure functional pattern: no tuple outputs, no `register_buffer`, no control flow | Define `_pattern_fn` + `_replacement_fn`; call `runner.apply_pass(_pattern_fn, _replacement_fn)` — `FxPassRunner` handles unique-rep application and propagation to duplicates automatically |
+| **Manual per-rep** | Tuple outputs, decomposed ops, or `register_buffer` needed | Write `def _pass_name(gm) -> gm`; call it in `for rep_name, rep_mod in registry.unique_reps`, then repeat for each duplicate |
+| **Non-graph** | dtype, memory_format, batch shape — invisible in Aten IR | Stays in `get_model_and_input()`, not in the backend at all |
+
+**Why SDPA replacement must be manual per-rep:** Inductor decomposes `softmax` into `exp + sum + div` before FX passes run. `replace_pattern` never sees a `softmax` node — only its decomposed form. The manual graph traversal in Pattern 2 matches the decomposed nodes directly.
+
+**Why BN fold must be manual per-rep:** `aten._native_batch_norm_legit_no_training` returns a 3-tuple `(output, mean, rstd)`. `replace_pattern` cannot match or produce tuple-returning patterns, so Pattern 3 uses direct node surgery instead.
+
+**`replace_pattern`-compatible:** QKV fusion (Pattern 1), tanh→GELU substitution (Pattern 5).
+
+---
+
+## Utility: `_capture_partition_inputs`
+
+When compiling each unique partition with `compile_fx`, you must pass that partition's actual input tensors — not the original model's inputs, which have a different shape. Use this utility to capture them via forward-pre hooks:
+
+```python
+def _capture_partition_inputs(
+    split_gm: fx.GraphModule,
+    example_inputs: list,
+) -> dict[str, list]:
+    """Capture actual input tensors for each partition by running split_gm once.
+    Required to compile each unique rep with its real partition inputs."""
+    partition_inputs: dict[str, list] = {}
+    hooks = []
+    for name, submod in split_gm.named_children():
+        if isinstance(submod, fx.GraphModule):
+            def _hook(mod, args, _name=name):   # _name= captures loop var by value
+                partition_inputs[_name] = list(args)
+            hooks.append(submod.register_forward_pre_hook(_hook))
+    with torch.no_grad():
+        split_gm(*example_inputs)
+    for h in hooks:
+        h.remove()
+    return partition_inputs
+```
+
+Usage in the backend:
+```python
+partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+for rep_name, rep_mod in registry.unique_reps:
+    compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+```
+
+---
+
 ## Pattern 1: QKV Weight Fusion
 
 Fuses 3 independent `mm(x, W_q)`, `mm(x, W_k)`, `mm(x, W_v)` calls (same input `x`) into a single batched `mm(x, W_fused)` + `chunk(3, dim=-1)`. Reduces kernel launches from 3 to 1.

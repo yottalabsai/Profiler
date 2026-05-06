@@ -58,7 +58,7 @@ Implements [N] operator-level optimizations via FX graph passes:
 To profile with optimizations:
     python scripts/run_workload.py \\
         --workload scripts/workload_optimized.py \\
-        --compile-backend transformer_opt
+        --compile-backend {model_name}_opt
 """
 
 from __future__ import annotations
@@ -72,75 +72,125 @@ import torch.nn.functional as F
 import torch.fx as fx
 from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx   # import the function, not the module
-from torch.fx.subgraph_rewriter import replace_pattern
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
 
 # Import baseline workload
 from scripts.workload import get_model_and_input as get_baseline_model_and_input
 
 DEVICE = "cuda"
-# Preserve original constants
-BATCH_SIZE = 16
-...
+BATCH_SIZE = ...   # preserve original constants
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # ============================================================================
-# FX Graph Passes
+# Pass utilities
 # ============================================================================
 
-def pass_[optimization_name](gm: fx.GraphModule) -> fx.GraphModule:
+def _capture_partition_inputs(
+    split_gm: fx.GraphModule,
+    example_inputs: list,
+) -> dict[str, list]:
+    """Capture real input tensors for each partition via forward-pre hooks."""
+    partition_inputs: dict[str, list] = {}
+    hooks = []
+    for name, submod in split_gm.named_children():
+        if isinstance(submod, fx.GraphModule):
+            def _hook(mod, args, _name=name):
+                partition_inputs[_name] = list(args)
+            hooks.append(submod.register_forward_pre_hook(_hook))
+    with torch.no_grad():
+        split_gm(*example_inputs)
+    for h in hooks:
+        h.remove()
+    return partition_inputs
+
+# ============================================================================
+# replace_pattern-compatible passes (FxPassRunner applies these automatically)
+# ============================================================================
+# Use for: pure functional patterns — no tuple outputs, no register_buffer,
+# no control flow. FxPassRunner.apply_pass() handles unique-rep application
+# and propagation to all structural duplicates.
+
+def _[opt_pattern](x, ...):
+    """Pattern to match."""
+    ...
+
+def _[opt_replacement](x, ...):
+    """Replacement subgraph."""
+    ...
+
+# ============================================================================
+# Manual per-rep passes (applied in the per-rep loop below)
+# ============================================================================
+# Use for: tuple outputs (BN fold), decomposed ops (SDPA — softmax is
+# decomposed before passes run), or register_buffer needed.
+
+def _pass_[optimization_name](gm: fx.GraphModule) -> fx.GraphModule:
     """
-    [Detailed docstring of what this pass does]
-    
-    Pattern: [What FX graph pattern it detects]
+    [What this pass does]
+    Pattern: [FX graph pattern it detects]
     Transformation: [How it transforms the graph]
-    Effect: [Expected impact on kernels/performance]
+    Effect: [Expected kernel/performance impact]
     """
-    # Implementation details:
-    # 1. Walk gm.graph.nodes to find pattern
-    # 2. Perform graph surgery (insert/replace/erase nodes)
-    # 3. Handle edge cases gracefully with try-except
-    # 4. gm.graph.lint() + gm.recompile()
-    
     try:
-        # Pattern detection and transformation logic
+        # Pattern detection and transformation
         for node in list(gm.graph.nodes):
             if node.op == "call_function" and node.target == torch.ops.aten.[...]:
-                # Transform pattern
                 pass
-        
         gm.graph.lint()
         gm.recompile()
     except Exception as e:
-        logger.warning(f"[Pass name] failed: {e}")
-    
+        logger.warning(f"[_pass_{optimization_name}] Failed: {e}")
     return gm
-
-# ... repeat for each optimization ...
 
 # ============================================================================
 # Backend Registration
 # ============================================================================
 
 @register_backend
-def transformer_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+def {model_name}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     """
-    Custom torch.compile() backend: applies all optimization passes.
-    
-    Pass order:
-      1. [Pass 1] — [reason for order]
-      2. [Pass 2]
-      ...
+    Custom torch.compile() backend implementing all FX graph optimizations.
+
+    Dedup path: applies passes only to structurally unique layer partitions,
+    then propagates to duplicates. Falls back to flat compile for models with
+    no repeated layers.
     """
-    logger.info("transformer_opt backend: starting FX passes")
-    
-    gm = pass_[opt1](gm)
-    gm = pass_[opt2](gm)
-    # ... all passes ...
-    
-    logger.info("transformer_opt backend: all passes complete, delegating to inductor")
-    return compile_fx(gm, example_inputs)
+    logger.info("{model_name}_opt backend: starting")
+    registry = UniqueSubgraphRegistry(gm)
+    equiv_map = registry.build_partition_equivalence_map()
+
+    if not equiv_map:
+        # No repeated layers — flat compile preserves cross-layer Inductor fusion
+        logger.info("{model_name}_opt: no repeated layers, flat compile path")
+        gm = _pass_[opt1](gm)
+        gm = _pass_[opt2](gm)
+        logger.info("{model_name}_opt: delegating to Inductor")
+        return compile_fx(gm, example_inputs)
+
+    logger.info(f"{model_name}_opt: {len(equiv_map)} duplicate partitions, dedup path")
+    runner = FxPassRunner(registry)
+
+    # replace_pattern-compatible passes (FxPassRunner propagates to duplicates)
+    runner.apply_pass(_[opt_pattern], _[opt_replacement])
+
+    # Manual passes: apply to each unique rep, then propagate to duplicates
+    for rep_name, rep_mod in registry.unique_reps:
+        _pass_[opt1](rep_mod)
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            _pass_[opt1](dup_mod)
+
+    # Compile unique reps with real partition inputs; share callable with duplicates
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:
+        compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    logger.info("{model_name}_opt: all passes applied, returning compiled split graph")
+    return lambda *args: registry.split(*args)
 
 # ============================================================================
 # Workload Interface
@@ -149,39 +199,29 @@ def transformer_opt(gm: fx.GraphModule, example_inputs) -> Callable:
 def get_model_and_input() -> tuple:
     """
     Workload interface for run_workload.py.
-    
-    Applies complementary optimizations on top of the baseline:
-    - [Optimization X] — only if not already applied by baseline
-    - [Optimization Y] — only if not already applied by baseline
-    
-    Note: [Any shape/dtype changes compared to baseline]
+
+    Applies non-graph optimizations (dtype, layout, batch shape) on top of
+    the baseline. FX graph passes run inside the backend above.
     """
     assert torch.cuda.is_available(), "CUDA required"
-    
-    # Start from the baseline — it may already have some optimizations applied
     model, x = get_baseline_model_and_input()
-    
-    # Apply only complementary optimizations not already present in the baseline.
-    # Check first before applying to avoid redundant or conflicting transforms.
-    
-    # Example: BF16 casting — skip if baseline already cast to BF16
+
+    # Non-graph optimizations — check before applying to avoid redundant transforms
     if next(model.parameters()).dtype != torch.bfloat16:
         model = model.to(torch.bfloat16)
         x = x.to(torch.bfloat16)
-    
-    # Example: Token padding — skip if input batch dim already meets tile size
+
     if x.shape[0] < 64:
         pad = 64 - x.shape[0]
         x = torch.nn.functional.pad(x, (0, 0, 0, pad))
-    
+
     return model, x
 
 if __name__ == "__main__":
     m, x = get_model_and_input()
-    # Smoke test
     with torch.no_grad():
         y = m(x)
-    print(f"✓ Output shape: {y.shape}")
+    print(f"Output shape: {y.shape}")
 ```
 
 **Key Principles:**
@@ -235,6 +275,21 @@ def test_forward_pass():
 - **Future Work** — Stubs and next steps
 
 ## Implementation Guidelines
+
+### Pass Classification (Do This First)
+
+Before writing any code, classify each optimization into one of three categories:
+
+| Category | Criteria | Implementation |
+|---|---|---|
+| **`replace_pattern`-compatible** | Pure functional: no tuple outputs, no `register_buffer`, no control flow | `_pattern_fn` + `_replacement_fn`; call `runner.apply_pass()` |
+| **Manual per-rep** | Tuple outputs, decomposed ops, or `register_buffer` needed | `def _pass_name(gm) -> gm`; apply in per-rep loops |
+| **Non-graph** | dtype, memory_format, batch shape | `get_model_and_input()` only |
+
+Canonical classifications:
+- **`replace_pattern`-compatible:** QKV fusion, tanh→GELU substitution
+- **Manual per-rep:** SDPA (softmax is decomposed into exp+sum+div before passes run — `replace_pattern` never sees a softmax node), BN fold (`aten._native_batch_norm_legit_no_training` returns a 3-tuple — `replace_pattern` cannot match tuple-returning patterns), pre-transposed weights (`register_buffer` needed)
+- **Non-graph:** BF16 cast, channels_last, batch padding
 
 ### For Each Optimization in OPTIMIZATIONS.json
 
@@ -440,13 +495,17 @@ operator-profiler map manifest.json \
 
 ## Final Checklist
 
+- [ ] Passes classified as `replace_pattern`-compatible vs. manual-per-rep vs. non-graph
+- [ ] `UniqueSubgraphRegistry` and `FxPassRunner` imported and used in backend
+- [ ] `if not equiv_map:` flat fallback path present for models with no repeated layers
+- [ ] `_capture_partition_inputs` used when compiling per-partition (not original `example_inputs`)
 - [ ] All HIGH confidence optimizations implemented as full passes
 - [ ] All MEDIUM confidence optimizations implemented with error handling
 - [ ] All LOW confidence optimizations implemented as stubs (detection + warning)
 - [ ] Backend registration with `@register_backend` decorator
 - [ ] `get_model_and_input()` applies non-graph optimizations (BF16, padding)
 - [ ] Test script validates import, backend, shapes, forward pass
-- [ ] Documentation covers all 6 optimizations, quick start, architecture, troubleshooting
+- [ ] Documentation covers all optimizations, quick start, architecture, troubleshooting
 - [ ] All code is defensive (try-except, logging, graceful degradation)
 - [ ] Syntax validated: `python -m py_compile workload_optimized.py`
 - [ ] Model-agnostic: FX passes work at Aten IR level, not tied to specific modules
