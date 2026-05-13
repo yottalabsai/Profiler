@@ -109,7 +109,7 @@ After both `profile.json` and `profile_optimized.json` are verified, remove Indu
 rm -rf profiler_output/*_inductor_debug/
 ```
 
-Do not remove other files in `profiler_output/` (`.nsys-rep`, `.sqlite`, `.ncu-rep`, `.manifest.json`, `.corr.json`, `.part.json`) — they are useful for debugging and re-running individual stages without a full re-capture.
+Do not remove other files in `profiler_output/` (`.nsys-rep`, `.ncu-rep`, `.corr.json`, `.part.json`) — they are useful for debugging and re-running individual stages without a full re-capture.
 
 ```
 Output: (none — cleanup only)
@@ -121,7 +121,7 @@ Normalizes for batch-size differences and computes per-operator speedups with ha
 
 ```
 Delegates to: comparison-agent
-Output: printed comparison table + comparison.md
+Output: printed comparison table
 ```
 
 ### Stage 7: Report (→ report.md)

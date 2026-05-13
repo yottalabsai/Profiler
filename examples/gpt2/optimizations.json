@@ -4,472 +4,264 @@
     "device": "NVIDIA A100-SXM4-80GB",
     "compile_mode": "inductor",
     "dtype": "FP32",
-    "total_profiled_wall_time_ms": 104.059,
+    "total_profiled_wall_time_ns": 103930896,
+    "total_profiled_wall_time_ms": 103.93,
     "time_budget": {
       "aten::mm_0": {
-        "pct": 51.88,
-        "duration_ns": 53990795,
+        "pct": 51.93,
+        "duration_ns": 53966937,
         "kernel_count": 336,
         "dominant_kernel": "ampere_sgemm_32x32_sliced1x4_nn",
         "bottleneck_class": "tensor_core_idle"
       },
       "aten::addmm_0": {
-        "pct": 15.67,
-        "duration_ns": 16301259,
+        "pct": 15.68,
+        "duration_ns": 16301364,
         "kernel_count": 456,
         "dominant_kernel": "ampere_sgemm_128x32_nn",
-        "bottleneck_class": "compute_bound (FP32 SIMT path -- effectively tensor_core_idle)"
+        "bottleneck_class": "well_optimized"
       },
       "aten::_efficient_attention_forward_0": {
         "pct": 3.18,
-        "duration_ns": 3313344,
+        "duration_ns": 3306052,
         "kernel_count": 108,
         "dominant_kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80",
         "bottleneck_class": "wave_starvation"
-      },
-      "aten::view_0_and_fused_elementwise": {
-        "pct": 0.91,
-        "duration_ns": 945856,
-        "kernel_count": 240,
-        "bottleneck_class": "well_optimized"
       }
     },
-    "hardware_context": {
-      "architecture": "Ampere",
-      "sm_count": 108,
-      "bf16_tflops": 312,
-      "fp32_tflops": 19.5,
-      "hbm_bandwidth_tbs": 2.0,
-      "ridge_point_flop_per_byte_bf16": 156
-    }
+    "schema_warning": "240 unattributed kernels (12.6% of all kernels). Wall-time percentages for layer norm and attention preprocessing ops are understated. Re-run with --correlation-pass for improved attribution."
   },
   "optimizations": [
     {
       "id": "OPT-1",
       "priority": 1,
-      "name": "BF16 Model Cast -- Enable Tensor Cores on All GEMMs",
       "operators": [
-        "aten::mm_0 (336 kernels, 51.88% of total time)",
-        "aten::addmm_0 (456 kernels, 15.67% of total time)"
+        "aten::mm_0 (336 kernels, 51.93% wall time)",
+        "aten::addmm_0 (456 kernels, 15.68% wall time)",
+        "aten::_efficient_attention_forward_0 (108 kernels, 3.18% wall time)"
       ],
       "bottleneck": {
-        "class": "tensor_core_idle",
-        "description": "All 792 GEMM kernel launches dispatch FP32 SIMT path (ampere_sgemm_* family). The A100 Tensor Core units (HMMA) are completely inactive: smsp__pipe_tensor_cycles_active = 0 across all mm/addmm kernels. FP32 on A100 delivers 19.5 TFLOPS peak; BF16 Tensor Cores deliver 312 TFLOPS -- a 16x higher peak throughput. Together these two operators account for 67.55% of total profiled wall time.",
+        "description": "FP32 dtype forces cuBLAS to select the SIMT path (ampere_sgemm_*) rather than Tensor Core HMMA path (sm80_xmma_gemm_*). tensor_core_active_pct is 0.0 for aten::mm_0 and effectively 0 for aten::addmm_0 (0.248%). The fmha_cutlassF_f32 attention kernel runs at only 6.3% occupancy with 168 registers/thread and 24.5 MB local memory spills — all caused by the f32 kernel variant. Switching to BF16 routes all three operators to Tensor Core paths and replaces fmha_cutlassF_f32 with fmha_cutlassF_bf16, eliminating register spills.",
         "evidence": {
           "aten::mm_0": {
+            "kernel": "ampere_sgemm_32x32_sliced1x4_nn",
             "tensor_core_active_pct": 0.0,
-            "dominant_kernel": "ampere_sgemm_32x32_sliced1x4_nn",
-            "sm_throughput_pct": 72.8,
-            "achieved_occupancy": 26.82,
-            "memory_throughput_pct": 3.18,
-            "total_duration_ns": 53990795,
-            "pct_of_total": 51.88
+            "achieved_occupancy": 26.78,
+            "sm_throughput_pct": 72.77,
+            "registers_per_thread": 86,
+            "local_memory_spills": 0,
+            "total_duration_ns": 53966937,
+            "kernel_count": 336,
+            "fraction_of_total_pct": 51.93
           },
           "aten::addmm_0": {
-            "tensor_core_active_pct": 0.193,
-            "dominant_kernel": "ampere_sgemm_128x32_nn",
-            "sm_throughput_pct": 74.66,
-            "achieved_occupancy": 31.40,
-            "memory_throughput_pct": 4.96,
-            "total_duration_ns": 16301259,
-            "pct_of_total": 15.67,
-            "note": "0.193% tensor_core_active is rounding noise -- SIMT path confirmed by ampere_sgemm kernel name (no xmma substring)"
+            "kernel": "ampere_sgemm_128x32_nn",
+            "tensor_core_active_pct": 0.248,
+            "achieved_occupancy": 32.23,
+            "sm_throughput_pct": 69.44,
+            "registers_per_thread": 57,
+            "local_memory_spills": 0,
+            "total_duration_ns": 16301364,
+            "kernel_count": 456,
+            "fraction_of_total_pct": 15.68
           },
-          "combined_pct_of_total": 67.55
+          "aten::_efficient_attention_forward_0": {
+            "kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80",
+            "tensor_core_active_pct": 17.88,
+            "achieved_occupancy": 6.30,
+            "sm_throughput_pct": 19.63,
+            "registers_per_thread": 168,
+            "local_memory_spills_bytes": 24468480,
+            "total_duration_ns": 3306052,
+            "kernel_count": 108,
+            "fraction_of_total_pct": 3.18
+          }
         }
       },
       "transformation": {
         "type": "dtype_promotion",
-        "description": "Cast model weights and input tensors to torch.bfloat16. This forces cuBLAS to select the HMMA Tensor Core dispatch path (sm80_xmma_gemm_bf16bf16_bf16bf16_f32) instead of the SIMT sgemm path. BF16 is preferred over FP16 for GPT-2 because BF16 has the same dynamic range as FP32 (8 exponent bits), making it numerically safe for the large activation magnitudes in transformer FFN layers without requiring loss scaling.",
-        "location": "get_model_and_input() -- apply BEFORE torch.compile()",
+        "description": "Cast model parameters and input tensors to torch.bfloat16. On Ampere (A100), this routes aten::mm and aten::addmm from ampere_sgemm_* (SIMT FP32) to sm80_xmma_gemm_bf16bf16 (HMMA Tensor Core), and routes the attention kernel from fmha_cutlassF_f32_aligned_64x64_rf_sm80 to fmha_cutlassF_bf16, eliminating 24.5 MB of register spills and raising occupancy. A100 BF16 Tensor Core throughput is 312 TFLOPS vs ~19.5 TFLOPS for SIMT FP32 — theoretical 8-16x improvement on GEMM-bound operators. GPT-2 does not use tied embeddings (lm_head is a separate nn.Linear), so the shared-weight contraindication does not apply.",
+        "location": "get_model_and_input()",
         "fx_steps": [
-          "# Step 1: Cast model parameters and buffers to BF16",
+          "# Not an FX pass — apply before torch.compile().",
+          "# In get_model_and_input(), after constructing model and input tensors:",
           "model = model.to(torch.bfloat16)",
-          "",
-          "# Step 2: For GPT-2, the primary input is input_ids (int64) -- no cast needed.",
-          "# If passing explicit float attention_mask, cast it too:",
-          "# attention_mask = attention_mask.to(torch.bfloat16)",
-          "",
-          "# Step 3: Compile AFTER dtype change so Inductor traces the BF16 weight graph",
-          "model = torch.compile(model, backend='inductor')"
+          "x = x.to(torch.bfloat16)"
         ],
-        "code_hint": "model.to(torch.bfloat16) must precede torch.compile(). Dynamo traces the dtype-cast graph; casting after compile() leaves FP32 weight nodes in the traced graph.",
-        "cublAS_routing": {
-          "before": "ampere_sgemm_32x32_sliced1x4_nn (SIMT, 19.5 TFLOPS peak)",
-          "after": "sm80_xmma_gemm_bf16bf16_bf16bf16_f32_tn_n (HMMA Tensor Core, 312 TFLOPS peak)"
-        },
-        "contraindication_check": "GPT-2 uses tied embeddings (wte.weight shared with lm_head). The embedding lookup uses integer gather (dtype-agnostic on the weight), so BF16 cast is safe. No contraindication applies."
+        "code_hint": "Apply BEFORE torch.compile(). Dynamo traces dtype as a static property; changing dtype after compilation triggers a recompile. GPT-2 from HuggingFace: pass torch_dtype=torch.bfloat16 to from_pretrained() as an alternative to post-hoc .to(). Lower-risk fallback: torch.backends.cuda.matmul.allow_tf32 = True before compilation — routes to TF32 (10-bit mantissa), ~3x speedup vs full BF16 ~8x, no dtype change required."
       },
       "estimated_impact": {
-        "theoretical_speedup_on_affected_ops": "up to 16x (19.5 -> 312 TFLOPS peak)",
-        "realistic_speedup_on_affected_ops": "4x-8x (GEMMs are compute-bound at 72-74% SM throughput in FP32, so most of the Tensor Core throughput uplift is capturable)",
-        "expected_end_to_end_speedup": "3x-5x",
-        "latency_reduction_estimate_ns": "approximately 50000000-60000000 ns saved from GEMM time alone",
-        "affected_time_pct": 67.55
+        "latency_reduction_pct_of_total": 55.0,
+        "affected_operators_combined_pct": 70.79,
+        "notes": "aten::mm_0 (51.93%) and aten::addmm_0 (15.68%) are compute-bound on SIMT. BF16 Tensor Core throughput is ~8-16x higher for these shapes (768x768, 512x3072, 512x2304). Estimated 50-60% total wall time reduction. The attention operator (3.18%) sees additional benefit from eliminating 24.5 MB local memory spills; fmha_cutlassF_bf16 runs at significantly higher occupancy than the f32 variant at 168 registers/thread."
       },
       "confidence": "high",
-      "confidence_justification": "cuBLAS kernel selection based on dtype is deterministic and documented. BF16 input to mm on Ampere always routes to the xmma path. The 0.0% tensor_core_active counter is definitive proof of the FP32 SIMT path. No graph-level pass required.",
-      "prerequisite_for": ["OPT-2", "OPT-3", "OPT-4"],
-      "risks": [
-        {
-          "category": "numerical_precision",
-          "severity": "low",
-          "description": "BF16 has 7 mantissa bits vs FP32's 23. For GPT-2 inference this is well-studied and accepted -- HuggingFace serves BF16 GPT-2 in production. Perplexity increase on WikiText-103 is typically < 0.1 PPL.",
-          "mitigation": "Run eval on downstream task before deploying. If regression exceeds tolerance, use torch.backends.cuda.matmul.allow_tf32 = True as a gentler alternative (TF32 keeps FP32 storage, reduces mantissa to 10 bits)."
-        },
-        {
-          "category": "tied_embeddings",
-          "severity": "low",
-          "description": "GPT-2 shares wte.weight between input embedding and lm_head. Casting to BF16 affects both paths. Embedding gather at BF16 is safe. lm_head logit precision is slightly reduced but acceptable for generation.",
-          "mitigation": "None required for inference. For perplexity-sensitive benchmarks, isolate lm_head: model.lm_head.weight = model.lm_head.weight.float() -- note this breaks weight tying and doubles memory for that tensor."
-        }
-      ]
+      "prerequisite_for": ["OPT-2"]
     },
     {
       "id": "OPT-2",
       "priority": 2,
-      "name": "torch.compile with fullgraph=True and mode='max-autotune'",
       "operators": [
-        "aten::mm_0 (all 336 kernels)",
-        "aten::addmm_0 (all 456 kernels)",
-        "aten::_efficient_attention_forward_0 (all 108 kernels)",
-        "All Triton fused elementwise operators"
+        "aten::mm_0 (336 kernels — FFN output projections and attention output projections)",
+        "aten::addmm_0 (456 kernels — bias-bearing linear projections)"
       ],
       "bottleneck": {
-        "class": "suboptimal_tiling_and_graph_fragmentation",
-        "description": "Current compile mode is default inductor. After BF16 cast, GEMMs will reach Tensor Cores but tile sizes remain at heuristic defaults. max-autotune runs the Triton autotuner over the full GEMM tile space and selects empirically optimal configurations. fullgraph=True prevents graph breaks that cause eager-mode subgraph fallbacks, allowing Inductor to see the full computation graph for cross-operator fusion decisions.",
+        "description": "Inductor emits aten.t() nodes immediately before aten.mm() calls, causing cuBLAS to perform an on-the-fly transposition of the weight matrix at every forward pass. GPT-2 Linear layers store weights in row-major (out_features, in_features) layout. cuBLAS receives a TN (Transposed, Non-transposed) problem, incurring an implicit DRAM reshape on every call. Pre-transposing weight buffers at model load time eliminates this overhead and allows cuBLAS to see a NN problem with contiguous strides. This is secondary to OPT-1 — BF16 dtype must be established first so the pre-transposed buffers match the runtime dtype of the mm inputs.",
         "evidence": {
-          "current_sm_throughput_mm_pct": 72.8,
-          "current_sm_throughput_addmm_pct": 74.66,
-          "waves_per_sm_mm": 3.556,
-          "note": "waves_per_sm=3.556 indicates adequate wave-level parallelism; autotuning benefit comes from tile shape optimization (larger M/N/K tiles better saturate L2 and SMEM pipelines after Tensor Core activation)"
+          "aten::mm_0": {
+            "kernel": "ampere_sgemm_32x32_sliced1x4_nn",
+            "note": "The '_nn' suffix confirms both operands are expected non-transposed by the selected kernel; the on-the-fly transpose happens in the cuBLAS dispatch layer before kernel selection",
+            "total_duration_ns": 53966937,
+            "kernel_count": 336
+          },
+          "aten::addmm_0": {
+            "kernel": "ampere_sgemm_128x32_nn",
+            "total_duration_ns": 16301364,
+            "kernel_count": 456
+          }
         }
       },
       "transformation": {
-        "type": "compiler_mode_selection",
-        "description": "Switch torch.compile arguments to enable full-graph tracing and autotuning. No FX pass required.",
-        "location": "Model initialization, after OPT-1",
+        "type": "pretranspose_weights",
+        "description": "FX graph pass that detects aten.t() nodes feeding into aten.mm() or aten.addmm(), pre-transposes the corresponding weight parameter at graph-rewrite time, registers the transposed tensor as a new buffer, and rewrites the mm call to use the pre-transposed weight directly (no runtime aten.t()). Applies only to weights where the K dimension >= 512 to avoid memory overhead on small projections.",
+        "location": "FX graph pass — apply to the compiled graph via torch.compile custom backend or as a post-Dynamo transformation",
         "fx_steps": [
-          "# Apply AFTER OPT-1 (model must already be BF16 before compiling)",
-          "model = torch.compile(",
-          "    model,",
-          "    backend='inductor',",
-          "    mode='max-autotune',",
-          "    fullgraph=True,",
-          ")",
+          "import torch",
+          "import torch.fx as fx",
+          "from torch.fx import Graph, GraphModule, Node",
           "",
-          "# max-autotune enables:",
-          "#   1. Triton GEMM autotuning: tries tile configs (128x256, 64x256, 256x128, ...)",
-          "#      and picks the empirically fastest for each unique GEMM shape",
-          "#   2. Epilogue fusion: fuses bias-add and activation into the GEMM kernel exit",
-          "#   3. Persistent kernel selection for small GEMMs",
+          "def pass_pretranspose_weights(gm: fx.GraphModule) -> fx.GraphModule:",
+          "    \"\"\"",
+          "    For each pattern:  mm(x, t(W))  or  addmm(b, x, t(W))",
+          "    where W is a get_attr node (model parameter),",
+          "    replace with:  mm(x, W_T)  where W_T = W.t().contiguous()",
+          "    registered as a buffer on the GraphModule.",
+          "    Only applies when W.shape[-1] >= 512 (1MB threshold for BF16 weights).",
+          "    \"\"\"",
+          "    graph: Graph = gm.graph",
+          "    rewritten = 0",
           "",
-          "# Cache autotuning results to avoid re-tuning on subsequent runs:",
-          "import torch._inductor.config as inductor_config",
-          "inductor_config.fx_graph_cache = True"
+          "    for node in list(graph.nodes):",
+          "        # Match aten.mm.default(x, t_node) or aten.addmm.default(b, x, t_node)",
+          "        if node.op != 'call_function':",
+          "            continue",
+          "        target = node.target",
+          "        if target is torch.ops.aten.mm.default:",
+          "            x_node, t_node = node.args[0], node.args[1]",
+          "            bias_node = None",
+          "            is_addmm = False",
+          "        elif target is torch.ops.aten.addmm.default:",
+          "            bias_node, x_node, t_node = node.args[0], node.args[1], node.args[2]",
+          "            is_addmm = True",
+          "        else:",
+          "            continue",
+          "",
+          "        # t_node must be aten.t() wrapping a get_attr (weight parameter)",
+          "        if not (t_node.op == 'call_function' and",
+          "                t_node.target is torch.ops.aten.t.default):",
+          "            continue",
+          "        weight_node = t_node.args[0]",
+          "        if weight_node.op != 'get_attr':",
+          "            continue",
+          "",
+          "        # Retrieve the actual weight tensor to check shape and create transposed copy",
+          "        weight_tensor = gm.get_parameter(weight_node.target)",
+          "        K = weight_tensor.shape[-1]",
+          "        if K < 512:",
+          "            continue  # Skip small weights — memory overhead not worth it",
+          "",
+          "        # Pre-transpose and register as a new buffer",
+          "        buf_name = weight_node.target.replace('.', '_') + '_pretransposed'",
+          "        W_T = weight_tensor.t().contiguous()",
+          "        gm.register_buffer(buf_name, W_T)",
+          "",
+          "        # Insert get_attr node for the new buffer before the current mm node",
+          "        with graph.inserting_before(node):",
+          "            new_weight_node = graph.get_attr(buf_name)",
+          "            new_weight_node.meta = {}",
+          "",
+          "        # Replace the mm/addmm node args — W_T is already transposed, no aten.t() needed",
+          "        if is_addmm:",
+          "            node.args = (bias_node, x_node, new_weight_node)",
+          "        else:",
+          "            node.args = (x_node, new_weight_node)",
+          "",
+          "        # Remove old aten.t() node if it has no other users",
+          "        if len(t_node.users) == 0:",
+          "            graph.erase_node(t_node)",
+          "",
+          "        rewritten += 1",
+          "",
+          "    graph.lint()",
+          "    gm.recompile()",
+          "    print(f'pass_pretranspose_weights: rewrote {rewritten} mm/addmm nodes')",
+          "    return gm"
         ],
-        "code_hint": "First compile pass with max-autotune is slow (autotuning runs ~100 tile configs per unique GEMM shape). GPT-2 small has approximately 4 unique GEMM shapes; expect 60-180 seconds on first compilation."
+        "code_hint": "Register this pass with a custom torch.compile backend using torch._dynamo.register_backend, or invoke it manually on a GraphModule returned by torch.export. Must run AFTER dtype promotion (OPT-1) so that W_T = weight_tensor.t().contiguous() produces a BF16 buffer matching BF16 mm inputs. Memory cost: one additional copy per weight matrix. For GPT-2-small, total additional weight memory is approximately 12 layers x (768x768 + 768x3072 + 3072x768 + 768x2304) x 2 bytes = ~540 MB. Ensure host has sufficient GPU memory before enabling."
       },
       "estimated_impact": {
-        "expected_end_to_end_speedup": "1.2x-1.5x incremental over OPT-1 alone",
-        "description": "After BF16 Tensor Cores are active, max-autotune typically delivers 15-40% additional throughput on transformer GEMMs by selecting larger tiles (e.g. 128x256 vs default 64x64) that better saturate L2 and SMEM pipelines.",
-        "first_compile_overhead_seconds": "60-180"
+        "latency_reduction_pct_of_total": 3.0,
+        "notes": "Pre-transposition eliminates the implicit DRAM reshape in the cuBLAS TN dispatch path. For 768-dim and 3072-dim weight shapes, the transpose overhead is modest relative to the GEMM computation — estimated 3-8% additional reduction on top of OPT-1. The primary benefit is improved cuBLAS kernel selection: NN problems may select larger tile sizes than TN problems for these matrix dimensions."
       },
-      "confidence": "high",
-      "confidence_justification": "torch.compile mode='max-autotune' is a first-class supported feature. GPT-2 with HuggingFace modeling code has no documented graph-break issues with fullgraph=True. SM throughput of 72-74% in FP32 SIMT will improve under autotuned BF16 tiles.",
-      "prerequisite_for": [],
-      "prerequisites": ["OPT-1"],
-      "risks": [
-        {
-          "category": "compilation_latency",
-          "severity": "medium",
-          "description": "max-autotune significantly increases first-compile time. For GPT-2 small, expect 1-3 minutes of autotuning on first run.",
-          "mitigation": "Enable fx_graph_cache (shown above). Compiled artifacts are cached to disk and reused on subsequent runs with identical input shapes."
-        },
-        {
-          "category": "graph_break_on_dynamic_shapes",
-          "severity": "low",
-          "description": "fullgraph=True errors on graph breaks caused by dynamic shapes or Python control flow that depends on tensor values.",
-          "mitigation": "Fix input shapes for benchmarking, or use dynamic=True: torch.compile(model, mode='max-autotune', fullgraph=True, dynamic=True)."
-        }
-      ]
+      "confidence": "medium",
+      "prerequisite_for": []
     },
     {
       "id": "OPT-3",
       "priority": 3,
-      "name": "BF16 SDPA Dispatch -- Eliminate Register Spills and Occupancy Collapse on Attention",
       "operators": [
-        "aten::_efficient_attention_forward_0 (108 kernels, 3.18% of total time)"
+        "aten::mm_0 (336 kernels)",
+        "aten::addmm_0 (456 kernels)"
       ],
       "bottleneck": {
-        "class": "wave_starvation",
-        "description": "The FP32 cutlass efficient-attention kernel (fmha_cutlassF_f32_aligned_64x64_rf_sm80) uses 168 registers per thread. Ampere SMs have 65536 registers; at 168 regs/thread a warp of 32 threads occupies 5376 registers, limiting the SM to ~12 active warps out of a theoretical maximum of 64. This collapses achieved occupancy to 6.24% and forces 24.47 MB of register state to spill to local memory (DRAM). After BF16 cast (OPT-1), PyTorch dispatches to the FlashAttention-2 BF16 kernel which uses approximately 64 registers per thread -- a 2.6x reduction that raises occupancy to ~30-40% and eliminates spills entirely.",
+        "description": "Default torch.compile() uses a fixed heuristic for GEMM tile sizes and algorithm selection. For GPT-2's specific matrix shapes (e.g., [512, 768] x [768, 3072], [512, 2304] x [2304, 768]) on A100, the optimal cuBLAS algorithm index and CUTLASS tile configuration may differ from the default heuristic. max-autotune mode benchmarks multiple kernel candidates at compile time and selects the fastest, which is especially impactful after the BF16 dtype change since a new set of Tensor Core kernels becomes available.",
         "evidence": {
-          "kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80",
-          "achieved_occupancy_pct": 6.239,
-          "waves_per_sm": 0.889,
-          "sm_throughput_pct": 19.68,
-          "registers_per_thread": 168.0,
-          "local_memory_spills_bytes": 24468480,
-          "eligible_cycles_pct": 24.18,
-          "total_duration_ns": 3313344,
-          "pct_of_total": 3.18
-        }
-      },
-      "transformation": {
-        "type": "dtype_promotion_cascades_to_attention_kernel_selection",
-        "description": "OPT-1's BF16 model cast is sufficient to trigger this improvement -- no separate FX pass is needed. When model weights and activations are BF16, F.scaled_dot_product_attention dispatches to the BF16-optimized FlashAttention path automatically. The is_causal=True argument should be set explicitly to enable the fused causal mask path and avoid materializing an O(seq^2) mask tensor.",
-        "location": "GPT-2 attention module -- verify SDPA call site uses is_causal=True",
-        "fx_steps": [
-          "# Primary fix: OPT-1 (BF16 cast) triggers BF16 FlashAttention dispatch automatically.",
-          "",
-          "# Verify/enforce in the attention module:",
-          "import torch.nn.functional as F",
-          "",
-          "# Ensure the SDPA call uses is_causal=True for decoder-only causal attention:",
-          "attn_output = F.scaled_dot_product_attention(",
-          "    query,       # shape: [batch, heads, seq, head_dim], dtype=bfloat16 after OPT-1",
-          "    key,         # shape: [batch, heads, seq, head_dim], dtype=bfloat16 after OPT-1",
-          "    value,       # shape: [batch, heads, seq, head_dim], dtype=bfloat16 after OPT-1",
-          "    attn_mask=None,",
-          "    dropout_p=0.0,",
-          "    is_causal=True,   # fused causal mask -- critical for decoder-only models",
-          "    scale=None,       # None = 1/sqrt(head_dim) default",
-          ")",
-          "",
-          "# With BF16 inputs on A100 (sm_major=8), PyTorch selects flash_fwd_kernel",
-          "# instead of fmha_cutlassF_f32_aligned_64x64_rf_sm80.",
-          "# Confirm dispatch: torch.backends.cuda.flash_sdp_enabled() should return True."
-        ],
-        "code_hint": "The HuggingFace GPT-2 implementation uses F.scaled_dot_product_attention in transformers >= 4.36. Check: grep -n 'scaled_dot_product_attention' $(python -c 'import transformers; print(transformers.__file__.replace(\"__init__.py\",\"\"))models/gpt2/modeling_gpt2.py')"
-      },
-      "estimated_impact": {
-        "expected_speedup_on_attention_kernel": "3x-5x",
-        "expected_end_to_end_speedup": "1.05x-1.1x incremental (attention is 3.18% of current time; proportional share grows after OPT-1 reduces GEMM dominance)",
-        "spills_eliminated_bytes": 24468480,
-        "occupancy_improvement": "6.24% -> ~30-40% (estimated from register count reduction 168 -> ~64 regs/thread)",
-        "dram_traffic_reduction_pct": "~60% (FlashAttention fuses QK^T softmax V into single SRAM-resident tiled kernel)"
-      },
-      "confidence": "high",
-      "confidence_justification": "The register pressure root cause is directly readable from the profile: 168 regs/thread is a documented characteristic of fmha_cutlassF_f32 on Ampere. PyTorch SDPA dispatcher selects FlashAttention for BF16/FP16 inputs on sm80+ -- this is tested behavior in PyTorch >= 2.0. The 24.47 MB local memory spill evidence uniquely fingerprints this kernel variant.",
-      "prerequisite_for": [],
-      "prerequisites": ["OPT-1"],
-      "risks": [
-        {
-          "category": "numerical_precision",
-          "severity": "low",
-          "description": "FlashAttention BF16 uses tiled softmax with online normalization, a different accumulation schedule vs the unfused FP32 path. Output logits may differ at the 1e-2 level from FP32 reference.",
-          "mitigation": "Run reference comparison: max absolute difference between FP32-unfused and BF16-Flash outputs is typically < 0.01 for standard sequence lengths."
-        },
-        {
-          "category": "sdpa_backend_selection",
-          "severity": "low",
-          "description": "FlashAttention dispatch for BF16 requires torch >= 2.0 and sm_major >= 8. A100 qualifies on both counts.",
-          "mitigation": "Verify: assert torch.__version__ >= '2.0' and torch.cuda.get_device_capability()[0] >= 8"
-        }
-      ]
-    },
-    {
-      "id": "OPT-4",
-      "priority": 4,
-      "name": "QKV Projection Fusion -- Eliminate Wave Overhead on Small Attention Projection GEMMs",
-      "operators": [
-        "aten::mm nodes with shape [512, 768] x [768, 768] (Q, K, V projections, 36 GEMMs across 12 layers -- ranks 149+ in triage)"
-      ],
-      "bottleneck": {
-        "class": "wave_starvation (secondary, on small attention projection GEMMs)",
-        "description": "The attention Q, K, V projections have shape [512, 768] x [768, 768] and achieve waves_per_sm=1.778 -- below the 2-wave threshold where scheduling overhead becomes non-trivial. Fusing Q+K+V into a single [512, 768] x [768, 2304] GEMM triples the N dimension, increases waves_per_sm to approximately 5.33, and reduces kernel launches from 36 to 12 across the 12-layer model. After BF16 cast, the wider matrix also enables better Tensor Core tile utilization (larger tile configs fit the N=2304 dimension more efficiently than N=768).",
-        "evidence": {
-          "operator_example": "aten::mm, op_id=2893, sizes=[[512, 768], [768, 768]]",
-          "waves_per_sm": 1.778,
-          "dominant_kernel": "ampere_sgemm_64x32_sliced1x4_nn",
-          "tensor_core_active_pct": 0.0,
-          "sm_throughput_pct": 69.21,
-          "achieved_occupancy_pct": 19.82,
-          "total_duration_ns_example": 55712,
-          "collective_time_note": "36 such GEMMs appear in triage ranks 149+; individually below 5% threshold but collectively approximately 2% of total time"
-        }
-      },
-      "transformation": {
-        "type": "qkv_fusion_fx_pass",
-        "description": "FX graph pass that detects three aten.mm nodes sharing the same input activation, concatenates their weight matrices into a single fused weight [768, 2304], and replaces the three mm calls with one mm followed by chunk(3, dim=-1). Must be applied after BF16 cast so the fused weight buffer is BF16.",
-        "location": "Custom FX pass, or verify existing fusion in HuggingFace GPT-2 c_attn layer",
-        "fx_steps": [
-          "import torch",
-          "import torch.fx as fx",
-          "import operator",
-          "from collections import defaultdict",
-          "",
-          "def pass_fuse_qkv(gm: fx.GraphModule) -> fx.GraphModule:",
-          "    \"\"\"",
-          "    Fuse 3 mm(x, W_q), mm(x, W_k), mm(x, W_v) with identical input x",
-          "    into mm(x, W_qkv) followed by chunk(3, dim=-1).",
-          "    Prerequisite: model must already be cast to BF16 (OPT-1 applied).",
-          "    \"\"\"",
-          "    mm_by_input = defaultdict(list)",
-          "    for node in gm.graph.nodes:",
-          "        if node.op == 'call_function' and node.target == torch.ops.aten.mm.default:",
-          "            mm_by_input[node.args[0]].append(node)",
-          "",
-          "    for input_node, mm_nodes in mm_by_input.items():",
-          "        if len(mm_nodes) != 3:",
-          "            continue",
-          "",
-          "        # Extract weight tensors, looking through aten.t() wrappers",
-          "        weights = []",
-          "        for mm_node in mm_nodes:",
-          "            w_node = mm_node.args[1]",
-          "            if (w_node.op == 'call_function'",
-          "                    and w_node.target == torch.ops.aten.t.default):",
-          "                attr_node = w_node.args[0]",
-          "            else:",
-          "                attr_node = w_node",
-          "            weights.append(getattr(gm, attr_node.target))",
-          "",
-          "        # Only fuse if all three weights share the same shape [K, N]",
-          "        if len(set(w.shape for w in weights)) != 1:",
-          "            continue",
-          "",
-          "        # Concatenate along N dimension: [K, N] -> [K, 3N]",
-          "        W_fused = torch.cat(weights, dim=1).contiguous()",
-          "        buf_name = f'fused_qkv_weight_{id(input_node)}'",
-          "        gm.register_buffer(buf_name, W_fused)",
-          "",
-          "        first_mm = mm_nodes[0]",
-          "        with gm.graph.inserting_before(first_mm):",
-          "            get_fused = gm.graph.get_attr(buf_name)",
-          "            fused_mm = gm.graph.call_function(",
-          "                torch.ops.aten.mm.default,",
-          "                args=(input_node, get_fused),",
-          "            )",
-          "            chunks = gm.graph.call_function(",
-          "                torch.ops.aten.chunk.default,",
-          "                args=(fused_mm, 3, -1),",
-          "            )",
-          "            q_out = gm.graph.call_function(operator.getitem, args=(chunks, 0))",
-          "            k_out = gm.graph.call_function(operator.getitem, args=(chunks, 1))",
-          "            v_out = gm.graph.call_function(operator.getitem, args=(chunks, 2))",
-          "",
-          "        mm_nodes[0].replace_all_uses_with(q_out)",
-          "        mm_nodes[1].replace_all_uses_with(k_out)",
-          "        mm_nodes[2].replace_all_uses_with(v_out)",
-          "        for mm_node in reversed(mm_nodes):",
-          "            gm.graph.erase_node(mm_node)",
-          "",
-          "    gm.graph.lint()",
-          "    gm.recompile()",
-          "    return gm"
-        ],
-        "code_hint": "HuggingFace GPT2Attention uses self.c_attn = Conv1D(3 * n_embd, n_embd), which projects to 3*768=2304 in a single call. If your model uses this standard implementation the QKV fusion already exists at the module level and this pass will find zero matching 3-node groups -- it is safe to run (no-op) but unnecessary. Verify: model.transformer.h[0].attn.c_attn.weight.shape should be (768, 2304) or (2304, 768)."
-      },
-      "estimated_impact": {
-        "expected_end_to_end_speedup": "1.03x-1.08x incremental",
-        "waves_per_sm_improvement": "1.778 -> approximately 5.33 on attention projections",
-        "kernel_launches_eliminated": 24,
-        "note": "Lower priority because attention projection GEMMs are a small fraction of total time. Impact grows proportionally as GEMM time drops after OPT-1."
-      },
-      "confidence": "medium",
-      "confidence_justification": "HuggingFace GPT-2 already implements QKV fusion via c_attn Conv1D in standard builds -- this pass may be a no-op. Confidence is medium because the actual Inductor-compiled graph must be inspected to confirm whether a fused or split weight representation was materialized. The waves_per_sm=1.778 evidence at triage ranks 149+ is real but represents a small time fraction.",
-      "prerequisite_for": [],
-      "prerequisites": ["OPT-1"],
-      "risks": [
-        {
-          "category": "graph_pattern_mismatch",
-          "severity": "low",
-          "description": "If HuggingFace GPT-2 already performs QKV fusion via c_attn, the pass finds zero matching 3-mm groups and exits cleanly.",
-          "mitigation": "Always call gm.graph.lint() after the pass. The implementation is designed to be a safe no-op when the pattern is absent."
-        },
-        {
-          "category": "transient_memory_overhead",
-          "severity": "negligible",
-          "description": "Concatenating Q+K+V creates a new 9 MB buffer (3 * 768 * 768 * 2 bytes BF16) while originals may persist briefly. Negligible on an 80 GB A100.",
-          "mitigation": "None required."
-        }
-      ]
-    },
-    {
-      "id": "OPT-5",
-      "priority": 5,
-      "name": "TF32 Global Flag -- Fallback Tensor Core Activation for Any Residual FP32 GEMMs",
-      "operators": [
-        "Any aten::mm or aten::addmm that cannot be cast to BF16 (loss computation, any FP32 subgraph)"
-      ],
-      "bottleneck": {
-        "class": "tensor_core_idle (residual, applies if OPT-1 is partially applied or for FP32 subgraphs)",
-        "description": "TF32 uses FP32 storage but routes GEMMs through Tensor Core hardware with 10-bit mantissa precision. It delivers 156 TFLOPS on A100 -- 8x faster than FP32 SIMT -- with no dtype cast required. This is a defensive one-line flag to ensure any FP32 GEMM remnants that survive OPT-1 still benefit from Tensor Cores.",
-        "evidence": {
-          "aten::mm_0_tensor_core_active_pct": 0.0,
-          "aten::addmm_0_tensor_core_active_pct": 0.193,
-          "note": "These will be fully addressed by OPT-1. OPT-5 provides defense-in-depth for any residual FP32 paths."
+          "aten::mm_0": {
+            "sm_throughput_pct": 72.77,
+            "note": "72.77% SM throughput is good but leaves ~27% headroom that better tile selection may recover",
+            "total_duration_ns": 53966937
+          },
+          "aten::addmm_0": {
+            "sm_throughput_pct": 69.44,
+            "note": "69.44% SM throughput — similarly sub-peak, consistent with sub-optimal tile heuristic",
+            "total_duration_ns": 16301364
+          }
         }
       },
       "transformation": {
         "type": "algorithm_selection",
-        "description": "Set the global TF32 matmul flag before model initialization. Zero graph modification required.",
-        "location": "Script initialization, before model construction and torch.compile()",
+        "description": "Switch from default torch.compile() to torch.compile(mode='max-autotune'). This enables Inductor's kernel benchmarking pass, which sweeps CUTLASS and cuBLAS algorithm variants for each unique (M, N, K) shape at compilation time and caches the fastest. No graph modification required.",
+        "location": "Backend registration / compile call site",
         "fx_steps": [
-          "# Enable TF32 for matmul (routes FP32 mm through Tensor Cores, 10-bit mantissa)",
-          "torch.backends.cuda.matmul.allow_tf32 = True",
+          "# Change the compile call from:",
+          "# compiled_model = torch.compile(model)",
+          "# to:",
+          "compiled_model = torch.compile(model, mode='max-autotune')",
           "",
-          "# Enable TF32 for cuDNN (not applicable to GPT-2 but harmless)",
-          "torch.backends.cudnn.allow_tf32 = True",
-          "",
-          "# Note: allow_tf32 = True is the default in PyTorch >= 1.12.",
-          "# Verify it has not been disabled elsewhere in the codebase."
-        ]
+          "# If using a custom backend wrapper (e.g., register_backend), pass mode through:",
+          "# torch._dynamo.register_backend('my_backend', my_backend_fn)",
+          "# compiled_model = torch.compile(model, backend='my_backend')",
+          "# Inside my_backend_fn, forward the mode kwarg to compile_fx:",
+          "# from torch._inductor.compile_fx import compile_fx",
+          "# return compile_fx(gm, example_inputs, options={'max_autotune': True})"
+        ],
+        "code_hint": "max-autotune significantly increases compile time (expect 5-15 minutes for GPT-2 small on first compile). Compilation result is cached to the Inductor cache directory. Set TORCHINDUCTOR_CACHE_DIR to a persistent path to avoid recompilation across runs. Also enable: torch.backends.cuda.matmul.allow_tf32 = True as a complementary setting (no-op after BF16 promotion but useful if OPT-1 is not applied). Combine with TORCH_COMPILE_DEBUG=1 to verify that max-autotune is selecting different kernels than the default heuristic."
       },
       "estimated_impact": {
-        "expected_speedup_if_OPT1_not_applied": "4x-6x on GEMM-bound operators (FP32 SIMT -> TF32 Tensor Core path)",
-        "expected_incremental_speedup_after_OPT1": "1.0x-1.05x (minimal; OPT-1 already routes to BF16 Tensor Core path which is faster than TF32)",
-        "note": "Primary value is as a safety net for residual FP32 subgraphs."
+        "latency_reduction_pct_of_total": 5.0,
+        "notes": "Estimated 5-15% additional reduction on GEMM operators after OPT-1 BF16 promotion. The exact benefit depends on whether the heuristic-selected CUTLASS tile already happens to be optimal for these shapes on A100. Most impactful for the 512x768x3072 FFN shapes where multiple competitive tile configurations exist. No benefit for the attention operator (108 kernels, 3.18%) which is wave-starved due to small batch rather than tile selection."
       },
-      "confidence": "high",
-      "confidence_justification": "allow_tf32 is a documented, stable PyTorch flag. On Ampere hardware it deterministically routes FP32 GEMMs through Tensor Core hardware with TF32 precision. No graph-level change required.",
-      "prerequisite_for": [],
-      "prerequisites": [],
-      "risks": [
-        {
-          "category": "numerical_precision",
-          "severity": "low",
-          "description": "TF32 reduces mantissa from 23 bits to 10 bits. Relative error is at most 1e-3 per operation. Transformer inference is empirically insensitive to this change.",
-          "mitigation": "Disable with torch.backends.cuda.matmul.allow_tf32 = False if exact FP32 reproduction is required (e.g., for deterministic unit test baselines)."
-        }
-      ]
+      "confidence": "medium",
+      "prerequisite_for": []
     }
   ],
-  "dependency_dag": {
-    "description": "Application order constraints between optimizations",
-    "edges": [
-      {
-        "from": "OPT-1",
-        "to": "OPT-2",
-        "reason": "torch.compile must see BF16 weights at trace time to lower mm nodes to BF16 Tensor Core kernels in Inductor"
-      },
-      {
-        "from": "OPT-1",
-        "to": "OPT-3",
-        "reason": "SDPA FlashAttention dispatch requires BF16/FP16 Q/K/V inputs; OPT-1 provides this via the model-level dtype cast"
-      },
-      {
-        "from": "OPT-1",
-        "to": "OPT-4",
-        "reason": "Fused QKV weight buffer must be BF16 to match the runtime dtype of mm inputs after OPT-1; fusing at FP32 then casting later causes dtype mismatch errors"
-      }
-    ],
-    "application_order": [
-      "OPT-5 (global flag, any time before model construction)",
-      "OPT-1 (BF16 cast, before torch.compile)",
-      "OPT-4 (QKV FX pass, if needed -- run before or instead of torch.compile)",
-      "OPT-2 (torch.compile with max-autotune, wraps the BF16 model)",
-      "OPT-3 (cascades automatically from OPT-1 via SDPA dtype dispatch)"
-    ]
-  },
   "global_notes": [
-    "All ncu replay duration values are 2-5x longer than actual wall-clock execution due to profiling serialization overhead. Use values for relative comparison only, not as absolute latency targets.",
-    "A100 SXM4-80GB ridge point for BF16: 156 FLOP/byte. The two dominant GEMM shapes are [512, 3072] x [3072, 768] (arithmetic intensity ~341 FLOP/byte) and [512, 768] x [768, 768] (arithmetic intensity ~256 FLOP/byte). Both are above the ridge point -- these GEMMs are compute-bound in BF16, confirming that full Tensor Core utilization after OPT-1 is achievable without hitting HBM bandwidth limits.",
-    "The dominant Triton fused kernel 'triton_poi_fused_add_addmm_mul_pow_tanh_view_5' (layer::duplicate::modules_* operators) achieves 76% occupancy and is already well-optimized by Inductor. This kernel represents GPT-2's GELU (tanh approximation) fused with LayerNorm and residual add. No further optimization is warranted on this kernel family.",
-    "12.6% of kernels (240 launches) are unattributed in the profile. These are Triton-compiled fused operators that escaped NVTX attribution. Their contribution is implicitly present but not individually visible. This does not affect the correctness of the top-3 bottleneck identifications since the attributed operators alone account for 70%+ of profiled time.",
-    "GPT-2 uses tied embeddings (wte.weight == lm_head.weight). BF16 cast is safe for both paths; see OPT-1 risks for details.",
-    "Expected combined speedup applying OPT-1 + OPT-2 + OPT-3 together: 3x-6x end-to-end wall-clock time reduction. Lower bound assumes conservative tile efficiency; upper bound assumes full Tensor Core saturation at autotuned optimal tile sizes."
+    "All ncu metric values from application-mode replay are 2-5x longer in absolute duration than wall-clock execution due to counter-collection overhead. Use duration values for relative operator comparison only, not for absolute latency estimation.",
+    "A100 SXM4 ridge point: 156 FLOP/byte for BF16 Tensor Core (312 TFLOPS / 2 TB/s). Post-BF16 promotion, aten::mm_0 shapes (e.g., [512, 768] x [768, 3072]) have arithmetic intensity ~200 FLOP/byte — above the ridge point, confirming compute-bound status will persist after dtype change. cuBLAS Tensor Core throughput is the new bottleneck, not memory.",
+    "12.6% unattributed kernels (240 kernels): dominant unattributed types are triton_per_fused_native_layer_norm_0 and triton_poi_fused__scaled_dot_product_efficient_attention_*. These represent layer norm and attention preprocessing costs not captured in the time_budget. Re-run with --correlation-pass to obtain accurate attribution and full wall time accounting.",
+    "GPT-2's combined QKV projection (c_attn: nn.Linear(768, 2304)) is already fused as a single 512x2304 GEMM. Standard QKV fusion (OPT pattern: wave_starvation on three separate mm nodes with shared input) does not apply here — the model architecture already implements this optimization.",
+    "The aten::_efficient_attention_forward_0 operator runs at only 6.30% achieved occupancy (waves_per_sm=1) with 168 registers/thread. This is a wave starvation issue driven by small batch size relative to the 108 SM A100. After BF16 promotion (OPT-1), the fmha_cutlassF_bf16 kernel variant uses fewer registers, which may allow more warps per SM, improving occupancy. If batch size can be increased, occupancy will improve proportionally.",
+    "aten::addmm_0 is classified 'well_optimized' by the triage with tensor_core_active_pct=0.248 — essentially 0%. This is a triage classification artifact: 0.248% Tensor Core activity on 456 SIMT kernels is negligible. The dominant kernel ampere_sgemm_128x32_nn is on the FP32 SIMT path. OPT-1 will fix this operator as well.",
+    "Dependency DAG: OPT-1 -> OPT-2 (BF16 dtype must be set before pre-transposing weights). OPT-3 is independent but most effective when applied after OPT-1 (autotune over BF16 Tensor Core kernels rather than FP32 SIMT kernels)."
   ]
 }

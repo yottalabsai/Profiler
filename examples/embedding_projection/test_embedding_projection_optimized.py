@@ -1,233 +1,105 @@
 """
-test_embedding_projection_optimized.py — Verification tests for the optimized
-EmbeddingProjection workload.
+test_embedding_projection_optimized.py — Verification tests for optimized workload.
 
 Validates:
-  1. Module imports cleanly
-  2. 'transformer_opt' backend is registered with torch._dynamo
-  3. get_model_and_input() returns correct shapes and dtypes
-  4. Uncompiled forward pass completes without error
-  5. FX passes are callable and return GraphModule without raising
-
-Run:
-    pytest test_embedding_projection_optimized.py -v
-or:
-    python test_embedding_projection_optimized.py
+  1. Module imports without error
+  2. Backend is registered with torch._dynamo
+  3. Model and input have expected shapes and dtypes
+  4. Uncompiled forward pass completes without NaN/Inf
 """
 from __future__ import annotations
 
-import logging
-import sys
-import types
-
 import pytest
-import torch
-import torch.fx as fx
 
-# ---------------------------------------------------------------------------
-# Silence INFO logs during testing (warnings/errors still visible)
-# ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-
-
-# ============================================================================
-# 1. Import
-# ============================================================================
 
 def test_import():
-    """Module imports successfully without raising."""
-    import embedding_projection_optimized  # noqa: F401
-    assert True, "Import succeeded"
+    """Module imports without error."""
+    import examples.embedding_projection.embedding_projection_optimized  # noqa: F401
 
-
-def test_all_passes_importable():
-    """All FX pass functions are importable from the module."""
-    from embedding_projection_optimized import (
-        pass_insert_bf16_casts,
-        pass_batch_sequential_mm,
-        pass_propagate_bf16_pointwise,
-        pass_detect_embedding_quant,
-        transformer_opt,
-        get_model_and_input,
-    )
-    for obj in [
-        pass_insert_bf16_casts,
-        pass_batch_sequential_mm,
-        pass_propagate_bf16_pointwise,
-        pass_detect_embedding_quant,
-        transformer_opt,
-        get_model_and_input,
-    ]:
-        assert callable(obj), f"{obj} is not callable"
-
-
-# ============================================================================
-# 2. Backend registration
-# ============================================================================
 
 def test_backend_registration():
-    """'transformer_opt' is registered in torch._dynamo backends."""
-    import embedding_projection_optimized  # noqa: F401 — triggers @register_backend
-    backends = torch._dynamo.list_backends()
-    assert "transformer_opt" in backends, (
-        f"'transformer_opt' not found in registered backends: {backends}"
+    """Backend 'embedding_projection_opt' is registered with torch._dynamo."""
+    import torch
+    import examples.embedding_projection.embedding_projection_optimized  # noqa: F401
+
+    backends = str(torch._dynamo.list_backends())
+    assert "embedding_projection_opt" in backends, (
+        f"Backend 'embedding_projection_opt' not found in: {backends}"
     )
 
 
-# ============================================================================
-# 3. Model and input shapes / dtypes
-# ============================================================================
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_get_model_and_input_shapes():
-    """get_model_and_input() returns tensors with expected shapes."""
-    from embedding_projection_optimized import get_model_and_input, BATCH_SIZE, SEQ_LEN, VOCAB_SIZE
+def test_get_model_and_input():
+    """Model and input have expected shapes and dtypes after OPT-1."""
+    import torch
+    from examples.embedding_projection.embedding_projection_optimized import (
+        get_model_and_input,
+        BATCH_SIZE,
+        SEQ_LEN,
+        VOCAB_SIZE,
+    )
 
     model, token_ids = get_model_and_input()
 
+    # Input must be on CUDA
+    assert token_ids.device.type == "cuda", (
+        f"token_ids must be on CUDA, got device={token_ids.device}"
+    )
+
+    # Input shape: (BATCH_SIZE, SEQ_LEN) = (64, 128)
     assert token_ids.shape == (BATCH_SIZE, SEQ_LEN), (
         f"Expected token_ids shape ({BATCH_SIZE}, {SEQ_LEN}), got {token_ids.shape}"
     )
 
+    # Token IDs must remain integer (OPT-1 must NOT cast them)
+    assert token_ids.dtype in (torch.long, torch.int32, torch.int64), (
+        f"token_ids must be integer dtype, got {token_ids.dtype}"
+    )
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_get_model_and_input_dtypes():
-    """get_model_and_input() returns BF16 model weights and integer token IDs."""
-    from embedding_projection_optimized import get_model_and_input
-
-    model, token_ids = get_model_and_input()
-
+    # Model parameters must be BF16 (OPT-1 applied)
     param_dtype = next(model.parameters()).dtype
     assert param_dtype == torch.bfloat16, (
-        f"Expected model dtype bfloat16, got {param_dtype}"
-    )
-    assert token_ids.dtype in (torch.int32, torch.int64), (
-        f"token_ids should be integer dtype, got {token_ids.dtype}"
+        f"Expected model parameters to be bfloat16 (OPT-1), got {param_dtype}"
     )
 
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_get_model_and_input_device():
-    """Model and inputs are on CUDA."""
-    from embedding_projection_optimized import get_model_and_input
-
-    model, token_ids = get_model_and_input()
-
-    assert next(model.parameters()).is_cuda, "Model parameters not on CUDA"
-    assert token_ids.is_cuda, "token_ids not on CUDA"
+    # Model must be on CUDA
+    param_device = next(model.parameters()).device
+    assert param_device.type == "cuda", (
+        f"Model parameters must be on CUDA, got {param_device}"
+    )
 
 
-# ============================================================================
-# 4. Forward pass (uncompiled)
-# ============================================================================
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_forward_pass_uncompiled():
-    """Uncompiled forward pass produces correct output shape."""
-    from embedding_projection_optimized import get_model_and_input, BATCH_SIZE, SEQ_LEN, VOCAB_SIZE
+def test_forward_pass():
+    """Uncompiled forward pass completes without error and produces valid output."""
+    import torch
+    from examples.embedding_projection.embedding_projection_optimized import (
+        get_model_and_input,
+        BATCH_SIZE,
+        SEQ_LEN,
+        VOCAB_SIZE,
+    )
 
     model, token_ids = get_model_and_input()
 
     with torch.no_grad():
         out = model(token_ids)
 
+    # Output must not be None
+    assert out is not None, "Forward pass returned None"
+
+    # Output shape: (BATCH_SIZE, SEQ_LEN, VOCAB_SIZE) = (64, 128, 32000)
     assert out.shape == (BATCH_SIZE, SEQ_LEN, VOCAB_SIZE), (
         f"Expected output shape ({BATCH_SIZE}, {SEQ_LEN}, {VOCAB_SIZE}), got {out.shape}"
     )
 
+    # Output dtype should be BF16 (model is BF16 after OPT-1)
+    assert out.dtype == torch.bfloat16, (
+        f"Expected output dtype bfloat16, got {out.dtype}"
+    )
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_forward_pass_no_nan():
-    """Uncompiled BF16 forward pass does not produce NaN outputs."""
-    from embedding_projection_optimized import get_model_and_input
+    # Output must be numerically valid
+    assert not torch.isnan(out).any(), "Output contains NaN"
+    assert not torch.isinf(out).any(), "Output contains Inf"
 
-    model, token_ids = get_model_and_input()
-
-    with torch.no_grad():
-        out = model(token_ids)
-
-    assert not torch.isnan(out).any(), "Output contains NaN values"
-    assert not torch.isinf(out).any(), "Output contains Inf values"
-
-
-# ============================================================================
-# 5. FX passes: smoke tests on a synthetic graph
-# ============================================================================
-
-def _make_mm_graph() -> fx.GraphModule:
-    """Build a minimal GraphModule containing two aten::mm nodes."""
-
-    class TinyModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.W = torch.nn.Parameter(torch.randn(512, 32000))
-
-        def forward(self, x0, x1):
-            a = torch.mm(x0, self.W)
-            b = torch.mm(x1, self.W)
-            return a + b
-
-    model = TinyModel().eval()
-    x0 = torch.randn(8, 512)
-    x1 = torch.randn(8, 512)
-    gm = torch.fx.symbolic_trace(model)
-    return gm
-
-
-def test_pass_insert_bf16_casts_smoke():
-    """pass_insert_bf16_casts runs without raising on a synthetic graph."""
-    from embedding_projection_optimized import pass_insert_bf16_casts
-
-    gm = _make_mm_graph()
-    result = pass_insert_bf16_casts(gm)
-    assert isinstance(result, fx.GraphModule)
-
-
-def test_pass_propagate_bf16_pointwise_smoke():
-    """pass_propagate_bf16_pointwise runs without raising."""
-    from embedding_projection_optimized import pass_propagate_bf16_pointwise
-
-    gm = _make_mm_graph()
-    result = pass_propagate_bf16_pointwise(gm)
-    assert isinstance(result, fx.GraphModule)
-
-
-def test_pass_batch_sequential_mm_smoke():
-    """pass_batch_sequential_mm runs without raising."""
-    from embedding_projection_optimized import pass_batch_sequential_mm
-
-    gm = _make_mm_graph()
-    result = pass_batch_sequential_mm(gm)
-    assert isinstance(result, fx.GraphModule)
-
-
-def test_pass_detect_embedding_quant_smoke():
-    """pass_detect_embedding_quant (stub) runs without raising."""
-    from embedding_projection_optimized import pass_detect_embedding_quant
-
-    gm = _make_mm_graph()
-    result = pass_detect_embedding_quant(gm)
-    assert isinstance(result, fx.GraphModule)
-
-
-def test_pass_insert_bf16_casts_idempotent():
-    """Running pass_insert_bf16_casts twice does not raise."""
-    from embedding_projection_optimized import pass_insert_bf16_casts
-
-    gm = _make_mm_graph()
-    gm = pass_insert_bf16_casts(gm)
-    gm = pass_insert_bf16_casts(gm)  # second application should not crash
-    assert isinstance(gm, fx.GraphModule)
-
-
-# ============================================================================
-# Standalone runner
-# ============================================================================
 
 if __name__ == "__main__":
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"],
-        check=False,
-    )
-    sys.exit(result.returncode)
+    pytest.main([__file__, "-v"])

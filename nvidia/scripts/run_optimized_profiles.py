@@ -45,7 +45,7 @@ EXAMPLES = [
     {
         "name": "conv_block",
         "model_name": "ConvBlock-Optimized",
-        "compile_backend": "convblock_opt",
+        "compile_backend": "conv_block_opt",
     },
     {
         "name": "mlp_activations",
@@ -53,19 +53,24 @@ EXAMPLES = [
         "compile_backend": "transformer_opt",
     },
     {
-        "name": "sdpa_attention",
-        "model_name": "SdpaAttention-Optimized",
-        "compile_backend": "transformer_opt",
-    },
-    {
         "name": "depthwise_separable_conv",
         "model_name": "DepthwiseSeparableConv-Optimized",
-        "compile_backend": "transformer_opt",
+        "compile_backend": "depthwise_sep_conv_opt",
     },
     {
         "name": "embedding_projection",
         "model_name": "EmbeddingProjection-Optimized",
         "compile_backend": "transformer_opt",
+    },
+    {
+        "name": "gpt2",
+        "model_name": "GPT2-Optimized",
+        "compile_backend": "gpt2_backend",
+    },
+    {
+        "name": "lstm_sequence_encoder",
+        "model_name": "LSTMSequenceEncoder-Optimized",
+        "compile_backend": "lstm_sequence_encoder_opt",
     },
 ]
 

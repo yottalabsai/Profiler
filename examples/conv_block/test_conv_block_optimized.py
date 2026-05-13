@@ -1,190 +1,195 @@
 """
-test_conv_block_optimized.py — Validation tests for ConvBlock optimized workload.
+test_conv_block_optimized.py — Verification tests for conv_block_optimized.py.
 
-Validates:
-  1. Module imports without error
-  2. conv_block_opt backend is registered with torch._dynamo
-  3. get_model_and_input() returns correct shapes, dtypes, and device
-  4. Uncompiled forward pass completes without NaN or Inf
+Tests:
+  1. Module imports without error.
+  2. Backend ``conv_block_opt`` is registered with torch._dynamo.
+  3. get_model_and_input() returns tensors with expected shapes and dtypes.
+  4. Uncompiled forward pass completes without NaN/Inf.
+  5. Output shape matches the baseline ConvBlock.
+  6. BN fold removes all BatchNorm2d modules from the model.
+  7. OPT-1/OPT-2: output is numerically close to baseline (BF16 atol=1e-1).
 
-Run with:
-    cd /home/ubuntu/Profiler/examples/conv_block
-    python -m pytest test_conv_block_optimized.py -v
-    # or directly:
-    python test_conv_block_optimized.py
+Run:
+    PYTHONPATH=/root/Profiler pytest examples/conv_block/test_conv_block_optimized.py -v
 """
 from __future__ import annotations
 
-import logging
-import sys
-import os
-
+import pytest
 import torch
 
-# Suppress INFO-level pass logging during tests for cleaner output
-logging.basicConfig(level=logging.WARNING)
 
-# Ensure the examples/conv_block directory is on the path so that
-# both conv_block and conv_block_optimized are importable by name.
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def _skip_if_no_cuda(fn):
-    """Decorator: skip test if CUDA is unavailable."""
-    import functools
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        if not torch.cuda.is_available():
-            print(f"  SKIP {fn.__name__}: no CUDA device available")
-            return
-        return fn(*args, **kwargs)
-
-    return wrapper
-
-
-# ── tests ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Test 1: import
+# ---------------------------------------------------------------------------
 
 def test_import():
-    """Module imports without error and exposes the required interface."""
-    import conv_block_optimized as mod  # noqa: F401
+    """Module imports without raising any error."""
+    import examples.conv_block.conv_block_optimized  # noqa: F401
 
-    assert hasattr(mod, "get_model_and_input"), (
-        "conv_block_optimized missing get_model_and_input"
-    )
-    assert hasattr(mod, "conv_block_opt"), (
-        "conv_block_optimized missing conv_block_opt backend function"
-    )
-    assert hasattr(mod, "pass_fold_bn_into_conv"), (
-        "conv_block_optimized missing pass_fold_bn_into_conv"
-    )
-    print("  PASS test_import")
 
+# ---------------------------------------------------------------------------
+# Test 2: backend registration
+# ---------------------------------------------------------------------------
 
 def test_backend_registration():
-    """conv_block_opt is registered with torch._dynamo after module import."""
-    # Import the module to trigger @register_backend decoration
-    import conv_block_optimized  # noqa: F401
+    """Backend 'conv_block_opt' is registered with torch._dynamo."""
+    import torch
+    import examples.conv_block.conv_block_optimized  # noqa: F401 — triggers @register_backend
 
-    backends = str(torch._dynamo.list_backends())
+    backends = torch._dynamo.list_backends()
     assert "conv_block_opt" in backends, (
         f"Backend 'conv_block_opt' not found in registered backends: {backends}"
     )
-    print(f"  PASS test_backend_registration  (conv_block_opt in backends)")
 
 
-@_skip_if_no_cuda
+# ---------------------------------------------------------------------------
+# Test 3: get_model_and_input shapes and dtypes
+# ---------------------------------------------------------------------------
+
 def test_get_model_and_input():
-    """get_model_and_input() returns model and tensor with expected shapes and dtypes."""
-    from conv_block_optimized import get_model_and_input
-
-    # These match the baseline constants imported by conv_block_optimized
-    EXPECTED_BATCH   = 16
-    EXPECTED_CHANNELS = 3
-    EXPECTED_HEIGHT  = 64
-    EXPECTED_WIDTH   = 64
+    """Model and input have expected shapes, dtypes, and memory formats."""
+    from examples.conv_block.conv_block_optimized import get_model_and_input
+    from examples.conv_block.conv_block import BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH
 
     model, x = get_model_and_input()
 
-    # Device checks
-    assert x.device.type == "cuda", (
-        f"Input must be on CUDA, got device: {x.device}"
-    )
-    assert next(model.parameters()).device.type == "cuda", (
-        "Model parameters must be on CUDA"
+    # Device
+    assert x.device.type == "cuda", f"Input must be on CUDA, got {x.device}"
+
+    # Shape: [B, C, H, W] for a 4D conv input
+    assert x.shape == torch.Size([BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH]), (
+        f"Expected input shape {[BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH]}, got {x.shape}"
     )
 
-    # Shape check — must match baseline BATCH_SIZE × IN_CHANNELS × HEIGHT × WIDTH
-    assert x.shape == (EXPECTED_BATCH, EXPECTED_CHANNELS, EXPECTED_HEIGHT, EXPECTED_WIDTH), (
-        f"Unexpected input shape: {x.shape}, "
-        f"expected ({EXPECTED_BATCH}, {EXPECTED_CHANNELS}, {EXPECTED_HEIGHT}, {EXPECTED_WIDTH})"
+    # OPT-1: channels_last
+    assert x.is_contiguous(memory_format=torch.channels_last), (
+        "Input tensor must be in channels_last memory format after OPT-1"
+    )
+    param0 = next(model.parameters())
+    assert param0.is_contiguous(memory_format=torch.channels_last), (
+        "Model parameters must be in channels_last memory format after OPT-1"
     )
 
-    # Dtype check — OPT-3 promotes model and input to BF16
+    # OPT-2: bfloat16
     assert x.dtype == torch.bfloat16, (
-        f"Expected BF16 input after OPT-3, got {x.dtype}"
+        f"Input dtype must be bfloat16 after OPT-2, got {x.dtype}"
     )
-    model_dtype = next(model.parameters()).dtype
-    assert model_dtype == torch.bfloat16, (
-        f"Expected BF16 model parameters after OPT-3, got {model_dtype}"
-    )
-
-    # Eval mode
-    assert not model.training, "Model must be in eval() mode"
-
-    # channels_last check — OPT-1 converts 4-D conv weights to NHWC
-    first_param = next(model.parameters())
-    if first_param.dim() == 4:
-        assert first_param.is_contiguous(memory_format=torch.channels_last), (
-            "Model conv weights should be channels_last after OPT-1"
-        )
-
-    print(
-        f"  PASS test_get_model_and_input  "
-        f"(x: {x.shape} {x.dtype} {'channels_last' if x.is_contiguous(memory_format=torch.channels_last) else 'contiguous'}, "
-        f"model dtype: {model_dtype})"
+    assert param0.dtype == torch.bfloat16, (
+        f"Model parameter dtype must be bfloat16 after OPT-2, got {param0.dtype}"
     )
 
 
-@_skip_if_no_cuda
+# ---------------------------------------------------------------------------
+# Test 4: uncompiled forward pass (correctness guard)
+# ---------------------------------------------------------------------------
+
 def test_forward_pass():
-    """Uncompiled forward pass completes without error and produces no NaN or Inf."""
-    from conv_block_optimized import get_model_and_input
-
-    EXPECTED_BATCH  = 16
-    EXPECTED_CLASSES = 10
+    """Uncompiled forward pass completes without error, NaN, or Inf."""
+    from examples.conv_block.conv_block_optimized import get_model_and_input
+    from examples.conv_block.conv_block import NUM_CLASSES, BATCH_SIZE
 
     model, x = get_model_and_input()
+    model.eval()
 
     with torch.no_grad():
         out = model(x)
 
     assert out is not None, "Forward pass returned None"
-    assert out.shape == (EXPECTED_BATCH, EXPECTED_CLASSES), (
-        f"Unexpected output shape: {out.shape}, "
-        f"expected ({EXPECTED_BATCH}, {EXPECTED_CLASSES})"
+    assert out.shape == torch.Size([BATCH_SIZE, NUM_CLASSES]), (
+        f"Expected output shape [{BATCH_SIZE}, {NUM_CLASSES}], got {out.shape}"
     )
-    assert not torch.isnan(out).any(), (
-        "Output contains NaN values — BN fold or BF16 cast may have broken numerics"
+    assert not torch.isnan(out).any(), "Output contains NaN values"
+    assert not torch.isinf(out).any(), "Output contains Inf values"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: output shape matches baseline
+# ---------------------------------------------------------------------------
+
+def test_output_shape_matches_baseline():
+    """Optimized model output shape matches the baseline ConvBlock."""
+    from examples.conv_block.conv_block import get_model_and_input as baseline_gmi
+    from examples.conv_block.conv_block_optimized import get_model_and_input as opt_gmi
+    from examples.conv_block.conv_block import NUM_CLASSES, BATCH_SIZE
+
+    base_model, base_x = baseline_gmi()
+    opt_model,  opt_x  = opt_gmi()
+
+    base_model.eval()
+    opt_model.eval()
+
+    with torch.no_grad():
+        base_out = base_model(base_x)
+        opt_out  = opt_model(opt_x)
+
+    assert base_out.shape == opt_out.shape, (
+        f"Shape mismatch: baseline {base_out.shape} vs. optimized {opt_out.shape}"
     )
-    assert not torch.isinf(out).any(), (
-        "Output contains Inf values — BN fold or BF16 cast may have caused overflow"
+
+
+# ---------------------------------------------------------------------------
+# Test 6: BN fold removes BatchNorm2d from model
+# ---------------------------------------------------------------------------
+
+def test_bn_fold_removes_batchnorm():
+    """After get_model_and_input(), the model must contain no BatchNorm2d modules."""
+    from examples.conv_block.conv_block_optimized import get_model_and_input
+    import torch.nn as nn
+
+    model, _ = get_model_and_input()
+
+    bn_modules = [
+        name for name, mod in model.named_modules()
+        if isinstance(mod, nn.BatchNorm2d)
+    ]
+    assert len(bn_modules) == 0, (
+        f"BN fold (OPT-3) failed: BatchNorm2d modules still present: {bn_modules}"
     )
 
-    print(
-        f"  PASS test_forward_pass  "
-        f"(output: {out.shape} {out.dtype}, "
-        f"max abs: {out.abs().max().item():.4f})"
+
+# ---------------------------------------------------------------------------
+# Test 7: numerical closeness with baseline (BF16 atol=1e-1)
+# ---------------------------------------------------------------------------
+
+def test_numerical_closeness_with_baseline():
+    """
+    Optimized output is numerically close to baseline output.
+
+    The same model weights and input are used for both runs: a deepcopy of the
+    baseline model has the optimizations applied, and the baseline input is cast
+    to BF16/channels_last.  BF16 introduces ~1e-2 relative error per op; 1e-1
+    absolute tolerance is generous enough to be robust across A100 variants.
+    """
+    import copy
+    from examples.conv_block.conv_block import get_model_and_input as baseline_gmi
+    from examples.conv_block.conv_block_optimized import fold_all_bn
+
+    base_model, base_x = baseline_gmi()
+    base_model.eval()
+
+    # Build optimized model from the same weights via deepcopy
+    opt_model = copy.deepcopy(base_model)
+    opt_model.eval()
+    fold_all_bn(opt_model)
+    opt_model = opt_model.to(memory_format=torch.channels_last).to(torch.bfloat16)
+
+    # Cast the same input to match
+    opt_x = base_x.to(memory_format=torch.channels_last).to(torch.bfloat16)
+
+    with torch.no_grad():
+        base_out = base_model(base_x).float()
+        opt_out  = opt_model(opt_x).float()
+
+    assert base_out.shape == opt_out.shape, (
+        f"Shape mismatch before allclose: {base_out.shape} vs. {opt_out.shape}"
     )
 
-
-# ── runner ────────────────────────────────────────────────────────────────────
-
-TESTS = [
-    test_import,
-    test_backend_registration,
-    test_get_model_and_input,
-    test_forward_pass,
-]
-
-if __name__ == "__main__":
-    passed = failed = 0
-    for test_fn in TESTS:
-        try:
-            print(f"Running {test_fn.__name__} ...")
-            test_fn()
-            passed += 1
-        except AssertionError as exc:
-            print(f"  FAIL {test_fn.__name__}: {exc}")
-            failed += 1
-        except Exception as exc:
-            print(f"  ERROR {test_fn.__name__}: {type(exc).__name__}: {exc}")
-            failed += 1
-
-    print(f"\n{'=' * 60}")
-    print(f"Results: {passed} passed, {failed} failed")
-    sys.exit(0 if failed == 0 else 1)
+    close = torch.allclose(base_out, opt_out, atol=1e-1, rtol=1e-2)
+    if not close:
+        max_diff = (base_out - opt_out).abs().max().item()
+        mean_diff = (base_out - opt_out).abs().mean().item()
+        pytest.fail(
+            f"Numerical mismatch between baseline and optimized model: "
+            f"max_diff={max_diff:.4f}, mean_diff={mean_diff:.6f} (atol=1e-1)"
+        )

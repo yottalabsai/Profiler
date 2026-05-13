@@ -100,8 +100,7 @@ Then derive every path from these resolved values:
 - `output_dir` — create with `mkdir -p {output_dir}/ncu_reps`
 - `ncu_reps_dir = {output_dir}/ncu_reps/` (where .ncu-rep files are written — persistent, not /tmp/)
 - `nsys_rep = {output_dir}/{workload_stem}.nsys-rep`
-- `sqlite_path = {output_dir}/{workload_stem}.sqlite`
-- `manifest_path = {output_dir}/{workload_stem}.manifest.json`
+- `manifest_path = $(mktemp /tmp/{workload_stem}_manifest.XXXXXX.json)` — generate this once with a Bash call before Stage 0c and reuse the same value for Stage 0d
 - `inductor_debug_dir = {output_dir}/{workload_stem}_inductor_debug/` (Inductor compiled artifacts for fusion attribution)
 - `profile_path` = `{workload_parent}/profile.json` (baseline) or `{workload_parent}/profile_optimized.json` (with `--profile-name=optimized`)
 
@@ -172,17 +171,6 @@ After running: verify `{nsys_rep}` exists and is non-zero size. If not, print di
 - Was nsys executable found?
 - Did the workload script import correctly? (Run `PYTHONPATH={project_root} python3 -c "import {workload_module}"`)
 - Were NVTX ranges emitted? (Check nsys output for "nvtx" in trace summary)
-
-## Stage 0b: nsys Export to SQLite
-
-```bash
-{nsys_executable} export \
-    --type=sqlite \
-    --output={sqlite_path} \
-    {nsys_rep}
-```
-
-Verify `{sqlite_path}` exists. If not: nsys version may not support SQLite export; try `--type=json` as fallback and report the limitation.
 
 ## Stage 0c: Manifest Build
 
@@ -298,6 +286,16 @@ else:
     print('OK: unattributed rate is low')
 "
 ```
+
+## Stage 0e: Manifest Cleanup
+
+After `profile.json` is verified successfully, delete the temp manifest — it is no longer needed:
+
+```bash
+rm -f {manifest_path}
+```
+
+On pipeline failure, leave the file in place for debugging. It will be cleaned up by the OS on reboot or can be removed manually.
 
 ## Configuration
 

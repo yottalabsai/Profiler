@@ -3,8 +3,8 @@ sdpa_attention.py — Multi-head self-attention via scaled_dot_product_attention
 
 Architecture: multi-head self-attention block using
 torch.nn.functional.scaled_dot_product_attention (SDPA), which dispatches to
-FlashAttention on Ampere/Hopper GPUs. Contrasts with the manually-decomposed
-attention in transformer_block.py.
+FlashAttention on Ampere/Hopper GPUs. Uses the fused FlashAttention kernel path rather than manually
+decomposed QK^T V softmax matmul operations.
 
     QKV projections (fused or 3× Linear)
     F.scaled_dot_product_attention  → FlashAttention kernel

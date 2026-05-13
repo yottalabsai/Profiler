@@ -7,7 +7,7 @@ End-to-end GPU kernel optimization for PyTorch models, driven entirely from your
 ## Quick Start
 
 ```
-/optimize examples/transformer_block/transformer_block.py
+/optimize examples/conv_block/conv_block.py
 ```
 
 That single command runs all 8 pipeline stages — nsys+ncu capture, bottleneck analysis, FX optimization proposals, backend code generation, 5-step validation, re-profiling, comparison, and a final report — and writes all artifacts to the working directory.
@@ -57,7 +57,7 @@ Rules:
 - Input tensor must be on CUDA
 - The pipeline does not read any other function from the file
 
-Six ready-to-run example workloads are in `examples/`: `transformer_block`, `conv_block`, `mlp_activations`, `sdpa_attention`, `depthwise_separable_conv`, `embedding_projection`.
+Seven ready-to-run example workloads are in `examples/`: `conv_block`, `mlp_activations`, `sdpa_attention`, `depthwise_separable_conv`, `embedding_projection`, `gpt2`, `lstm_sequence_encoder`.
 
 ---
 

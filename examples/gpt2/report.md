@@ -1,211 +1,113 @@
-# GPT-2 Small — Optimization Report
-
-**Model**: GPT-2 small (117M parameters), batch=4, seq_len=128  
-**Hardware**: NVIDIA A100-SXM4-80GB  
-**Date**: 2026-05-13  
-**Pipeline artifacts**: `/root/Profiler/`
-
----
-
-## Summary
-
-The baseline GPT-2 small workload ran at 104 ms per forward pass (38.4 samples/sec) under FP32 Inductor compilation on an A100-SXM4-80GB. Hardware profiling revealed that 77.4% of GPU time was spent in GEMM operators dispatching the FP32 SIMT kernel family (`ampere_sgemm_*`) with zero Tensor Core utilization — a direct consequence of running in the default FP32 dtype on hardware that delivers 16× higher throughput via BF16 Tensor Cores.
-
-Five optimizations were applied. Four took effect; one was a confirmed graceful no-op. The optimized workload runs at 41 ms per forward pass (96.7 samples/sec), a **2.52× overall speedup** and **151.7% throughput increase**, measured under identical profiling conditions (warmup=3, measure=10, batch=4, seq_len=128). The validated implementation is at `/root/Profiler/gpt2_optimized.py`; all 5/5 correctness tests pass.
-
-A residual performance ceiling of approximately **2.77×** is estimated if three remaining opportunities are addressed.
-
----
+# GPT-2 GPU Optimization Report
 
 ## Hardware Context
 
-| Property | Value |
-|----------|-------|
-| GPU | NVIDIA A100-SXM4-80GB |
-| Architecture | Ampere (sm_major=8) |
-| SM count | 108 |
-| FP32 SIMT peak | 19.5 TFLOPS |
-| TF32 Tensor Core peak | 156 TFLOPS |
-| BF16 Tensor Core peak | 312 TFLOPS |
-| HBM2e bandwidth | 2.0 TB/s |
-| BF16 ridge point | 156 FLOP/byte |
-
-The two dominant GEMM shapes in GPT-2 small are `[512, 3072] × [3072, 768]` (FFN down-projection, ~341 FLOP/byte) and `[512, 768] × [768, 768]` (attention output projection, ~256 FLOP/byte). Both sit above the BF16 ridge point — they are compute-bound in BF16 and full Tensor Core utilization is achievable.
+| Field | Value |
+|---|---|
+| GPU | NVIDIA A100-SXM4-80GB (108 SMs) |
+| Architecture | Ampere (sm80) |
+| Compile Mode | inductor (layer deduplication enabled) |
+| Batch Size | 4 |
+| Sequence Length | 128 |
+| Model | GPT-2 small — 12 transformer blocks, hidden=768, 12 heads, FFN=3072, 117M params |
+| Measurement | 3 warmup + 10 measurement iterations (ncu replay — relative timing only) |
 
 ---
 
-## Baseline Bottleneck Analysis
+## Operator Summary (Baseline)
 
-**Capture**: FP32, `torch.compile(backend='inductor')`, warmup=3, measure=10
+Baseline dtype: FP32. Total attributed wall time: 103,930,896 ns (ncu replay).
+Layer deduplication was active: 13 partitions detected, 3 unique signatures, 10 duplicates.
+ncu replayed unique partitions only (~12× replay speedup vs. full profiling).
 
-### Time budget
+| Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
+|---|---|---|---|---|
+| `aten::mm` | 51.93% | 53,966,937 | 336 | **tensor_core_idle** |
+| `aten::addmm` | 15.68% | 16,301,364 | 456 | well_optimized (agg.) ¹ |
+| `aten::_efficient_attention_forward` | 3.18% | 3,306,052 | 108 | **wave_starvation** |
+| Remaining (attributed) | 29.21% | 30,356,543 | 998 | mixed |
+| Unattributed | — | — | 240 | — |
 
-| Rank | Operator | Duration (ms) | % of Total | Bottleneck Class |
-|------|----------|---------------|------------|------------------|
-| 1 | `aten::mm` (336 kernels) | 53.991 | 51.88% | tensor_core_idle |
-| 2 | `aten::addmm` (456 kernels) | 16.301 | 15.67% | compute_bound (FP32 SIMT) |
-| 3 | `aten::_efficient_attention_forward` (108 kernels) | 3.313 | 3.18% | wave_starvation |
-| 4 | `aten::view` / fused elementwise (240 kernels) | 0.946 | 0.91% | well_optimized |
-| — | **Total attributed** | **104.059** | — | — |
+¹ `aten::addmm` aggregate TC% is 0.248% (a few fused Triton post-ops inflate it slightly), but the dominant cuBLAS kernel `ampere_sgemm_128x32_nn` runs FP32 SIMT with TC=0. Practically the same problem as `aten::mm`.
 
-Operators 1 and 2 together account for **67.55%** of total GPU time.
+**Top bottleneck: 67.61% of attributed time runs FP32 SIMT (`ampere_sgemm_*`) rather than Tensor Core HMMA.** On A100, the FP32 SIMT ceiling is 19.5 TFLOPS; the BF16 Tensor Core ceiling is 312 TFLOPS — a 16× theoretical headroom.
 
-### aten::mm / aten::addmm — tensor_core_idle
+---
 
-The dominant kernel across all 792 GEMM launches is `ampere_sgemm_32x32_sliced1x4_nn` (aten::mm) and `ampere_sgemm_128x32_nn` (aten::addmm). The `sgemm` prefix confirms FP32 SIMT dispatch; the absence of `xmma` in the kernel name confirms Tensor Cores are not in use.
+## Reading the Metrics
 
-| Counter | aten::mm | aten::addmm |
-|---------|----------|-------------|
-| `tensor_core_active_pct` | 0.0% | 0.193% (noise) |
-| `sm_throughput_pct` | 72.8% | 74.66% |
-| `achieved_occupancy` | 26.82% | 31.40% |
-| `memory_throughput_pct` | 3.18% | 4.96% |
+**`tensor_core_active_pct = 0.0` (not null):** The GEMM kernel ran but did not use Tensor Core hardware. This always means the kernel took the FP32 SIMT path. Fixing this is the highest-ROI optimization for any GEMM-heavy model.
 
-### aten::_efficient_attention_forward — wave_starvation
+**`tensor_core_active_pct = null`:** Normal for non-GEMM kernels (elementwise, reductions). Not a bottleneck.
 
-The FP32 cutlass kernel (`fmha_cutlassF_f32_aligned_64x64_rf_sm80`) uses 168 registers per thread, limiting active warps to ~12 of 64 theoretical maximum (6.24% occupancy) and forcing 24.47 MB of register state to spill to DRAM per measurement iteration.
+**`local_memory_spills`:** Registers spilled to DRAM because the kernel exceeded the 255-register-per-thread hardware limit. At 10–100× slower than register access, even small spill counts degrade throughput significantly. The FP32 fmha kernel used 168 registers/thread and spilled 24.5 MB per replay.
 
-| Counter | Value |
-|---------|-------|
-| `achieved_occupancy` | 6.24% |
-| `waves_per_sm` | 0.889 |
-| `sm_throughput_pct` | 19.68% |
-| `registers_per_thread` | 168 |
-| `local_memory_spills` | 24,468,480 bytes |
+**Waves/SM:** `ceil(grid_x × grid_y × grid_z / sm_count)`. For attention at B=4, seq=128, 12 heads: grid = `[2, 12, 4]` = 96 CTAs on 108 SMs = 0.89 waves. Less than 1 wave means most SMs are idle for the entire kernel.
+
+**ncu replay timing note:** All duration values are from ncu's application-mode replay, which runs the workload 8 times (once per counter group) and is 2–5× slower than real execution. Use for relative comparison only — absolute ns values do not represent wall-clock latency.
 
 ---
 
 ## Optimizations Applied
 
-Five optimizations were proposed and validated. Four took effect.
+| ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
+|---|---|---|---|---|---|
+| OPT-1 | dtype_promotion (BF16) | `aten::mm`, `aten::addmm`, `aten::_efficient_attention_forward` | `tensor_core_active_pct = 0.0` on mm; 168 reg/thread + 24.5 MB spills on attention | high | **APPLIED** |
+| OPT-2 | pretranspose_weights | `aten::mm`, `aten::addmm` | Secondary to OPT-1 | medium | NOT APPLIED ² |
+| OPT-3 | algorithm_selection (max-autotune) | all GEMM ops | SM throughput 72.8% — sub-optimal tile selection | medium | **APPLIED** |
 
-### OPT-1: BF16 Model Cast (APPLIED)
-
-`model.to(torch.bfloat16)` applied before `torch.compile()`. Forces cuBLAS to select the HMMA Tensor Core dispatch path instead of the SIMT `sgemm` path. BF16 was chosen over FP16 for its 8-bit exponent (numerically safe for GPT-2 activation magnitudes without loss scaling).
-
-### OPT-2: torch.compile max-autotune (APPLIED)
-
-`torch.compile(model, backend='gpt2_backend', mode='max-autotune', fullgraph=True)`. Moves tile shapes from the heuristic default (32×32) to large BF16-optimized configs (128×128), enabling better L2 and shared-memory pipeline utilization. Epilogue fusion (`relu_f2f` suffix in kernel name) eliminates a separate elementwise kernel pass.
-
-First-compile overhead: 60–180 seconds. Subsequent runs use the Inductor FX graph cache (`fx_graph_cache=True`).
-
-### OPT-3: FlashAttention BF16 Dispatch (APPLIED — partial)
-
-`torch.backends.cuda.enable_flash_sdp(True)` + `enable_math_sdp(False)` at module load time. With BF16 inputs, the dispatch landed on `fmha_cutlassF_bf16_aligned_64x64_rf_sm80` (xformers BF16 path). Register pressure dropped 168 → 128 registers/thread, fully eliminating the 24.47 MB spill. Occupancy remained at 6.2% rather than the predicted 30–40% because the xformers BF16 kernel does not match native FlashAttention-2's register efficiency.
-
-### OPT-4: QKV Projection Fusion FX Pass (NOT APPLIED — graceful no-op)
-
-The `_pass_fuse_qkv` FX pass scanned all 13 Inductor graph partitions for groups of three `aten.mm` nodes sharing a common input. Zero matching groups were found. HuggingFace GPT-2 already performs QKV fusion via `Conv1D(3 * n_embd, n_embd)` — the pattern is absent in the graph. **No speedup and no regression.**
-
-### OPT-5: TF32 Global Flag (APPLIED — defense-in-depth)
-
-`torch.backends.cuda.matmul.allow_tf32 = True` and `torch.backends.cudnn.allow_tf32 = True`. No incremental effect with OPT-1 routing all GEMMs to the BF16 path. Remains active as a safety net for any residual FP32 subgraphs.
-
-### Numerical correctness
-
-| Statistic | Value |
-|-----------|-------|
-| Mean absolute difference vs FP32 | 0.0061 |
-| p99 absolute difference | 0.031 |
-| Max absolute difference | 2.57 (sparse outlier; output magnitudes reach ~209) |
-
-All 5/5 pytest tests pass.
+² OPT-2 ran pre-Inductor lowering in the dedup path, where `aten.t(get_attr)` nodes do not yet exist. The pass degraded gracefully (warning logged, no graph mutation). See Remaining Opportunities.
 
 ---
 
-## Measured Results
+## Results: Before vs. After
 
-**Capture**: BF16, `torch.compile(mode='max-autotune', fullgraph=True, backend='gpt2_backend')`, warmup=3, measure=10. Batch size identical (B=4) — no normalization required.
+Same batch size (B=4) — no normalization required.
 
-### Overall speedup
+### Per-kernel evidence (representative shapes)
 
-| Metric | Baseline | Optimized | Change |
-|--------|----------|-----------|--------|
-| Total attributed time | 104.059 ms | 41.355 ms | −60.3% |
-| Overall speedup | — | — | **2.52×** |
-| Throughput (samples/sec, B=4) | 38.4 | 96.7 | +151.7% |
+| Operation | Shape | Baseline kernel | Baseline (ns) | Optimized kernel | Optimized (ns) | Speedup |
+|---|---|---|---|---|---|---|
+| FFN up-projection | [512×768] × [768×3072] | `ampere_sgemm_32x128_nn` | 197,952 | `ampere_bf16_s16816gemm_bf16_128x128_ldg8_relu_f2f_stages_64x3_nn` | 21,120 | **9.4×** |
+| Attention output projection | [512×768] × [768×768] | `ampere_sgemm_64x32_sliced1x4_nn` | 54,848 | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_relu_f2f_stages_64x4_nn` | 12,769 | **4.3×** |
+| Flash attention | B=4, H=12, S=128 | `fmha_cutlassF_f32_aligned_64x64_rf_sm80` | 30,720 | `fmha_cutlassF_bf16_aligned_64x64_rf_sm80` | ~17,200 | **1.79×** |
 
-### Per-operator breakdown
+### Aggregate operator speedup (attributed totals)
 
-| Operator Group | Baseline (ms) | Baseline % | Optimized (ms) | Speedup | Resolved? |
-|----------------|---------------|------------|-----------------|---------|-----------|
-| GEMM combined (aten::mm + aten::addmm) | 70.292 | 67.55% | 9.100 | **7.72×** | YES — TC active 0% → 55–75% |
-| aten::_efficient_attention_forward | 3.313 | 3.18% | 1.800 | **1.84×** | PARTIAL — spills gone, occupancy 6.2% |
-| aten::view / fused elementwise | 0.946 | 0.91% | ~0.850 | ~1.11× | N/A — well-optimized in both |
-| Per-layer FFN GEMMs [512,3072]×[3072,768] | 0.210 each | 0.20% each | ~0.021 each | ~10× | YES |
-
-### Hardware counter evidence
-
-**GEMM operators**
-
-| Counter | Baseline | Optimized | Verdict |
-|---------|----------|-----------|---------|
-| Dominant kernel | `ampere_sgemm_32x32_sliced1x4_nn` | `ampere_bf16_s16816gemm_bf16_128x128_ldg8_relu_f2f_stages_64x3_nn` | BF16 TC path confirmed |
-| `tensor_core_active_pct` | 0.0% | 55–75% | Tensor Cores fully engaged |
-| `sm_throughput_pct` | 72.8–74.7% | 31–44% | 7.7× faster at lower absolute time |
-| `achieved_occupancy` | 26.8–31.4% | 6.2–6.3% | Lower: large BF16 tiles use more regs/thread |
-| `registers_per_thread` | 57 | 150–238 | HMMA encoding; no spills |
-| `local_memory_spills` | 0 bytes | 0 bytes | No regression |
-| `DRAM throughput_pct` | 3.2–5.0% | 9.9–12.8% | BF16 halved weight traffic |
-
-**Attention operator**
-
-| Counter | Baseline | Optimized | Verdict |
-|---------|----------|-----------|---------|
-| Dominant kernel | `fmha_cutlassF_f32_aligned_64x64_rf_sm80` | `fmha_cutlassF_bf16_aligned_64x64_rf_sm80` | xformers BF16 dispatch (not native flash_fwd) |
-| `registers_per_thread` | 168 | 128 | 24% reduction |
-| `local_memory_spills` | 24,468,480 bytes | 0 bytes | Fully eliminated |
-| `achieved_occupancy` | 6.24% | 6.20% | Still wave-starved (waves_per_sm ≈ 0.89) |
-| `sm_throughput_pct` | 19.68% | 13.86% | Not SM-bound in either case |
-| Per-call duration | ~30,678 ns | ~17,024 ns | 1.80× per call |
-
-### Pass attribution
-
-| Pass | Status | Attribution |
-|------|--------|-------------|
-| pass_bf16_cast (OPT-1) | APPLIED | Primary driver — ~1.9× of overall 2.52× |
-| pass_max_autotune (OPT-2) | APPLIED | Secondary GEMM gain — ~1.3× incremental |
-| pass_sdpa_flash (OPT-3) | APPLIED (partial) | Attention 1.84×; spills eliminated; occupancy gap remains |
-| _pass_fuse_qkv (OPT-4) | NOT APPLIED (graceful) | HF already pre-fuses Q/K/V; zero regression |
-| pass_tf32 (OPT-5) | APPLIED | Defense-in-depth; no incremental effect |
+| Operator | Baseline (ns) | Optimized est. (ns) | Speedup | Bottleneck resolved? |
+|---|---|---|---|---|
+| `aten::mm` + `aten::addmm` | 70,268,301 | ~9–12 M | **6–8×** | YES — Tensor Cores active |
+| `aten::_efficient_attention_forward` | 3,306,052 | ~1,850,000 | **1.79×** | PARTIAL — wave starvation remains |
+| Remaining | 30,356,543 | ~25 M (est.) | ~1.2× | minor |
+| **Total** | **103,930,896** | **~35–42 M** | **~2.5–3.0×** | |
 
 ---
 
-## Residual Opportunities
+## What Drove Each Speedup
 
-### 1. Native PyTorch FlashAttention-2 dispatch (medium priority)
+**OPT-1: BF16 dtype promotion (+5–8× on GEMM, +1.79× on attention)**
 
-OPT-3 dispatched to xformers BF16 (`fmha_cutlassF_bf16`, 128 regs/thread) rather than native `flash_fwd_kernel` (~64 regs/thread, ~35% occupancy on A100). The predicted occupancy improvement was not realized.
+Converting the model to BF16 rerouted every GEMM from the FP32 SIMT path to the BF16 HMMA (Tensor Core) path. On A100's Ampere architecture, BF16 GEMMs use the `s16816` HMMA instruction (16×8×16 tile), which throughputs at 312 TFLOPS vs. 19.5 TFLOPS for FP32 SIMT — a 16× peak gap. The measured per-kernel speedups (4.3× for smaller GEMMs, 9.4× for the FFN up-projection) reflect both the faster instruction and better tile matching via max-autotune.
 
-**Fix**: Replace the xformers call with `F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)` in the attention module. Verify dispatch with `torch.backends.cuda.flash_sdp_enabled()`.
+For the attention kernel: the FP32 variant (`fmha_cutlassF_f32_aligned_64x64_rf_sm80`) required 168 registers/thread and spilled 24,468,480 bytes to local DRAM per replay pass. The BF16 variant (`fmha_cutlassF_bf16_aligned_64x64_rf_sm80`) reduced register pressure to 128/thread and eliminated all spills (0 bytes). This produced a 1.79× per-kernel speedup despite the persistent wave starvation (occupancy improved only marginally: 6.30% → 6.34%).
 
-**Estimated gain**: ~1% end-to-end → **~2.59×** total.
+**OPT-3: max-autotune tile selection (+5–10% on top of OPT-1)**
 
-### 2. Small attention-projection GEMMs — wave starvation (low priority)
+With `config_patches={'max_autotune': True}`, Inductor benchmarked available CUTLASS tile configurations for GPT-2's matrix shapes. For the FFN up-projection ([512, 768] × [768, 3072]), the benchmark selected `128x128_ldg8_relu_f2f_stages_64x3` — a larger tile with 3-stage pipelining vs. the default heuristic-selected `32x128` tile. Inductor also fused `addmm + native_layer_norm` into a single Triton Template Matmul kernel (`triton_tem_fused_addmm_native_layer_norm_view_1`, TC=52.1%), eliminating a separate layer norm kernel launch per transformer block.
 
-Output-projection GEMMs `[512,768]×[768,768]` (12 per pass): grid=[6,8,1] = 48 blocks / 108 SMs → 0.44 waves. `sm_throughput_pct=17.4%`, `tensor_core_active_pct=46%`.
+---
 
-**Fix**: Stream-K GEMM tiling, batched `torch.bmm`, or CUDA Graphs to amortize launch latency.
+## Remaining Opportunities
 
-**Estimated gain**: ~1.5% end-to-end → **~2.63×** total.
+| ID | Type | Target | Reason Not Applied | Projected Gain |
+|---|---|---|---|---|
+| OPT-2 | pretranspose_weights | `aten::mm`, `aten::addmm` | Pass runs pre-Inductor lowering in dedup path; `aten.t(get_attr)` nodes don't exist yet | ~2–4% |
+| — | Batch size scaling | `aten::_efficient_attention_forward` | wave_starvation at B=4 (0.89 waves/SM); B=16 gives 3.5 waves | ~50% on attention |
+| — | Flash Attention v2 | `aten::_efficient_attention_forward` | Current cutlass fmha has 6.34% occupancy; FA2 improves occupancy via online softmax | ~1.3× on attention |
 
-### 3. Triton elementwise kernels — DRAM underutilization (low priority)
+**Fixing OPT-2:** Move `_pass_pretranspose` to run after Inductor lowers the graph, or pre-transpose `nn.Linear.weight` buffers at model-load time before `torch.compile` traces them (same approach as OPT-1 — modify `get_model_and_input()`). Estimated additional gain: 2–4% of total latency.
 
-GELU + LayerNorm fused kernels: `dram_throughput_pct=13–16%`, `sm_throughput_pct=22–36%`.
-
-**Fix**: `F.gelu(x, approximate='tanh')` for hardware GELU; verify `max-autotune` persistent-reduction for LayerNorm.
-
-**Estimated gain**: ~2–3% end-to-end → **~2.70×** total.
-
-### Combined ceiling
-
-| Scenario | Total Time | Speedup |
-|----------|------------|---------|
-| Current optimized | 41.355 ms | 2.52× |
-| + Native FlashAttention-2 | ~40.2 ms | ~2.59× |
-| + Projection wave-starvation fix | ~39.6 ms | ~2.63× |
-| + GELU / LayerNorm tuning | ~38.5 ms | ~2.70× |
-| **All three combined** | **~37.5 ms** | **~2.77×** |
+**Attention wave starvation** is structural: at B=4, seq=128, 12 heads, the attention grid has only 96 CTAs vs. 108 SMs. The fix requires either larger batch (serving decision) or a kernel that processes multiple heads per SM (Flash Attention v2 design).
 
 ---
 
@@ -214,31 +116,48 @@ GELU + LayerNorm fused kernels: `dram_throughput_pct=13–16%`, `sm_throughput_p
 ```bash
 cd /root/Profiler
 
-# Run the optimized workload (first run triggers max-autotune, ~60-180 s)
-python gpt2_optimized.py
+# 1. Capture baseline profile (with layer deduplication)
+PYTHONPATH=/root/Profiler python nvidia/scripts/run_workload.py \
+    --workload examples/gpt2/gpt2.py \
+    --warmup-iters 3 --measure-iters 10 \
+    --correlation-pass \
+    --output-prefix examples/gpt2/profiler_output/gpt2 \
+    --inductor-debug-dir examples/gpt2/profiler_output/gpt2_inductor_debug \
+    --layer-deduplicate
 
-# Correctness tests (5/5 pass)
-pytest test_gpt2_optimized.py -v
+# 2. Analyze bottlenecks
+# Output: examples/gpt2/triage.json
 
-# Profile the optimized workload (do NOT pass --compile-backend; model is self-compiled)
-python nvidia/scripts/run_workload.py gpt2_optimized.py \
-    --warmup-iters 3 --measure-iters 10
+# 3. Run optimized workload (smoke test)
+PYTHONPATH=/root/Profiler python nvidia/scripts/run_workload.py \
+    --workload examples/gpt2/gpt2_optimized.py \
+    --compile-backend gpt2_opt \
+    --warmup-iters 1 --measure-iters 1
+
+# 4. Run test suite
+cd examples/gpt2 && PYTHONPATH=/root/Profiler python -m pytest test_gpt2_optimized.py -v
+
+# 5. Re-profile optimized workload
+PYTHONPATH=/root/Profiler python nvidia/scripts/run_workload.py \
+    --workload examples/gpt2/gpt2_optimized.py \
+    --compile-backend gpt2_opt \
+    --warmup-iters 3 --measure-iters 10 \
+    --correlation-pass \
+    --output-prefix examples/gpt2/profiler_output/gpt2_optimized \
+    --inductor-debug-dir examples/gpt2/profiler_output/gpt2_optimized_inductor_debug
 ```
 
-> **Note**: `gpt2_optimized.py` calls `torch.compile()` internally and registers `gpt2_backend`. Passing `--compile-backend` to `run_workload.py` double-wraps the model and triggers an `InternalTorchDynamoError` (PyTorch 2.11 regression in `produce_guards_verbose`).
-
----
-
-## Artifact Index
+**Key files:**
 
 | File | Description |
-|------|-------------|
-| `profile.json` | Baseline profile (FP32, inductor) |
-| `profile_optimized.json` | Optimized profile (BF16, max-autotune) |
-| `triage.json` | Bottleneck analysis with hardware counter evidence |
-| `optimizations.json` | 5 optimization proposals |
-| `validation_report.json` | 5/5 steps passed; numerical correctness data |
-| `comparison.md` | Full per-operator before/after comparison |
-| `gpt2_optimized.py` | Optimized workload implementation |
-| `test_gpt2_optimized.py` | Correctness test suite |
-| `OPTIMIZED_WORKLOAD.md` | Optimization documentation |
+|---|---|
+| `examples/gpt2/gpt2.py` | Baseline workload (FP32, standard inductor) |
+| `examples/gpt2/gpt2_optimized.py` | Optimized workload (`gpt2_opt` backend, BF16, max-autotune) |
+| `examples/gpt2/profile.json` | Baseline ncu profile (103.9 ms attributed, 259 operators) |
+| `examples/gpt2/profile_optimized.json` | Optimized ncu profile (174 operators) |
+| `examples/gpt2/triage.json` | Bottleneck classification (top: tensor_core_idle on aten::mm) |
+| `examples/gpt2/optimizations.json` | Ranked optimization proposals with hardware evidence |
+| `examples/gpt2/validation_report.json` | 5-step validation results (all pass) |
+| `examples/gpt2/comparison.md` | Detailed before/after hardware counter comparison |
+| `examples/gpt2/profiler_output/ncu_reps/all_kernels.ncu-rep` | Baseline ncu report (224 MB) |
+| `examples/gpt2/profiler_output/ncu_reps_optimized/all_kernels.ncu-rep` | Optimized ncu report (257 MB) |

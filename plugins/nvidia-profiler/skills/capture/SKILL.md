@@ -69,13 +69,6 @@ PYTHONPATH={project_root} nsys profile --trace=cuda,nvtx --output=profiler_outpu
 
 Output: `profiler_output/{stem}.nsys-rep`
 
-### Stage 0b: SQLite Export
-Exports the binary nsys report to SQLite for programmatic parsing.
-
-```bash
-nsys export --type=sqlite --output=profiler_output/{stem}.sqlite profiler_output/{stem}.nsys-rep
-```
-
 ### Stage 0c: Manifest Build
 Parses the SQLite database and joins CUDA kernel launches to NVTX operator ranges. Auto-detects the GPU device name, loads the correlation map from Stage 0a-pre for HIGH-confidence attribution, and applies the Inductor fusion map to attribute Triton fused kernels that bypass torch.profiler correlation.
 

@@ -276,6 +276,7 @@ class KernelProfileOrchestrator:
             ncu_executable=self.config.ncu_executable,
             use_sudo=self.config.ncu_sudo,
             extra_env=self._ncu_env(),
+            extra_ncu_args=["--app-replay-match", "name", "--app-replay-mode", "relaxed", "--target-processes", "application-only"],
         )
         run_kernel_profile(ncu_config)
 

@@ -356,12 +356,41 @@ def main() -> None:
                 flush=True,
             )
         print(f"[run_workload] Compiling with custom backend '{args.compile_backend}'...", flush=True)
-        _compiled = torch.compile(original_model, backend=args.compile_backend)
-        with torch.no_grad():
-            _compiled(x)
-        torch.cuda.synchronize()
+        # Wrap the registered backend to capture the compiled callable so we can
+        # call it directly (bypassing Dynamo) for warmup and NVTX capture.
+        # This mirrors the built-in dedup path which uses _state['run_fn'].
+        _custom_state: dict = {}
+        _orig_backend_fn = torch._dynamo.lookup_backend(args.compile_backend)
+        def _capturing_backend(gm: fx.GraphModule, example_inputs: list):
+            compiled_fn = _orig_backend_fn(gm, example_inputs)
+            _custom_state['compiled_fn'] = compiled_fn
+            _custom_state['example_inputs'] = example_inputs
+            return compiled_fn
+
+        _compiled = torch.compile(original_model, backend=_capturing_backend)
+        try:
+            with torch.no_grad():
+                _compiled(x)
+            torch.cuda.synchronize()
+        except Exception as _dynamo_err:
+            # torch 2.11 raises InternalTorchDynamoError during guard finalisation
+            # after a dedup-aware custom backend succeeds (same as built-in dedup path).
+            # Suppress only if the backend completed OK (i.e. compiled_fn was captured).
+            from torch._dynamo.exc import InternalTorchDynamoError
+            if not isinstance(_dynamo_err, InternalTorchDynamoError) or 'compiled_fn' not in _custom_state:
+                raise
+            print(
+                f"[run_workload] WARNING: dynamo guard error suppressed "
+                f"(backend completed OK): {type(_dynamo_err).__name__}",
+                flush=True,
+            )
         print("[run_workload] Compilation complete.", flush=True)
-        run_fn = lambda: _compiled(x)
+        # Use compiled_fn directly for warmup/capture (bypasses Dynamo re-tracing).
+        if 'compiled_fn' in _custom_state:
+            _cf = _custom_state['compiled_fn']
+            _ei = _custom_state['example_inputs']; run_fn = lambda: _cf(*_ei)
+        else:
+            run_fn = lambda: _compiled(x)
     else:
         passes = _load_fx_passes(args.fx_pass_module) if args.fx_pass_module else []
         dedup_backend, _state = _make_dedup_backend(passes, args.output_prefix)

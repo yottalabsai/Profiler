@@ -285,7 +285,7 @@ def test_forward_pass():
 
 ## Documentation: OPTIMIZED_WORKLOAD.md
 
-Include these sections (mirror `examples/transformer_block/optimized_workload.md`):
+Include these sections (mirror `examples/conv_block/OPTIMIZED_WORKLOAD.md`):
 1. **Overview** — which optimizations are implemented and why
 2. **Quick Start** — exact copy-paste commands to profile the optimized workload
 3. **Optimizations Table** — one row per optimization with target ops and expected impact

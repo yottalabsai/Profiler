@@ -2,7 +2,7 @@
 run_all_profiles.py — Generate profile.json for every example workload.
 
 Runs the full two-phase pipeline (nsys capture → ncu replay) for each
-workload in scripts/workloads/, writing results to runs/<name>/:
+workload in examples/<name>/<name>.py, writing results to runs/<name>/:
     runs/<name>/<name>.nsys-rep
     runs/<name>/<name>.manifest.json
     runs/<name>/<name>_profile.json
@@ -38,15 +38,16 @@ from nvidia.operator_profiler.schema.manifest import CaptureManifestMetadata
 
 log = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).parent.parent.resolve()
+REPO_ROOT = Path(__file__).parent.parent.parent.resolve()
 
 WORKLOADS = [
-    "transformer_block",
     "conv_block",
     "mlp_activations",
     "sdpa_attention",
     "depthwise_separable_conv",
     "embedding_projection",
+    "gpt2",
+    "lstm_sequence_encoder",
 ]
 
 
@@ -60,7 +61,7 @@ def profile_one(
     ncu_sudo: bool,
 ) -> Path:
     """Run the full pipeline for a single workload. Returns path to profile.json."""
-    script = REPO_ROOT / "scripts" / "workloads" / f"{name}.py"
+    script = REPO_ROOT / "examples" / name / f"{name}.py"
     out_dir = REPO_ROOT / "runs" / name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,7 +72,7 @@ def profile_one(
     log.info("Workload: %s", name)
     log.info("=" * 60)
 
-    run_workload = REPO_ROOT / "scripts" / "run_workload.py"
+    run_workload = REPO_ROOT / "nvidia" / "scripts" / "run_workload.py"
 
     # ------------------------------------------------------------------ #
     # Phase 1 — nsys capture                                               #

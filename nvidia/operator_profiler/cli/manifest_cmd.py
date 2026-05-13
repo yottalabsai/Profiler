@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,15 +95,16 @@ def _run(args) -> None:
         log.info("Loaded inductor fusion map: %d entries from %s",
                  len(inductor_fusion_map), args.inductor_fusion_dir)
 
-    builder = ManifestBuilder(
-        nsys_rep_path=nsys_rep,
-        metadata=meta,
-        sqlite_cache_dir=nsys_rep.parent,
-        correlation_map=correlation_map,
-        inductor_fusion_map=inductor_fusion_map,
-        nsys_executable=args.nsys_executable,
-    )
-    manifest = builder.build()
+    with tempfile.TemporaryDirectory(prefix="profiler_sqlite_") as _tmp:
+        builder = ManifestBuilder(
+            nsys_rep_path=nsys_rep,
+            metadata=meta,
+            sqlite_cache_dir=_tmp,
+            correlation_map=correlation_map,
+            inductor_fusion_map=inductor_fusion_map,
+            nsys_executable=args.nsys_executable,
+        )
+        manifest = builder.build()
 
     output_path.write_text(manifest.model_dump_json(indent=2))
     log.info("Manifest written → %s (%d kernels)", output_path, len(manifest.kernels))

@@ -34,9 +34,9 @@ Where:
 - `{file_dir}` = directory containing the file being validated
 - `{module_name}` = filename stem (strip `.py`)
 
-Example for `examples/transformer_block/transformer_optimized.py` run from `/home/ubuntu/Profiler`:
+Example for `examples/conv_block/conv_block_optimized.py` run from `/root/Profiler`:
 ```bash
-python -c "import sys; sys.path.insert(0, '/home/ubuntu/Profiler'); sys.path.insert(0, '/home/ubuntu/Profiler/examples/transformer_block'); import transformer_optimized"
+python -c "import sys; sys.path.insert(0, '/root/Profiler'); sys.path.insert(0, '/root/Profiler/examples/conv_block'); import conv_block_optimized"
 ```
 Catches: missing imports, wrong `compile_fx` import path, circular imports, missing PYTHONPATH for the `nvidia` package.
 

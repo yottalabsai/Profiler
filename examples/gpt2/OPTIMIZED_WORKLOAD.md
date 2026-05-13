@@ -2,19 +2,18 @@
 
 ## Overview
 
-This document describes the optimizations implemented in `gpt2_optimized.py` for the GPT-2 small (117M) workload. All optimizations are derived from profiling feedback in `optimizations.json`, which identified that 67.55% of wall-clock time was consumed by GEMM operations (`aten::mm`, `aten::addmm`) running on the FP32 SIMT path with zero Tensor Core utilization.
+This workload applies three GPU-level optimizations to GPT-2 small (117M parameters,
+12 transformer decoder blocks, hidden=768, heads=12, ffn_dim=3072).
 
-Five optimizations are implemented in dependency order:
+The baseline profile reveals that 67.6% of total wall time is spent in FP32 SIMT GEMM
+kernels (`ampere_sgemm_*`) with zero Tensor Core activity. All three optimizations
+target this class of inefficiency:
 
-| ID | Name | Where Applied | Confidence |
-|----|------|--------------|------------|
-| OPT-5 | TF32 global flags | Module load time | HIGH |
-| OPT-1 | BF16 model cast | `get_model_and_input()` | HIGH |
-| OPT-3 | BF16 SDPA dispatch | Module load time + cascades from OPT-1 | HIGH |
-| OPT-4 | QKV fusion FX pass | `gpt2_backend` (FX pass) | MEDIUM |
-| OPT-2 | max-autotune compile | `get_model_and_input()` | HIGH |
-
-Expected combined speedup: **3x–6x** end-to-end wall-clock vs FP32 baseline.
+| ID | Type | Location | Confidence | Expected Impact |
+|----|------|----------|-----------|----------------|
+| OPT-1 | BF16 dtype promotion | `get_model_and_input()` | High | ~50-60% total latency reduction |
+| OPT-2 | Pre-transposed weight buffers | FX pass (manual per-rep) | Medium | ~3-8% additional reduction |
+| OPT-3 | max-autotune GEMM tile selection | `compile_fx` options | Medium | ~5-15% additional reduction on GEMM ops |
 
 ---
 
@@ -23,179 +22,245 @@ Expected combined speedup: **3x–6x** end-to-end wall-clock vs FP32 baseline.
 ```bash
 # Install dependencies
 pip install transformers
+PYTHONPATH=/root/Profiler python3 -c "from nvidia.operator_profiler.fx import UniqueSubgraphRegistry; print('OK')"
 
-# Run the optimized workload (downloads GPT-2 weights ~500 MB on first run)
-# First compile is slow: max-autotune autotuning takes 60-180 s
-python scripts/run_workload.py examples/gpt2/gpt2_optimized.py \
-    --warmup-iters 3 --measure-iters 10
+# Syntax check
+cd /root/Profiler && python3 -m py_compile examples/gpt2/gpt2_optimized.py
 
-# Profile with nsys
-nsys profile --trace=cuda,nvtx --output=gpt2_opt \
-    python scripts/run_workload.py examples/gpt2/gpt2_optimized.py \
-        --warmup-iters 3 --measure-iters 10
+# Run tests (no GPU compilation required for tests 1-3)
+cd /root/Profiler && PYTHONPATH=/root/Profiler pytest examples/gpt2/test_gpt2_optimized.py -v
 
-# Run verification tests (no autotuning; fast)
-python -m pytest test_gpt2_optimized.py -v
+# Profile the optimized workload (Phase 1 — correlation pass)
+PYTHONPATH=/root/Profiler python3 nvidia/scripts/run_workload.py \
+    --workload examples/gpt2/gpt2_optimized.py \
+    --output-prefix /tmp/gpt2_opt \
+    --inductor-debug-dir /tmp/gpt2_opt_inductor \
+    --correlation-pass
+
+# Profile the optimized workload (Phase 2 — NVTX capture)
+nsys profile --trace=cuda,nvtx --output=/tmp/gpt2_opt \
+    python3 nvidia/scripts/run_workload.py \
+        --workload examples/gpt2/gpt2_optimized.py \
+        --output-prefix /tmp/gpt2_opt \
+        --inductor-debug-dir /tmp/gpt2_opt_inductor
+
+# Quick forward pass sanity check
+PYTHONPATH=/root/Profiler python3 examples/gpt2/gpt2_optimized.py
+# Expected output:
+#   Output shape : torch.Size([4, 128, 768])
+#   Output dtype : torch.bfloat16
+```
+
+**Note on compile time:** OPT-3 (`max-autotune`) benchmarks multiple CUTLASS/cuBLAS tile
+configurations at compile time. First compilation of GPT-2 small takes approximately
+5-15 minutes. Set `TORCHINDUCTOR_CACHE_DIR` to a persistent path to avoid recompilation
+across runs:
+
+```bash
+export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache_gpt2
 ```
 
 ---
 
 ## Optimizations Table
 
-| ID | Name | Target Operators | Baseline Bottleneck | Expected Impact |
-|----|------|-----------------|---------------------|-----------------|
-| OPT-5 | TF32 global flag | Any residual FP32 mm/addmm | `tensor_core_idle` | 1.0x–1.05x incremental; defense-in-depth |
-| OPT-1 | BF16 model cast | aten::mm (336 kernels, 51.88%), aten::addmm (456 kernels, 15.67%) | `tensor_core_idle`: 0.0% Tensor Core cycles across all 792 GEMM kernels. ampere_sgemm path = 19.5 TFLOPS peak | 3x–5x end-to-end. Shifts cuBLAS to sm80_xmma_gemm_bf16 (HMMA) at 312 TFLOPS peak |
-| OPT-3 | BF16 SDPA dispatch | aten::_efficient_attention_forward (108 kernels, 3.18%) | `wave_starvation`: fmha_cutlassF_f32 uses 168 regs/thread, collapses occupancy to 6.24%, spills 24.5 MB to DRAM | 3x–5x on attention; 1.05x–1.1x end-to-end (attention share grows after OPT-1 reduces GEMM dominance) |
-| OPT-4 | QKV fusion check | aten::mm nodes sharing the same input ([512,768]x[768,768]) | `wave_starvation (secondary)`: waves_per_sm=1.778 on Q/K/V projection GEMMs | 1.03x–1.08x incremental if unfused; safe no-op for HF c_attn |
-| OPT-2 | max-autotune compile | All GEMM and fused elementwise kernels | Heuristic tile sizes at 72-74% SM throughput | 1.2x–1.5x incremental over OPT-1; autotuned tiles for each unique GEMM shape |
+| ID | Optimization | Target Operators | Mechanism | Expected Speedup |
+|----|-------------|-----------------|-----------|-----------------|
+| OPT-1 | BF16 dtype promotion | `aten::mm` (336 kernels, 51.93%), `aten::addmm` (456 kernels, 15.68%), `aten::_efficient_attention_forward` (108 kernels, 3.18%) | Replaces FP32 SIMT kernels (`ampere_sgemm_*`) with BF16 Tensor Core kernels (`sm80_xmma_gemm_bf16bf16`). Eliminates 24.5 MB register spills in fmha_cutlassF_f32 kernel. A100 BF16 Tensor Core peak is 312 TFLOPS vs ~19.5 TFLOPS SIMT FP32. | ~50-60% total wall time reduction |
+| OPT-2 | Pre-transposed weights | `aten::mm` (336 kernels), `aten::addmm` (456 kernels) | Detects `aten.t(get_attr)` nodes in the FX graph; pre-transposes weight buffers at graph-rewrite time; patches mm/addmm to use the contiguous transposed buffer. Eliminates per-call implicit DRAM reshape in cuBLAS TN dispatch. Applies only to weights with K >= 512. | ~3-8% additional reduction |
+| OPT-3 | max-autotune kernel selection | `aten::mm` (336 kernels), `aten::addmm` (456 kernels) | Passes `{"max_autotune": True}` to `compile_fx`. Inductor benchmarks CUTLASS and cuBLAS algorithm variants for each unique (M,N,K) shape at compile time and caches the winner. Most impactful for 512x768x3072 FFN shapes where multiple competitive tile configurations exist. | ~5-15% additional reduction on GEMM ops |
+
+**Combined expected impact:** ~55-70% total latency reduction (from baseline 103.9 ms).
+Post-optimization target: ~30-45 ms for batch=4, seq_len=128 on A100 SXM4-80GB.
 
 ---
 
 ## Architecture
 
-### Non-Graph Optimizations (applied in `get_model_and_input()`)
+### Non-Graph Optimizations (`get_model_and_input()`)
 
-These run before `torch.compile()` so Inductor traces the already-optimized dtype graph.
+OPT-1 lives entirely in `get_model_and_input()`. Dynamo traces dtype as a static
+property at compile time — changing dtype after compilation triggers a full recompile.
+The optimization is applied before `torch.compile` is called:
 
-**OPT-5 — TF32 flags** (set at module load time):
 ```python
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+model = model.to(torch.bfloat16)  # all parameters including wte/wpe embeddings
+# input_ids remains int64 — embedding lookup requires integer indices
 ```
-Routes any residual FP32 GEMMs through Tensor Core hardware (TF32 = 156 TFLOPS vs 19.5 TFLOPS FP32 SIMT). No-op if flags are already set (PyTorch >= 1.12 default).
 
-**OPT-1 — BF16 cast**:
-```python
-model = model.to(torch.bfloat16)          # cast before compile
-model = torch.compile(model, ...)          # Inductor traces BF16 weight nodes
+`torch.backends.cuda.matmul.allow_tf32 = True` is set at module import time as a
+belt-and-suspenders complement to OPT-1 (no-op after BF16 promotion, but useful if
+OPT-1 is disabled).
+
+### FX Pass: `_pass_pretranspose` (OPT-2)
+
+This pass operates on the **post-Dynamo, Inductor-lowered graph** where `F.linear` has
+already been decomposed into `aten.t(get_attr('weight')) + aten.mm` or `aten.addmm`.
+The detection pattern is:
+
 ```
-BF16 is preferred over FP16 for GPT-2 because BF16 has the same exponent range as FP32 (8 bits), making it safe for the large activation magnitudes in transformer FFN layers without loss scaling. `input_ids` stays `int64` — embedding lookup is a gather operation, not a GEMM.
-
-**OPT-3 — SDPA backend selection** (set at module load time):
-```python
-torch.backends.cuda.enable_flash_sdp(True)
-torch.backends.cuda.enable_math_sdp(False)
+aten.addmm(bias_node, x_node, aten.t(get_attr('weight')))
+aten.mm(x_node, aten.t(get_attr('weight')))
 ```
-With BF16 inputs on A100 (sm80), PyTorch dispatches `F.scaled_dot_product_attention` to the FlashAttention-2 kernel automatically. The explicit `enable_flash_sdp` call enforces this selection and prevents fallback to the reference math path.
 
-**OPT-2 — max-autotune compile**:
-```python
-model = torch.compile(
-    model,
-    backend="gpt2_backend",
-    mode="max-autotune",
-    fullgraph=True,
-)
-```
-Runs the Triton autotuner over tile configurations (128x256, 64x256, 256x128, ...) and selects the empirically fastest for each unique GEMM shape. GPT-2 small has approximately 4 unique GEMM shapes. FX graph cache is enabled (`_inductor_config.fx_graph_cache = True`) to avoid re-autotuning on subsequent runs.
+For each matched node:
+1. Retrieve the weight tensor via `gm.get_parameter(weight_node.target)`
+2. Skip if `weight.shape[-1] < 512` (memory overhead threshold)
+3. Compute `W_T = weight.t().contiguous()` and register as a named buffer
+4. Insert a `get_attr` node for the transposed buffer immediately before the mm node
+5. Patch the mm/addmm `.args` to use the new buffer node directly (no `aten.t()`)
+6. Erase the orphaned `aten.t()` node if it has no remaining users
+7. Call `gm.graph.lint()` then `gm.recompile()` after all mutations
 
-### FX Backend (`gpt2_backend`)
+### Dedup-Aware Backend (`gpt2_opt`)
 
-The backend is registered with `@register_backend` and wraps Inductor. It detects whether the model has repeated layers (GPT-2 has 12 structurally identical transformer blocks) and takes one of two paths:
+GPT-2's 12 transformer blocks are structurally identical. `UniqueSubgraphRegistry`
+splits the FX graph by layer structure and groups partitions by graph signature.
 
-**Dedup path (12-layer GPT-2):**
-1. `UniqueSubgraphRegistry` splits the graph by layer using `split_module`.
-2. `_pass_fuse_qkv` is applied only to the unique representative partition (e.g., `submod_0` for transformer block structure).
-3. The same pass is propagated to all 11 structural duplicates.
-4. Each unique representative is compiled with `compile_fx` using its actual partition inputs (captured via forward-pre hooks).
-5. Duplicate partitions share the compiled callable from their representative.
+**If no equivalence map** (no repeated layers):
+- Flat compile path — apply `_pass_pretranspose` to the full flat graph, then
+  delegate to `compile_fx(gm, example_inputs, options={"max_autotune": True})`.
+  This path preserves cross-layer Inductor fusion opportunities.
 
-**Flat path (no repeated layers):**
-- `_pass_fuse_qkv` is applied to the full flat graph.
-- The graph is passed directly to `compile_fx`.
+**If equivalence map present** (GPT-2's normal case — 12 repeated blocks):
+- Dedup path — capture per-partition inputs via `_capture_partition_inputs`.
+- Apply `_pass_pretranspose` to each unique representative only.
+- Compile each unique rep with `compile_fx(..., options={"max_autotune": True})`.
+- Share the compiled callable with all structural duplicates by patching `.forward`.
+- Return `lambda *args: registry.split(*args)`.
 
-### OPT-4 — QKV Fusion FX Pass
-
-The pass scans the Aten IR graph for groups of exactly three `aten.mm` nodes that share the same input activation tensor. If found, it:
-1. Extracts the three weight tensors (handling both bare `get_attr` and `t(get_attr(...))` patterns).
-2. Concatenates them along the output dimension: `[K, N] × 3 → [K, 3N]`.
-3. Registers the fused weight as a buffer.
-4. Replaces the three `mm` nodes with one `mm` + `chunk(3, dim=-1)`.
-
-For standard HuggingFace GPT-2, `GPT2Attention` uses `self.c_attn = Conv1D(3*n_embd, n_embd)` which fuses Q/K/V into a single projection at the module level. The Inductor-traced graph will show one `mm` node (or `addmm`) with a `[768, 2304]` weight, not three separate `[768, 768]` nodes. The pass detects zero matching groups and exits cleanly as a no-op.
+For GPT-2 small, the dedup path reduces max-autotune compilation time from ~12x
+(once per layer) to ~1x (once per unique signature).
 
 ---
 
 ## Key Design Decisions
 
-### Why BF16 is applied in `get_model_and_input()`, not in the FX backend
+### OPT-1 as non-graph (not FX pass)
 
-`torch.compile()` traces the model's dtype graph at compile time. If weights are cast to BF16 after `compile()`, Inductor's traced graph contains FP32 weight nodes and the cuBLAS HMMA path is never selected. The cast must precede `torch.compile()`.
+BF16 promotion modifies tensor `dtype`, which is a static property baked into Dynamo's
+trace specialization. Dynamo must see BF16 inputs and parameters at trace time to
+generate BF16-native ops. Applying `.to(bfloat16)` inside the backend (post-Dynamo)
+would operate on an already-traced graph and would not affect the dtype of any
+intermediate tensors. The only correct location is `get_model_and_input()`, before
+`torch.compile` is called.
 
-### Why `input_ids` stays `int64`
+### OPT-2 as manual per-rep (not `replace_pattern`)
 
-Embedding lookup (`aten::embedding`) is an integer gather — it reads rows from the weight matrix using integer indices. The dtype of `input_ids` does not affect whether the weight matrix is BF16; the embedding output dtype follows the weight dtype. There is no GEMM on `input_ids` itself.
+`torch.fx.subgraph_rewriter.replace_pattern` cannot call `register_buffer` on the
+module — it operates purely structurally and has no access to tensor values. Pre-
+transposing a weight requires:
+1. Reading the actual weight tensor to compute `W_T = weight.t().contiguous()`
+2. Calling `gm.register_buffer(...)` to store the result
 
-### Why OPT-4 is MEDIUM confidence
+These requirements make it a manual per-rep pass.
 
-The profile evidence (waves_per_sm=1.778 on `[512,768]x[768,768]` GEMMs at triage rank 149+) is real. However, HuggingFace GPT-2 already fuses Q/K/V at the module level via `c_attn`. The Inductor-traced graph must be inspected at runtime to confirm whether separate Q/K/V mm nodes appear. The pass is implemented as a correct, safe no-op when the pattern is absent.
+### OPT-3 via `compile_fx` options (not graph mutation)
 
-### Why `enable_math_sdp(False)` is set explicitly
+max-autotune is an Inductor compilation mode, not an FX graph transformation. No
+graph nodes are modified. The option is forwarded as `options={"max_autotune": True}`
+to `compile_fx`. This is equivalent to `torch.compile(model, mode="max-autotune")`.
 
-With `enable_flash_sdp(True)` and `enable_math_sdp(False)`, PyTorch's SDPA dispatcher raises an error if FlashAttention is unavailable rather than silently falling back to the slow math path. This makes configuration issues visible during development. On A100 with BF16 inputs and PyTorch >= 2.0, FlashAttention is always available.
+### GPT-2 QKV fusion not applied
 
-### Why `_capture_partition_inputs` is needed
+GPT-2's combined QKV projection (`c_attn: nn.Linear(768, 2304)`) is already fused
+as a single 512x2304 GEMM in the HuggingFace implementation. The three-separate-mm
+QKV fusion pattern does not appear in this model's graph. This matches the note in
+`optimizations.json`:
 
-`split_module` decomposes the flat graph into partition submodules. Each partition takes a subset of the original inputs. Using the top-level `example_inputs` for all partitions would pass tensors with incorrect shapes to Inductor, causing shape inference failures. Forward-pre hooks on the split graph capture the real per-partition inputs in a single dry-run forward pass.
+> "GPT-2's combined QKV projection (c_attn: nn.Linear(768, 2304)) is already fused
+> as a single 512x2304 GEMM."
+
+### OPT-2 prerequisite: OPT-1 must run first
+
+`_pass_pretranspose` registers `W_T = weight.t().contiguous()` as a buffer. If OPT-1
+has not run, `weight` is FP32 and `W_T` is a FP32 buffer, but the mm inputs are also
+FP32 — this is consistent and safe. However, after OPT-1 makes the model BF16, the
+weights are already BF16 when the backend is called (Dynamo traces with BF16 weights),
+so `W_T` is naturally BF16. The prerequisite is satisfied by placing OPT-1 in
+`get_model_and_input()` and OPT-2 in the backend.
 
 ---
 
 ## Troubleshooting
 
-**`TypeError: 'module' object is not callable` at compile time**
+### `TypeError: 'module' object is not callable`
 
-Cause: `from torch._inductor import compile_fx` imports the module, not the function.
-
-Fix: Always import `from torch._inductor.compile_fx import compile_fx`.
-
-**`gm.graph.lint()` fails after a pass**
-
-Cause: A node was erased while live uses remain, or `replace_all_uses_with` was called after `erase_node`.
-
-Fix: Always call `node.replace_all_uses_with(new_node)` BEFORE `gm.graph.erase_node(node)`. Take a snapshot of nodes with `list(gm.graph.nodes)` before iterating.
-
-**`AssertionError: sm_major < 8` on non-Ampere hardware**
-
-Cause: `get_model_and_input()` asserts `sm_major >= 8` for BF16 Tensor Core support.
-
-Fix: Remove the assertion or replace with a warning to run on older hardware (BF16 GEMMs will still execute but without Tensor Core acceleration).
-
-**max-autotune compilation hangs or is very slow**
-
-Cause: First-run autotuning tests ~100 tile configurations per unique GEMM shape. GPT-2 small has ~4 unique shapes.
-
-Fix: Enable the FX graph cache (already enabled in this file). After the first run, recompilation is near-instant. Alternatively use `mode="reduce-overhead"` for faster but untuned compilation.
-
-**`fullgraph=True` raises a graph break error**
-
-Cause: HuggingFace modeling code contains Python control flow that depends on tensor values, or uses unsupported operations.
-
-Fix: Switch to `dynamic=True`:
+Wrong import. The file must use:
 ```python
-model = torch.compile(
-    model,
-    backend="gpt2_backend",
-    mode="max-autotune",
-    fullgraph=True,
-    dynamic=True,
-)
+from torch._inductor.compile_fx import compile_fx  # correct — imports the function
 ```
-Or remove `fullgraph=True` to allow graph breaks (Inductor compiles each subgraph independently; cross-operator fusion opportunities may be reduced).
+Not:
+```python
+from torch._inductor import compile_fx  # wrong — imports the module
+```
 
-**OPT-4 pass registers a buffer but dtype mismatch occurs**
+### `torch.fx.graph.lint()` failure after graph mutation
 
-Cause: The fused QKV weight buffer is created from `torch.cat(weights, ...)` where weights are BF16. If OPT-1 was not applied before the backend is called, the buffer will be FP32.
+If `lint()` raises, the graph has dangling references. Common cause: a node was erased
+before all its users were replaced. Always call `node.replace_all_uses_with(new_node)`
+**before** `gm.graph.erase_node(node)`. The `_pass_pretranspose` implementation
+checks `len(t_node.users) == 0` before erasing `t_node`.
 
-Fix: Ensure `model.to(torch.bfloat16)` is called before `torch.compile()` in `get_model_and_input()`.
+### `_pass_pretranspose` reports "Pattern not found"
+
+This pass targets the post-Dynamo Inductor-lowered graph where `F.linear` has been
+decomposed to `aten.t(get_attr) + aten.mm`. If the pass reports no matches:
+1. Verify `torch.compile(model, backend="gpt2_opt")` is being used (not eager mode).
+2. Check that model weights have `K >= 512` (GPT-2 smallest projections are 768-dim,
+   all above the threshold).
+3. Enable `TORCH_LOGS="+inductor"` to inspect the graph before the pass runs.
+
+### `OutOfMemoryError` after OPT-2
+
+OPT-2 doubles the memory footprint of each Linear weight matrix by storing both the
+original and the transposed copy. For GPT-2 small, the additional memory is
+approximately 12 layers × (768×768 + 768×3072 + 3072×768 + 768×2304) × 2 bytes
+(BF16) ≈ 540 MB. If GPU memory is tight, disable OPT-2 by removing the
+`_pass_pretranspose(gm)` calls from the backend function.
+
+### max-autotune compile takes too long
+
+First compilation with `max_autotune=True` benchmarks multiple kernel candidates and
+can take 5-15 minutes for GPT-2 small. Set a persistent cache directory:
+```bash
+export TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache_gpt2
+```
+Subsequent runs with identical shapes reuse cached kernel selections.
+
+### BF16 model produces NaN outputs
+
+GPT-2 LayerNorm uses accumulation in higher precision internally, but downstream
+operations in BF16 can produce NaN if inputs have very large magnitudes. Verify:
+1. `torch.backends.cuda.matmul.allow_tf32 = True` is set.
+2. HuggingFace model was loaded with `from_pretrained` (not randomly initialized).
+3. Input `input_ids` are within `[0, vocab_size)` range.
 
 ---
 
 ## Future Work
 
-| Pass | Status | Infrastructure Required |
-|------|--------|------------------------|
-| LayerNorm-Linear fusion | Not implemented | Custom Triton kernel that keeps LayerNorm normalized rows in registers before issuing the following GEMM, eliminating the DRAM round-trip between the two operations |
-| Persistent GEMM kernels | Not implemented | Triton persistent kernel for small GEMMs (waves_per_sm < 2) — reduces launch overhead for the 36 attention projection GEMMs |
-| KV cache for autoregressive inference | Not implemented | Requires model-level changes to `GPT2Wrapper.forward()` to accept and return a KV cache state; the current workload is prefill-only |
-| INT8 weight quantization | Not implemented | `torch.ao.quantization` or Inductor's built-in INT8 support; would improve memory bandwidth for memory-bound attention projection GEMMs at long sequence lengths |
+### SDPA Replacement (`_pass_replace_sdpa`) — Not Applied
+
+GPT-2 in HuggingFace PyTorch 2.x already calls `F.scaled_dot_product_attention`
+internally (since transformers 4.36+). If the baseline profile shows
+`aten::_efficient_attention_forward`, this indicates SDPA is already active. A manual
+SDPA replacement pass would detect `softmax(qk_matmul * scale) @ v` patterns — if
+the HuggingFace version does not use SDPA, this pass would provide significant
+additional speedup for the attention operator (currently 3.18% of wall time).
+
+Infrastructure needed: no additional infrastructure — the pass is available in
+`knowledge/fx-patterns.md` Pattern 2 and can be added to the per-rep loop.
+
+### LayerNorm-Linear Fusion — Requires Custom Triton Kernel
+
+GPT-2 has the pattern `LayerNorm → Linear` in every block (pre-norm architecture).
+Fusing these into a single kernel would eliminate one intermediate tensor write.
+
+Infrastructure needed: custom Triton kernel (e.g., liger-kernel's `LN-MM` fused op,
+or `flash-attn`'s `flash_attn_interface.layer_norm_linear`).
+
+### RoPE Detection — Not Applicable to GPT-2
+
+GPT-2 uses learned positional embeddings (`wpe`), not RoPE. This stub applies to
+LLaMA/Mistral variants.

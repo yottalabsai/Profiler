@@ -28,7 +28,7 @@ Missing files are noted as "not yet available" and those sections are skipped.
 
 ## Report Structure
 
-Mirror `examples/transformer_block/report.md` as the gold standard. Include these sections:
+Mirror `examples/conv_block/report.md` as the gold standard. Include these sections:
 
 ### 1. Hardware Context
 
