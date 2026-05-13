@@ -122,7 +122,10 @@ def make_layer_partitioner(
     nodes carry generic names like ``"linear"`` but their parameter
     placeholder inputs carry the full module path).
     """
-    pattern = _detect_split_pattern(gm) or LAYER_RE
+    pattern = _detect_split_pattern(gm)
+    if pattern is None:
+        log.debug("make_layer_partitioner: no repeated layer structure detected — single partition")
+        return lambda node: 0, {0: "prologue"}
     log.debug("make_layer_partitioner: splitting by pattern %r", pattern.pattern)
 
     # Pre-index parameter placeholder names → layer key.  Dynamo embeds the

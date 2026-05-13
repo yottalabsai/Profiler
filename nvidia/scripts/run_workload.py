@@ -1,9 +1,34 @@
 """
 run_workload.py — Generic nsys capture runner.
 
-Loads a user workload, compiles and warms up the model, then runs it
-under emit_nvtx so the nsys trace carries aten:: NVTX ranges alongside
-CUDA kernel launches.
+Two-phase workflow (explicit flags required)
+--------------------------------------------
+nsys and torch.profiler both use CUPTI and cannot run simultaneously.
+Run this script twice with explicit flags:
+
+Phase 1 — correlation pass (standalone, before nsys):
+    python3 scripts/run_workload.py --workload <script.py> \\
+        --output-prefix <prefix> --inductor-debug-dir <dir> \\
+        --correlation-pass
+
+    Compiles the model, warms up, runs torch.profiler, writes:
+      <prefix>.corr.json   (HIGH-confidence kernel→op attribution map)
+      <prefix>.part.json   (partition equivalence map, built-in backend only)
+    Then exits without running NVTX capture.
+
+Phase 2 — NVTX capture (under nsys, without --correlation-pass):
+    nsys profile --trace=cuda,nvtx --output=<prefix> \\
+        python3 scripts/run_workload.py --workload <script.py> \\
+            --output-prefix <prefix> --inductor-debug-dir <dir>
+
+    Reuses cached Inductor compilation (same TORCHINDUCTOR_CACHE_DIR),
+    warms up, then runs --measure-iters iterations under emit_nvtx.
+
+Layer deduplication runs unconditionally. The FX graph is split by detected
+layer structure and unique-representative partitions are compiled with inductor.
+Duplicate partitions share the same compiled callable as their representative.
+If no repeated layer structure is detected the model is compiled as a single
+partition, which is equivalent to standard inductor compilation.
 
 Run under nsys:
     nsys profile --trace=cuda,nvtx --output=<prefix> \\
@@ -17,39 +42,39 @@ The workload script must expose:
         ...
 
 The returned model should be a plain nn.Module on CUDA. Compilation and
-warmup are handled by this tool via --compile-backend and --warmup-iters.
-
-Layer deduplication (--layer-deduplicate)
------------------------------------------
-When --layer-deduplicate is set, the script uses a custom torch.compile backend
-(_make_dedup_backend) that receives the dynamo-traced FX graph and:
-  1. Builds a UniqueSubgraphRegistry — splits the graph by layer and groups
-     structurally identical partitions by graph signature.
-  2. Optionally applies replace_pattern FX passes loaded from --fx-pass-module
-     to unique subgraphs only, propagating edits to all structural duplicates.
-  3. Compiles each unique-representative partition with inductor (Triton kernels).
-     Duplicate partitions share the same compiled callable as their representative.
-  4. Wraps each partition's compiled forward with an NVTX range:
-       layer::unique::LABEL   — for unique-representative partitions
-       layer::duplicate::LABEL — for structural duplicates
-  5. Writes a .part.json sidecar mapping duplicate partition labels to their
-     unique representative (used by KernelProfileConfig.partition_equivalence_map).
-
-The NVTX partition ranges sit outside the aten:: ranges from emit_nvtx and are
-transparent to ManifestBuilder's operator attribution logic.  ManifestBuilder
-reads them via _tag_layer_partitions() and sets KernelManifestEntry.layer_partition
-and .is_unique_partition.  KernelProfileOrchestrator then only sends
-unique-partition kernels to ncu and propagates metrics to duplicates.
+warmup are handled by this tool via --warmup-iters.
 
 Pass file interface (--fx-pass-module):
     def get_passes() -> list[tuple[callable, callable]]:
         # each tuple is (pattern_fn, replacement_fn) for replace_pattern
         return [(pattern, replacement)]
 
+    Only replace_pattern-compatible passes (pure functional, no register_buffer)
+    can be expressed this way. Complex passes (BN fold, SDPA, pre-transposed
+    weights) require --compile-backend instead.
+
+Custom backend interface (--compile-backend):
+    The workload file (--workload) must register a backend via @register_backend
+    before get_model_and_input() is called. Importing the workload file triggers
+    the registration; torch.compile then selects the backend by name.
+
+    @register_backend
+    def my_model_opt(gm, example_inputs):
+        ...
+
+    Run as: --workload my_workload_optimized.py --compile-backend my_model_opt
+
 Example:
     nsys profile --trace=cuda,nvtx --output=profile \\
-        python scripts/run_workload.py --workload scripts/inductor_workload.py \\
-            --layer-deduplicate --fx-pass-module my_passes.py
+        python scripts/run_workload.py --workload scripts/workload.py
+
+    # with replace_pattern passes:
+        python scripts/run_workload.py --workload scripts/workload.py \\
+            --fx-pass-module my_passes.py
+
+    # with a custom registered backend:
+        python scripts/run_workload.py --workload scripts/workload_optimized.py \\
+            --compile-backend my_model_opt
 """
 from __future__ import annotations
 
@@ -162,7 +187,7 @@ def _make_dedup_backend(
     output_prefix: str,
 ) -> tuple[Callable, dict]:
     """
-    Return (backend, state) for integrating layer deduplication with inductor.
+    Return (backend, state) for layer-deduplicating inductor compilation.
 
     backend — pass to torch.compile(model, backend=backend); invoked once by
               dynamo with the traced FX graph.
@@ -185,11 +210,18 @@ def _make_dedup_backend(
             if isinstance(submod, fx.GraphModule)
         )
         n_unique = len(registry.unique_reps)
-        print(
-            f"[run_workload] Registry: {n_total} partition(s), "
-            f"{n_unique} unique signature(s)",
-            flush=True,
-        )
+        n_duplicates = n_total - n_unique
+        if n_duplicates == 0:
+            print(
+                f"[run_workload] Registry: {n_total} partition(s), no duplicate partitions found",
+                flush=True,
+            )
+        else:
+            print(
+                f"[run_workload] Registry: {n_total} partition(s), "
+                f"{n_unique} unique signature(s), {n_duplicates} duplicate(s)",
+                flush=True,
+            )
 
         # Step 2: Apply FX passes to unique reps (propagated to duplicates)
         if passes:
@@ -247,24 +279,12 @@ def main() -> None:
         help="Path to a workload script that exposes get_model_and_input().",
     )
     parser.add_argument(
-        "--compile-backend", default="inductor",
-        help="torch.compile backend to use (default: inductor). Pass 'none' to skip compilation.",
+        "--warmup-iters", type=int, default=2,
+        help="Number of warmup iterations after compilation (default: 2).",
     )
     parser.add_argument(
-        "--warmup-iters", type=int, default=5,
-        help="Number of warmup iterations before NVTX capture (default: 5).",
-    )
-    parser.add_argument(
-        "--measure-iters", type=int, default=10,
-        help="Number of capture iterations under emit_nvtx (default: 10).",
-    )
-    parser.add_argument(
-        "--correlation-pass", action="store_true", default=False,
-        help=(
-            "Run a torch.profiler pass after warmup to build a HIGH-confidence "
-            "kernel→op attribution map.  Writes <output-prefix>.corr.json alongside "
-            "the nsys report.  n_iters matches --measure-iters."
-        ),
+        "--measure-iters", type=int, default=2,
+        help="Number of capture iterations under emit_nvtx (default: 2).",
     )
     parser.add_argument(
         "--output-prefix", default="profile",
@@ -274,21 +294,10 @@ def main() -> None:
         "--inductor-debug-dir", default=None,
         help=(
             "Directory where Inductor debug artifacts will be written during "
-            "torch.compile().  Enables torch._inductor.config.debug and sets "
+            "compilation.  Enables torch._inductor.config.debug and sets "
             "TORCHINDUCTOR_CACHE_DIR to this path so hash-named compiled .py "
             "files land in a predictable location.  Pass this path to "
             "parse_inductor_debug_dir() after the nsys run to build a fusion map."
-        ),
-    )
-    parser.add_argument(
-        "--layer-deduplicate", action="store_true", default=False,
-        help=(
-            "Capture the FX graph, split by layer, and run only unique-representative "
-            "partitions under full nsys annotation.  Duplicate partitions receive "
-            "layer::duplicate::LABEL NVTX ranges so ManifestBuilder can tag them.  "
-            "Writes a .part.json equivalence-map sidecar for use with "
-            "KernelProfileConfig.partition_equivalence_map.  Works for any model "
-            "architecture without requiring --fx-pass-module."
         ),
     )
     parser.add_argument(
@@ -296,15 +305,28 @@ def main() -> None:
         help=(
             "Path to a Python file exposing get_passes() -> list[(pattern, replacement)]. "
             "Applies replace_pattern passes to unique subgraphs only and propagates "
-            "edits to all structural duplicates before nsys capture.  "
-            "Implies --layer-deduplicate."
+            "edits to all structural duplicates before nsys capture."
+        ),
+    )
+    parser.add_argument(
+        "--compile-backend", default=None,
+        help=(
+            "Named torch.compile backend registered via @register_backend in the workload "
+            "file. When set, uses this backend instead of the built-in dedup+inductor "
+            "backend. The workload file is imported first (triggering @register_backend), "
+            "then torch.compile(model, backend=<name>) is called. Incompatible with "
+            "--fx-pass-module (which only applies within the built-in dedup backend)."
+        ),
+    )
+    parser.add_argument(
+        "--correlation-pass", action="store_true", default=False,
+        help=(
+            "Run the torch.profiler correlation pass, write <output-prefix>.corr.json, "
+            "then exit.  Run this BEFORE nsys (not inside it): nsys and torch.profiler "
+            "both use CUPTI and cannot run simultaneously."
         ),
     )
     args = parser.parse_args()
-
-    # --fx-pass-module implies --layer-deduplicate
-    if args.fx_pass_module and not args.layer_deduplicate:
-        args.layer_deduplicate = True
 
     assert torch.cuda.is_available(), "CUDA required"
     print(f"[run_workload] GPU: {torch.cuda.get_device_name(0)}", flush=True)
@@ -313,94 +335,60 @@ def main() -> None:
     print(f"[run_workload] Loading workload: {args.workload}", flush=True)
     original_model, x = workload.get_model_and_input()
 
-    # ------------------------------------------------------------------
-    # Layer-deduplication path
-    # ------------------------------------------------------------------
-    if args.layer_deduplicate:
+    if args.inductor_debug_dir:
+        import os
+        import torch._inductor.config as _ind_cfg
+        debug_dir = Path(args.inductor_debug_dir).resolve()
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        _ind_cfg.debug = True
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(debug_dir)
+        print(f"[run_workload] Inductor debug artifacts → {debug_dir}", flush=True)
+
+    if args.compile_backend:
+        if args.fx_pass_module:
+            print(
+                "[run_workload] WARNING: --fx-pass-module is ignored when --compile-backend "
+                "is set (FX passes are applied by the custom backend, not the dedup backend).",
+                flush=True,
+            )
+        print(f"[run_workload] Compiling with custom backend '{args.compile_backend}'...", flush=True)
+        _compiled = torch.compile(original_model, backend=args.compile_backend)
+        with torch.no_grad():
+            _compiled(x)
+        torch.cuda.synchronize()
+        print("[run_workload] Compilation complete.", flush=True)
+        run_fn = lambda: _compiled(x)
+    else:
         passes = _load_fx_passes(args.fx_pass_module) if args.fx_pass_module else []
         dedup_backend, _state = _make_dedup_backend(passes, args.output_prefix)
 
-        # One torch.compile call triggers the backend: captures the FX graph,
-        # compiles unique partitions with inductor, wraps NVTX, writes .part.json.
+        # Trigger the backend: captures the FX graph, compiles unique partitions
+        # with inductor, wraps NVTX ranges, writes .part.json.
         print("[run_workload] Compiling with dedup+inductor backend...", flush=True)
         _compiled = torch.compile(original_model, backend=dedup_backend)
         with torch.no_grad():
             _compiled(x)
+        torch.cuda.synchronize()
+        print("[run_workload] Compilation complete.", flush=True)
 
         # Use registry.split directly for warmup and capture so that emit_nvtx
         # does not trigger dynamo re-tracing (which would recompile partitions
         # and fire Triton JIT inside the unique-partition NVTX window).
         run_fn = _state['run_fn']
 
-        print(f"[run_workload] Warmup ({args.warmup_iters} iters)...", flush=True)
-        with torch.no_grad():
-            for _ in range(args.warmup_iters):
-                run_fn()
-        torch.cuda.synchronize()
-
-        if args.correlation_pass:
-            from nvidia.operator_profiler.capture.torch_profiler_correlator import build_correlation_map
-            print(
-                f"[run_workload] torch.profiler correlation pass ({args.measure_iters} iters)...",
-                flush=True,
-            )
-            corr_map = build_correlation_map(run_fn, n_iters=args.measure_iters)
-            corr_path = Path(args.output_prefix + ".corr.json")
-            corr_path.write_text(json.dumps({
-                "schema_version": "1.0",
-                "entries": [
-                    {"kernel_name": k[0], "invocation": k[1], "op_name": v}
-                    for k, v in corr_map.items()
-                ],
-            }))
-            print(
-                f"[run_workload] Correlation map → {corr_path} ({len(corr_map)} entries)",
-                flush=True,
-            )
-            torch.cuda.synchronize()
-
-        print(
-            f"[run_workload] Capture ({args.measure_iters} iters with NVTX)...",
-            flush=True,
-        )
-        with torch.no_grad():
-            with autograd_profiler.emit_nvtx(record_shapes=True):
-                for _ in range(args.measure_iters):
-                    run_fn()
-        torch.cuda.synchronize()
-        print("[run_workload] Done.", flush=True)
-        return
-
-    # ------------------------------------------------------------------
-    # Standard path (no deduplication)
-    # ------------------------------------------------------------------
-    model = original_model
-
-    if args.compile_backend != "none":
-        if args.inductor_debug_dir:
-            import os
-            import torch._inductor.config as _ind_cfg
-            debug_dir = Path(args.inductor_debug_dir).resolve()
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            _ind_cfg.debug = True
-            os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(debug_dir)
-            print(f"[run_workload] Inductor debug artifacts → {debug_dir}", flush=True)
-        print(f"[run_workload] Compiling with backend='{args.compile_backend}'...", flush=True)
-        model = torch.compile(model, backend=args.compile_backend)
-
     print(f"[run_workload] Warmup ({args.warmup_iters} iters)...", flush=True)
     with torch.no_grad():
         for _ in range(args.warmup_iters):
-            model(x)
+            run_fn()
     torch.cuda.synchronize()
 
     if args.correlation_pass:
         from nvidia.operator_profiler.capture.torch_profiler_correlator import build_correlation_map
         print(
-            f"[run_workload] torch.profiler correlation pass ({args.measure_iters} iters)...",
+            f"[run_workload] Correlation pass ({args.measure_iters} iters)...",
             flush=True,
         )
-        corr_map = build_correlation_map(lambda: model(x), n_iters=args.measure_iters)
+        corr_map = build_correlation_map(run_fn, n_iters=args.measure_iters)
         corr_path = Path(args.output_prefix + ".corr.json")
         corr_path.write_text(json.dumps({
             "schema_version": "1.0",
@@ -414,14 +402,16 @@ def main() -> None:
             flush=True,
         )
         torch.cuda.synchronize()
+        print("[run_workload] Done.", flush=True)
+        return
 
-    print(f"[run_workload] Capture ({args.measure_iters} iters with emit_nvtx)...", flush=True)
+    # NVTX capture
+    print(f"[run_workload] Capture ({args.measure_iters} iters with NVTX)...", flush=True)
     with torch.no_grad():
         with autograd_profiler.emit_nvtx(record_shapes=True):
             for _ in range(args.measure_iters):
-                _ = model(x)
+                run_fn()
     torch.cuda.synchronize()
-
     print("[run_workload] Done.", flush=True)
 
 

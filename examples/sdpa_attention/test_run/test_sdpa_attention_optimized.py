@@ -1,0 +1,186 @@
+"""
+test_sdpa_attention_optimized.py — Validation tests for sdpa_attention_optimized.py.
+
+Four tests:
+  1. test_import              — module imports without error
+  2. test_backend_registration — backend registered with torch._dynamo
+  3. test_get_model_and_input  — model/input have expected shapes and dtypes
+  4. test_forward_pass         — uncompiled forward pass completes without NaN/Inf
+"""
+from __future__ import annotations
+
+import sys
+import importlib
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+# Resolve the path to sdpa_attention_optimized.py from this test file's location
+_THIS_DIR = Path(__file__).resolve().parent
+_OPTIMIZED_MODULE_PATH = _THIS_DIR / "sdpa_attention_optimized.py"
+
+
+_MODULE_CACHE: dict = {}
+
+def _load_optimized_module():
+    """Import sdpa_attention_optimized as a module without relying on sys.path changes.
+    
+    Caches the module so that @register_backend is only executed once per process,
+    preventing 'duplicate name' AssertionError when called from multiple tests.
+    """
+    cache_key = "sdpa_attention_optimized"
+    if cache_key in _MODULE_CACHE:
+        return _MODULE_CACHE[cache_key]
+    spec = importlib.util.spec_from_file_location(
+        cache_key, _OPTIMIZED_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[cache_key] = module  # register before exec to handle circular refs
+    spec.loader.exec_module(module)
+    _MODULE_CACHE[cache_key] = module
+    return module
+
+
+# ---------------------------------------------------------------------------
+# Test 1: Module imports without error
+# ---------------------------------------------------------------------------
+
+def test_import():
+    """Module imports without error."""
+    assert _OPTIMIZED_MODULE_PATH.exists(), (
+        f"Optimized module not found at {_OPTIMIZED_MODULE_PATH}"
+    )
+    module = _load_optimized_module()
+    assert module is not None, "Module is None after import"
+    assert hasattr(module, "get_model_and_input"), (
+        "Module does not expose get_model_and_input()"
+    )
+    assert hasattr(module, "sdpa_attention_opt"), (
+        "Module does not expose sdpa_attention_opt backend function"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2: Backend registered with torch._dynamo
+# ---------------------------------------------------------------------------
+
+def test_backend_registration():
+    """Backend 'sdpa_attention_opt' is registered with torch._dynamo after import."""
+    import torch
+
+    # Import the module — the @register_backend decorator runs at module load time
+    _load_optimized_module()
+
+    backends = torch._dynamo.list_backends()
+    assert "sdpa_attention_opt" in backends, (
+        f"Backend 'sdpa_attention_opt' not found in registered backends: {backends}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 3: Model and input have expected shapes and dtypes
+# ---------------------------------------------------------------------------
+
+def test_get_model_and_input():
+    """Model and input have expected shapes and dtypes after OPT-1 BF16 promotion."""
+    import torch
+
+    module = _load_optimized_module()
+    model, x = module.get_model_and_input()
+
+    # Device checks
+    assert x.device.type == "cuda", f"Input must be on CUDA, got: {x.device}"
+    first_param = next(model.parameters())
+    assert first_param.device.type == "cuda", "Model must be on CUDA"
+
+    # Shape checks — baseline: batch=8, seq=512, dim=512
+    assert x.shape == (8, 512, 512), (
+        f"Expected input shape (8, 512, 512), got {tuple(x.shape)}"
+    )
+
+    # Dtype checks — OPT-1 must have promoted to BF16
+    assert x.dtype == torch.bfloat16, (
+        f"Expected input dtype torch.bfloat16 (OPT-1), got {x.dtype}"
+    )
+    assert first_param.dtype == torch.bfloat16, (
+        f"Expected model dtype torch.bfloat16 (OPT-1), got {first_param.dtype}"
+    )
+
+    # Model structural checks
+    assert hasattr(model, "q_proj"), "Model missing q_proj"
+    assert hasattr(model, "k_proj"), "Model missing k_proj"
+    assert hasattr(model, "v_proj"), "Model missing v_proj"
+    assert hasattr(model, "out_proj"), "Model missing out_proj"
+    assert hasattr(model, "ln_pre"), "Model missing ln_pre"
+    assert hasattr(model, "ln_post"), "Model missing ln_post"
+
+    # LayerNorm weight should also be BF16 after .to(bfloat16)
+    assert model.ln_pre.weight.dtype == torch.bfloat16, (
+        f"LayerNorm weight dtype expected bfloat16, got {model.ln_pre.weight.dtype}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Uncompiled forward pass completes without error
+# ---------------------------------------------------------------------------
+
+def test_forward_pass():
+    """Uncompiled forward pass completes without error and produces finite output."""
+    import torch
+
+    module = _load_optimized_module()
+    model, x = module.get_model_and_input()
+
+    with torch.no_grad():
+        out = model(x)
+
+    assert out is not None, "Forward pass returned None"
+
+    # Shape check: output should match input shape (B, T, D)
+    assert out.shape == (8, 512, 512), (
+        f"Expected output shape (8, 512, 512), got {tuple(out.shape)}"
+    )
+
+    # Dtype check: output dtype should match input dtype
+    assert out.dtype == torch.bfloat16, (
+        f"Expected output dtype torch.bfloat16, got {out.dtype}"
+    )
+
+    # Numerical checks
+    assert not torch.isnan(out).any(), (
+        "Output contains NaN — check BF16 overflow or attention computation"
+    )
+    assert not torch.isinf(out).any(), (
+        "Output contains Inf — check BF16 overflow or LayerNorm numerical stability"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry point for direct execution
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Running sdpa_attention_optimized validation tests...")
+
+    tests = [
+        test_import,
+        test_backend_registration,
+        test_get_model_and_input,
+        test_forward_pass,
+    ]
+
+    passed = 0
+    failed = 0
+    for test_fn in tests:
+        try:
+            test_fn()
+            print(f"  PASS  {test_fn.__name__}")
+            passed += 1
+        except Exception as exc:
+            print(f"  FAIL  {test_fn.__name__}: {exc}")
+            failed += 1
+
+    print(f"\n{passed} passed, {failed} failed")
+    if failed:
+        sys.exit(1)

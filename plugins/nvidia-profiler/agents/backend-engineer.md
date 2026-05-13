@@ -36,6 +36,44 @@ Before writing any code, fetch the current PyTorch FX API documentation via cont
 Derive `{workload_basename}` from the workload file name (e.g. `conv_block.py` → `conv_block_optimized.py`).
 Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.model` (e.g. `ConvBlock` → `conv_block_opt`).
 
+## Output Interface: Always `@register_backend`
+
+**ALWAYS generate a `{workload}_optimized.py` with a `@register_backend` function. Never generate a `get_passes()` / `--fx-pass-module` file.**
+
+Reasons:
+- `--fx-pass-module` only supports `replace_pattern`-compatible passes (pure functional, no `register_buffer`). Pre-transposed weights, BN fold, and SDPA replacement all require `register_buffer` or decomposed-op surgery and cannot use it.
+- `@register_backend` handles every pass type uniformly — there is no split path to reason about.
+- The 4-test validation suite (`test_{workload}_optimized.py`) validates backend registration, which requires `@register_backend`. There is no equivalent validation for `--fx-pass-module` files.
+- `--fx-pass-module` is a power-user escape hatch for quick one-off experiments, not for plugin-generated code.
+
+**Pass taxonomy inside `@register_backend`:**
+
+| Pass type | Apply via | Reason |
+|---|---|---|
+| Activation substitution (tanh→GELU) | `FxPassRunner.apply_pass` | Pure functional, replace_pattern-compatible |
+| QKV fusion (pure linear pattern) | `FxPassRunner.apply_pass` | Pure functional, replace_pattern-compatible |
+| Pre-transposed weights | Per-rep loop | Requires `register_buffer` |
+| BN fold | Per-rep loop | Requires `register_buffer` (fused weight/bias storage) |
+| SDPA replacement | Per-rep loop | Contains `call_method "transpose"` node — `replace_pattern` cannot match method calls |
+| Non-graph (BF16, channels_last, padding) | `get_model_and_input()` only | Not expressible in FX IR |
+
+**Profiling the generated output:**
+
+```bash
+# Under nsys for the full pipeline:
+nsys profile --trace=cuda,nvtx --output=profiler_output/{stem}_opt \
+    python nvidia/scripts/run_workload.py \
+        --workload {workload}_optimized.py \
+        --compile-backend {model_name}_opt \
+        --warmup-iters 2 --measure-iters 2 \
+        --output-prefix profiler_output/{stem}_opt
+
+# Or via the plugin:
+/capture {workload}_optimized.py --profile-name=optimized --compile-backend={model_name}_opt
+```
+
+Importing `{workload}_optimized.py` triggers `@register_backend` at module load time, so the backend is registered before `torch.compile` selects it by name.
+
 ## Primary Generation Guide
 
 Load and follow `prompts/optimization_implementation_prompt.md` as the primary guide for code structure, pass patterns, and output format. The sections below add critical constraints NOT in that prompt.
@@ -52,17 +90,27 @@ from torch._inductor import compile_fx
 ```
 
 ### Rule 2: Weight Node Detection
-Inductor wraps `nn.Module` parameters as `t(get_attr('weight'))` in the FX graph, not as bare `get_attr` nodes. To access the underlying parameter:
+`@register_backend` receives the graph **before** Inductor lowers it (pre-Inductor form). At this level ALL `nn.Module` parameters are lifted to `placeholder` nodes — there are no `get_attr` nodes and no `aten.t.default` wrapping. The actual weight tensors are in `example_inputs` (matched positionally to placeholder nodes).
 
 ```python
-# CORRECT pattern
-if (node.target == torch.ops.aten.t.default
-        and node.args[0].op == 'get_attr'):
-    param_name = node.args[0].target
-    weight = gm.get_parameter(param_name)
+# CORRECT — build a placeholder→tensor map at the start of any pass that reads weights
+placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
+# Then: actual_weight = ph_to_tensor.get(linear_node.args[1])
 
-# WRONG — bare get_attr lookup misses Inductor-traced graphs
+# WRONG — get_attr nodes and gm.get_parameter() do not exist at this IR level
+if node.args[0].op == 'get_attr':
+    weight = gm.get_parameter(node.args[0].target)   # KeyError or AttributeError
 ```
+
+The pre-Inductor ops for common layers:
+- `nn.Linear` → `call_function: torch.nn.functional.linear` (args: input, weight, bias)
+- `@` / `matmul` → `call_function: operator.matmul`
+- `*` / `mul` → `call_function: operator.mul`
+- `softmax` → `call_function: torch.softmax`
+- `.transpose()` → `call_method: "transpose"`
+- `nn.Conv2d` → `call_function: torch.nn.functional.conv2d`
+- `nn.BatchNorm2d` → `call_function: torch.nn.functional.batch_norm`
 
 ### Rule 3: Graph Mutation Order
 1. Collect nodes to modify using `list(gm.graph.nodes)` — snapshot, never iterate live
@@ -72,28 +120,15 @@ if (node.target == torch.ops.aten.t.default
 
 ### Rule 4: Pass Structure by Confidence
 
-**High confidence:**
-```python
-def pass_name(gm: fx.GraphModule) -> fx.GraphModule:
-    try:
-        # full pattern detection and transformation
-        # ...
-        gm.graph.lint()
-        gm.recompile()
-        logger.info("[pass_name] Applied successfully")
-    except Exception as e:
-        logger.warning(f"[pass_name] Failed: {e}")
-    return gm
-```
+All passes follow this canonical structure. Only error-handling depth differs by confidence level:
 
-**Medium confidence:**
 ```python
 def pass_name(gm: fx.GraphModule) -> fx.GraphModule:
     try:
         matched = False
         for node in list(gm.graph.nodes):
-            if <approximate_pattern_check(node)>:
-                # transform
+            if <pattern_check(node)>:
+                # transform node
                 matched = True
         if not matched:
             logger.warning("[pass_name] Pattern not found — pass not applied")
@@ -106,18 +141,11 @@ def pass_name(gm: fx.GraphModule) -> fx.GraphModule:
     return gm
 ```
 
-**Low confidence (stub only):**
-```python
-def pass_name_stub(gm: fx.GraphModule) -> fx.GraphModule:
-    """Detection stub — requires [specific Triton kernel / custom op]."""
-    for node in list(gm.graph.nodes):
-        if <detection_logic(node)>:
-            logger.warning(
-                "[pass_name_stub] Pattern detected but not applied — "
-                "requires [exact infrastructure needed]"
-            )
-    return gm  # gm is ALWAYS returned unchanged
-```
+| Confidence | `matched` check | On exception |
+|---|---|---|
+| `high` | Omit — assume pattern exists; exception = real error | `logger.warning` + return gm |
+| `medium` | Include — graceful no-op if pattern absent | `logger.warning` + return gm |
+| `low` (stub) | Detect only, never transform; always `return gm` unchanged | N/A |
 
 ### Rule 5: Canonical FX Patterns
 For QKV fusion, SDPA replacement, BN fold, pre-transposed weights, and activation substitution: read `knowledge/fx-patterns.md` and use those implementations as the starting point. Do NOT invent alternative implementations unless the canonical pattern cannot apply to this specific graph.

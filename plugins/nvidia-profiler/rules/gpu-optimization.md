@@ -62,17 +62,54 @@ if (node.target == torch.ops.aten.t.default
 
 - Backend name MUST be lowercase snake_case: `{model_name_lower}_opt`  (e.g. `conv_block_opt`)
 - Log at `INFO` level: start of backend execution, end of each pass, delegation to Inductor
-- Final line of backend MUST be `return compile_fx(gm, example_inputs)`
+- ALWAYS use the dedup-aware structure (UniqueSubgraphRegistry + FxPassRunner). The flat `compile_fx(gm, example_inputs)` pattern does not handle repeated-layer models correctly.
 
 ```python
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+
 @register_backend
 def my_model_opt(gm: fx.GraphModule, example_inputs) -> Callable:
-    logger.info("my_model_opt backend: starting FX passes")
-    gm = pass_one(gm)
-    gm = pass_two(gm)
-    logger.info("my_model_opt backend: delegating to Inductor")
-    return compile_fx(gm, example_inputs)
+    logger.info("my_model_opt backend: starting")
+    registry = UniqueSubgraphRegistry(gm)
+    equiv_map = registry.build_partition_equivalence_map()
+
+    if not equiv_map:
+        # No repeated layers — flat compile preserves cross-layer Inductor fusion
+        logger.info("my_model_opt: no repeated layers, flat compile path")
+        gm = _pass_manual(gm)
+        return compile_fx(gm, example_inputs)
+
+    logger.info(f"my_model_opt: {len(equiv_map)} duplicate partitions, dedup path")
+    runner = FxPassRunner(registry)
+
+    # replace_pattern-compatible passes (FxPassRunner applies to unique reps + propagates)
+    runner.apply_pass(_pattern_fn, _replacement_fn)
+
+    # Manual passes — apply to each unique rep, then propagate to its duplicates
+    for rep_name, rep_mod in registry.unique_reps:
+        _pass_manual(rep_mod)
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            _pass_manual(dup_mod)
+
+    # Compile unique reps; share the compiled callable with structural duplicates
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:
+        compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    return lambda *args: registry.split(*args)
 ```
+
+**Run an optimized workload with a custom backend:**
+```bash
+python nvidia/scripts/run_workload.py \
+    --workload workload_optimized.py \
+    --compile-backend my_model_opt \
+    --warmup-iters 2 --measure-iters 2
+```
+Importing `workload_optimized.py` triggers `@register_backend`, registering the backend before `torch.compile` is called.
 
 ## Non-Graph Optimizations in get_model_and_input()
 
@@ -100,7 +137,7 @@ operator-profiler map manifest.json \
     --ncu-sudo \
     --ncu-env PYTHONPATH=/repo \
     --model-name MyModel \
-    --script-args --workload workload_optimized.py --compile-backend my_model_opt
+    --script-args --workload workload_optimized.py --compile-backend my_model_opt --warmup-iters 2 --measure-iters 2
 
 # WRONG (--ncu-env after --script-args → passes it to the workload script)
 operator-profiler map manifest.json \

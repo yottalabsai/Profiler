@@ -11,11 +11,10 @@ Runs the complete profiling pipeline on your `workload.py` and produces `profile
 
 ```
 /capture workload.py
-/capture workload.py --compile-backend=none          # eager mode (no torch.compile)
-/capture workload.py --ncu-sudo=true                 # force sudo for ncu
-/capture workload.py --profile-name=optimized        # produces profile_optimized.json
-/capture workload.py --warmup-iters=10 --measure-iters=20
-/capture workload.py --layer-deduplicate             # profile unique layers only (transformers)
+/capture workload.py --ncu-sudo=true                               # force sudo for ncu
+/capture workload.py --profile-name=optimized                      # produces profile_optimized.json
+/capture workload.py --warmup-iters=5 --measure-iters=5            # more iterations for lower variance
+/capture workload_optimized.py --compile-backend=my_model_opt      # profile optimized workload
 ```
 
 ## Workload Interface
@@ -34,38 +33,38 @@ The pipeline does not read any other function from your file. The model must be 
 ## Pipeline Stages
 
 ### Stage 0a-pre: Correlation Pass (standalone, before nsys)
-Runs the torch.profiler correlation pass as a plain Python invocation — **not inside nsys**. nsys and torch.profiler both use CUPTI and cannot run simultaneously; running `--correlation-pass` inside nsys produces a 0-entry sidecar and inflates the nsys kernel count, causing a mismatch with ncu.
+Runs the torch.profiler correlation pass as a plain Python invocation — **not inside nsys**. nsys and torch.profiler both use CUPTI and cannot run simultaneously; running them together produces a 0-entry sidecar and falls back to NVTX-only (MEDIUM confidence) attribution.
 
-Also passes `--inductor-debug-dir` so Inductor writes its compiled `.py` artifacts to a known location during compilation. These are used in Stage 0c to attribute Triton fused kernels.
+Pass `--correlation-pass` to execute this phase. The script writes `.corr.json` then exits without running NVTX capture.
 
 ```bash
-PYTHONPATH={project_root} python nvidia/scripts/run_workload.py \
+PYTHONPATH={project_root} python3 nvidia/scripts/run_workload.py \
     --workload workload.py \
-    --compile-backend inductor \
-    --warmup-iters 5 \
-    --measure-iters 10 \
-    --correlation-pass \
+    --warmup-iters 2 \
+    --measure-iters 2 \
     --output-prefix profiler_output/{stem} \
     --inductor-debug-dir profiler_output/{stem}_inductor_debug \
-    [--layer-deduplicate]   # add for transformer/repeated-layer models
+    --correlation-pass \
+    [--compile-backend {backend_name}]
 ```
 
 Output: `profiler_output/{stem}.corr.json`, Inductor compiled artifacts in `profiler_output/{stem}_inductor_debug/`
 
-If `--layer-deduplicate` is set: also produces `profiler_output/{stem}.part.json` with the partition equivalence map (duplicate → unique representative). Pass this to Stage 0d via `--partition-map`.
+When using the built-in dedup backend (no `--compile-backend`): also produces `profiler_output/{stem}.part.json` with the partition equivalence map (duplicate → unique representative). Pass this to Stage 0d via `--partition-map`.
 
-### Stage 0a: nsys Capture (WITHOUT --correlation-pass)
-Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing. The correlation pass already ran in Stage 0a-pre; do not include `--correlation-pass` here. Pass the same `--inductor-debug-dir` so Inductor reuses the cached compilation and produces the same kernel names in the trace.
+### Stage 0a: nsys Capture
+Runs your workload under NVIDIA Nsight Systems with CUDA + NVTX tracing. `run_workload.py` auto-detects that it is running under nsys and executes the NVTX capture path, skipping the correlation pass. Pass the same `--inductor-debug-dir` so Inductor reuses the cached compilation and produces the same kernel names in the trace.
 
 ```bash
 PYTHONPATH={project_root} nsys profile --trace=cuda,nvtx --output=profiler_output/{stem} --force-overwrite=true \
-    python nvidia/scripts/run_workload.py \
+    python3 nvidia/scripts/run_workload.py \
         --workload workload.py \
-        --compile-backend inductor \
-        --warmup-iters 5 \
-        --measure-iters 10 \
+        --warmup-iters 2 \
+        --measure-iters 2 \
+        --output-prefix profiler_output/{stem} \
         --inductor-debug-dir profiler_output/{stem}_inductor_debug \
-        [--layer-deduplicate]   # must match Stage 0a-pre
+        [--compile-backend {backend_name}] \
+        [--fx-pass-module passes.py]
 ```
 
 Output: `profiler_output/{stem}.nsys-rep`
@@ -107,7 +106,7 @@ PYTHONPATH={project_root} operator-profiler map \
     --ncu-output-dir profiler_output/ncu_reps/ \
     --model-name {model_name} \
     --output profile.json \
-    --script-args --workload workload.py --compile-backend inductor --warmup-iters 5 --measure-iters 10 --inductor-debug-dir profiler_output/{stem}_inductor_debug
+    --script-args --workload workload.py --warmup-iters 2 --measure-iters 2 --output-prefix profiler_output/{stem} --inductor-debug-dir profiler_output/{stem}_inductor_debug [--compile-backend {backend_name}]
 ```
 
 `--inductor-debug-dir` in `--script-args` ensures the ncu replay reuses the same cached Inductor compilation (same `TORCHINDUCTOR_CACHE_DIR`). Without it, Inductor may recompile with differently-ordered kernels, silently corrupting the kernel→invocation mapping.
@@ -123,7 +122,7 @@ The capture-agent detects your system configuration automatically:
 | nsys executable | `nsys --version`; fallback: scan `/opt/nvidia/nsight-systems/*/bin/nsys` |
 | ncu executable | `ncu --version`; fallback: scan `/opt/nvidia/nsight-compute/*/ncu` |
 | sudo requirement | Read `/proc/driver/nvidia/params`; if `RmProfilingAdminOnly: 1` → needs sudo |
-| PYTHONPATH | `python -c "import sys; print(':'.join(sys.path))"` + project root prepended |
+| PYTHONPATH | `python3 -c "import sys; print(':'.join(sys.path))"` + project root prepended |
 | Project root | Search upward from workload for directory containing `nvidia/operator_profiler/` |
 
 ## The --script-args Ordering Rule
@@ -133,9 +132,9 @@ The capture-agent detects your system configuration automatically:
 ```bash
 # CORRECT — all map flags before --script-args
 operator-profiler map manifest.json \
-    --ncu-sudo true \
+    --ncu-sudo \
     --ncu-env PYTHONPATH=/repo \
-    --script-args --workload workload.py --compile-backend inductor
+    --script-args --workload workload.py --warmup-iters 2 --measure-iters 2
 
 # WRONG — ncu-env after script-args gets passed to the workload script
 operator-profiler map manifest.json \
@@ -148,8 +147,8 @@ operator-profiler map manifest.json \
 The `--warmup-iters` and `--measure-iters` in Stage 0a (nsys) MUST match Stage 0d (ncu replay). Mismatching causes kernel count mismatches — ncu collects metrics for the wrong kernel invocations relative to the nsys attribution.
 
 ```
-Stage 0a: --warmup-iters 5 --measure-iters 10
-Stage 0d: --warmup-iters 5 --measure-iters 10   ← must be identical
+Stage 0a: --warmup-iters 2 --measure-iters 2
+Stage 0d: --warmup-iters 2 --measure-iters 2   ← must be identical
 ```
 
 ## Permission Issues
@@ -177,27 +176,15 @@ The capture is successful when `profile.json`:
 3. Has `operators[*].aggregated != null` (metrics were collected)
 4. Has `unattributed_kernels` count < 60% of total kernel count
 
-**Expected unattributed rates:** With the Inductor fusion map enabled, unattributed rates should be near 0% for Inductor-compiled models. Triton fused kernels (which bypass torch.profiler correlation) are attributed via ground-truth `# Original ATen: [...]` comments in the Inductor-compiled `.py` files.
+**Expected unattributed rates:** With the Inductor fusion map and correlation map both enabled, unattributed rates should be near 0% for Inductor-compiled models. If the correlation pass encountered a CUPTI conflict with nsys, `.corr.json` will have 0 entries and Triton fused kernels will rely on the Inductor fusion map via `--inductor-fusion-dir`.
 
 If `unattributed_kernels` exceeds 10%, check:
-- Was `--inductor-debug-dir` passed to all three stages (0a-pre, 0a, 0d `--script-args`)? (required for Triton kernel attribution)
+- Was `--inductor-debug-dir` passed to Stage 0a and Stage 0d `--script-args`? (required for Triton kernel attribution)
 - Was `--inductor-fusion-dir` passed to `operator-profiler manifest`?
-- Was `--correlation-pass` used during capture? (provides HIGH confidence for cuBLAS kernels)
+- Was `--output-prefix` set so `.corr.json` was written to a known path? (needed by `operator-profiler manifest --corr-json`)
 - Were NVTX ranges emitted? (`--trace=cuda,nvtx` must be set in nsys flags)
 - Did torch.compile complete before the measurement window?
-- Is the model using `cudagraphs` mode? (Graph replay kernels have different attribution)
 
 ## Configuration Options
 
-| Option | Default | Description |
-|---|---|---|
-| `--compile-backend` | `inductor` | Compile backend: `inductor`, `none` (eager), `cudagraphs`, or any registered custom backend name |
-| `--warmup-iters` | `5` | Warmup iterations before NVTX capture window |
-| `--measure-iters` | `10` | Measurement iterations within NVTX capture window |
-| `--ncu-sudo` | `auto` | `auto` detects, `true` forces sudo, `false` skips |
-| `--ncu-path` | `auto` | Explicit path to ncu executable |
-| `--nsys-path` | `auto` | Explicit path to nsys executable |
-| `--output-dir` | `profiler_output/` | Directory for intermediate files (nsys-rep, sqlite, manifest) |
-| `--profile-name` | `baseline` | `baseline` → `profile.json`, `optimized` → `profile_optimized.json` |
-| `--inductor-debug-dir` | `auto` | Directory for Inductor compiled artifacts. Auto-set to `profiler_output/{stem}_inductor_debug/` when `compile_backend=inductor`. Passed to all three stages (0a-pre, 0a, 0d) for consistent compilation caching and Triton kernel attribution. |
-| `--layer-deduplicate` | `false` | Profile only structurally unique layer partitions; propagate metrics to structural duplicates. Recommended for transformer and other repeated-layer models. Produces `profiler_output/{stem}.part.json`. Must be set consistently in Stages 0a-pre and 0a. |
+See the full flag reference in `agents/capture-agent.md § Configuration`.

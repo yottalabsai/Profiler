@@ -1,0 +1,911 @@
+{
+  "schema_version": "1.0",
+  "capture_metadata": {
+    "model_name": "sdpa_attention_opt",
+    "torch_version": "2.11.0+cu128",
+    "cuda_version": null,
+    "compile_mode": "sdpa_attention_opt",
+    "nsys_report_path": "/root/Profiler/examples/sdpa_attention/test_run/sdpa_attention_opt.nsys-rep",
+    "ncu_report_path": "examples/sdpa_attention/test_run/profiler_output/ncu_reps",
+    "capture_timestamp_utc": "2026-05-13T05:44:37.970834+00:00",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "operators": [
+    {
+      "operator_id": "aten::native_layer_norm_0",
+      "operator_name": "aten::native_layer_norm",
+      "call_index": 0,
+      "is_fused": false,
+      "fused_with": [],
+      "nvtx_range": null,
+      "kernels": [
+        {
+          "kernel_id": "k_00031",
+          "kernel_name": "triton_per_fused_native_layer_norm_0",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145176624,
+          "end_ns": 4145185712,
+          "duration_ns": 9088,
+          "grid_dim": [
+            4096,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.2,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 20.66,
+              "fbpa__dram_read_bytes.sum": 4.2,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 20.66,
+              "gpu__time_duration.sum": 10.05,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 48.68,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 62.93,
+              "launch__registers_per_thread": 24,
+              "launch__shared_mem_per_block_dynamic": 16,
+              "lts__t_request_hit_rate.pct": 1.51,
+              "lts__t_sector_hit_rate.pct": 55.33,
+              "sm__cycles_active.sum": 934624,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 36.86,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 74.2,
+              "smsp__inst_executed.avg.per_cycle_active": 0.48,
+              "smsp__inst_executed.sum": 1785856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 48.13,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 1.84
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00038",
+          "kernel_name": "triton_per_fused_native_layer_norm_0",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145797075,
+          "end_ns": 4145806099,
+          "duration_ns": 9024,
+          "grid_dim": [
+            4096,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.2,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 20.4,
+              "fbpa__dram_read_bytes.sum": 4.2,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 20.4,
+              "gpu__time_duration.sum": 10.14,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 48.68,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 62.48,
+              "launch__registers_per_thread": 24,
+              "launch__shared_mem_per_block_dynamic": 16,
+              "lts__t_request_hit_rate.pct": 1.61,
+              "lts__t_sector_hit_rate.pct": 55.35,
+              "sm__cycles_active.sum": 940103,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 35.52,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 73.91,
+              "smsp__inst_executed.avg.per_cycle_active": 0.46,
+              "smsp__inst_executed.sum": 1785856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 46.55,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 1.78
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 18112,
+        "kernel_count": 2,
+        "dominant_kernel_id": "k_00031",
+        "total_dram_bytes_read": 8,
+        "total_dram_bytes_written": 0,
+        "memory_throughput_pct": 20.530459363957593,
+        "dram_throughput_pct": 20.530459363957593,
+        "mem_busy_pct": 62.70579505300353,
+        "l1_hit_rate": 48.68,
+        "l2_hit_rate": 1.5598233215547703,
+        "sm_throughput_pct": 36.19236749116608,
+        "tensor_core_active_pct": 1.8101060070671378,
+        "achieved_occupancy": 74.05551236749116,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 47.34279151943462,
+        "total_executed_instructions": 3571712,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.4700353356890459,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": 24.0,
+        "local_memory_spills": 0,
+        "dynamic_smem_per_block": 16.0
+      }
+    },
+    {
+      "operator_id": "aten::view_0",
+      "operator_name": "aten::view",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::t",
+        "aten::mm"
+      ],
+      "nvtx_range": null,
+      "kernels": [
+        {
+          "kernel_id": "k_00032",
+          "kernel_name": "triton_tem_fused_mm_t_view_1",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145223824,
+          "end_ns": 4145245104,
+          "duration_ns": 21280,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.48,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.48,
+              "gpu__time_duration.sum": 22.24,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.66,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 83.97,
+              "lts__t_sector_hit_rate.pct": 84.85,
+              "sm__cycles_active.sum": 2002619,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.72,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.08,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1296384,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 16.28,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 52.39
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00033",
+          "kernel_name": "triton_tem_fused_mm_t_view_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145261584,
+          "end_ns": 4145282960,
+          "duration_ns": 21376,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.43,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.43,
+              "gpu__time_duration.sum": 22.37,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.02,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 83.31,
+              "lts__t_sector_hit_rate.pct": 85.12,
+              "sm__cycles_active.sum": 2021939,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.31,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.1,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1273856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.86,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 51.97
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00034",
+          "kernel_name": "triton_tem_fused_mm_t_view_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145296048,
+          "end_ns": 4145317520,
+          "duration_ns": 21472,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.48,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.48,
+              "gpu__time_duration.sum": 22.24,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.34,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 84.05,
+              "lts__t_sector_hit_rate.pct": 84.93,
+              "sm__cycles_active.sum": 2010747,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.41,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.22,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1273856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.88,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 52.03
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00036",
+          "kernel_name": "triton_tem_fused_mm_t_view_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145533937,
+          "end_ns": 4145555409,
+          "duration_ns": 21472,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.46,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.46,
+              "gpu__time_duration.sum": 22.27,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.31,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 83.39,
+              "lts__t_sector_hit_rate.pct": 84.97,
+              "sm__cycles_active.sum": 2010952,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.33,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.4,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1273856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.9,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 52.11
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00039",
+          "kernel_name": "triton_tem_fused_mm_t_view_1",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145840179,
+          "end_ns": 4145861267,
+          "duration_ns": 21088,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.5,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.5,
+              "gpu__time_duration.sum": 22.21,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.76,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 83.96,
+              "lts__t_sector_hit_rate.pct": 84.85,
+              "sm__cycles_active.sum": 1999974,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.59,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.39,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1296384,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 16.16,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 51.99
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00040",
+          "kernel_name": "triton_tem_fused_mm_t_view_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145877011,
+          "end_ns": 4145898451,
+          "duration_ns": 21440,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.47,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.47,
+              "gpu__time_duration.sum": 22.27,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.46,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 83.39,
+              "lts__t_sector_hit_rate.pct": 84.97,
+              "sm__cycles_active.sum": 2006921,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.45,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.24,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1273856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 16.01,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 52.47
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00041",
+          "kernel_name": "triton_tem_fused_mm_t_view_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145911987,
+          "end_ns": 4145933331,
+          "duration_ns": 21344,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.48,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.48,
+              "gpu__time_duration.sum": 22.24,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 53.23,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 84.05,
+              "lts__t_sector_hit_rate.pct": 84.92,
+              "sm__cycles_active.sum": 2014297,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.28,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.4,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1273856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.96,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 52.3
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00043",
+          "kernel_name": "triton_tem_fused_mm_t_view_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4146152532,
+          "end_ns": 4146173780,
+          "duration_ns": 21248,
+          "grid_dim": [
+            256,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 4.74,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 10.41,
+              "fbpa__dram_read_bytes.sum": 4.74,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 10.41,
+              "gpu__time_duration.sum": 22.37,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 52.62,
+              "launch__registers_per_thread": 128,
+              "launch__shared_mem_per_block_dynamic": 24.58,
+              "lts__t_request_hit_rate.pct": 83.39,
+              "lts__t_sector_hit_rate.pct": 84.97,
+              "sm__cycles_active.sum": 2039484,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.71,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.0,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 1273856,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.88,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 52.04
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 170720,
+        "kernel_count": 8,
+        "dominant_kernel_id": "k_00034",
+        "total_dram_bytes_read": 37,
+        "total_dram_bytes_written": 0,
+        "memory_throughput_pct": 10.46372633552015,
+        "dram_throughput_pct": 10.46372633552015,
+        "mem_busy_pct": 53.29963261480788,
+        "l1_hit_rate": 0.0,
+        "l2_hit_rate": 83.68821368322399,
+        "sm_throughput_pct": 38.47440112464855,
+        "tensor_core_active_pct": 52.16274039362698,
+        "achieved_occupancy": 14.22879662605436,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 15.990785379568889,
+        "total_executed_instructions": 10235904,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.16000000000000003,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": 128.0,
+        "local_memory_spills": 0,
+        "dynamic_smem_per_block": 24.58
+      }
+    },
+    {
+      "operator_id": "aten::_flash_attention_forward, op_id = 17, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(11,0), (13,0), (15,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::_flash_attention_forward, op_id = 17, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(11,0), (13,0), (15,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_scaled_dot_product_flash_attention, op_id = 10, sizes = [[8, 8, 512, 64], [8, 8, 512, 64], [8, 8, 512, 64], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::_flash_attention_forward, op_id = 17, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(11,0), (13,0), (15,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4145371717,
+        "end_ns": 4145456098,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00035",
+          "kernel_name": "flash_fwd_kernel",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145445457,
+          "end_ns": 4145492017,
+          "duration_ns": 46560,
+          "grid_dim": [
+            4,
+            8,
+            8
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 12.65,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 12.89,
+              "fbpa__dram_read_bytes.sum": 12.65,
+              "fbpa__dram_write_bytes.sum": 65.15,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 12.89,
+              "gpu__time_duration.sum": 48.42,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 152576,
+              "l1tex__t_sector_hit_rate.pct": 26.12,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 34.25,
+              "launch__registers_per_thread": 255,
+              "launch__shared_mem_per_block_dynamic": 49.15,
+              "lts__t_request_hit_rate.pct": 43.63,
+              "lts__t_sector_hit_rate.pct": 65.52,
+              "sm__cycles_active.sum": 4484357,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 35.52,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 11.16,
+              "smsp__inst_executed.avg.per_cycle_active": 0.41,
+              "smsp__inst_executed.sum": 7313408,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 41.1,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 46.97
+            }
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::_flash_attention_forward, op_id = 17, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(11,0), (13,0), (15,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4145371717,
+            "end_ns": 4145456098,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 46560,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00035",
+        "total_dram_bytes_read": 12,
+        "total_dram_bytes_written": 65,
+        "memory_throughput_pct": 12.89,
+        "dram_throughput_pct": 12.89,
+        "mem_busy_pct": 34.25,
+        "l1_hit_rate": 26.119999999999997,
+        "l2_hit_rate": 43.63,
+        "sm_throughput_pct": 35.52,
+        "tensor_core_active_pct": 46.96999999999999,
+        "achieved_occupancy": 11.16,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 41.1,
+        "total_executed_instructions": 7313408,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.41,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": 255.0,
+        "local_memory_spills": 152576,
+        "dynamic_smem_per_block": 49.15
+      }
+    },
+    {
+      "operator_id": "aten::_unsafe_view_0",
+      "operator_name": "aten::_unsafe_view",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::add",
+        "aten::native_layer_norm"
+      ],
+      "nvtx_range": null,
+      "kernels": [
+        {
+          "kernel_id": "k_00037",
+          "kernel_name": "triton_per_fused__unsafe_view_add_native_layer_norm_3",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4145593202,
+          "end_ns": 4145602706,
+          "duration_ns": 9504,
+          "grid_dim": [
+            512,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 8.4,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 35.32,
+              "fbpa__dram_read_bytes.sum": 8.4,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 35.32,
+              "gpu__time_duration.sum": 11.71,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 29.9,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 41.67,
+              "launch__registers_per_thread": 68,
+              "launch__shared_mem_per_block_dynamic": 4.1,
+              "lts__t_request_hit_rate.pct": 29.95,
+              "lts__t_sector_hit_rate.pct": 36.86,
+              "sm__cycles_active.sum": 1102984,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 20.16,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 25.91,
+              "smsp__inst_executed.avg.per_cycle_active": 0.26,
+              "smsp__inst_executed.sum": 1138688,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 26.17,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.26
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00044",
+          "kernel_name": "triton_per_fused__unsafe_view_add_native_layer_norm_3",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4146206068,
+          "end_ns": 4146215764,
+          "duration_ns": 9696,
+          "grid_dim": [
+            512,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 8.4,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 34.53,
+              "fbpa__dram_read_bytes.sum": 8.4,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 34.53,
+              "gpu__time_duration.sum": 11.97,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 29.99,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 41.73,
+              "launch__registers_per_thread": 68,
+              "launch__shared_mem_per_block_dynamic": 4.1,
+              "lts__t_request_hit_rate.pct": 29.84,
+              "lts__t_sector_hit_rate.pct": 37.31,
+              "sm__cycles_active.sum": 1101265,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 20.2,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 25.7,
+              "smsp__inst_executed.avg.per_cycle_active": 0.26,
+              "smsp__inst_executed.sum": 1138688,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 26.13,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.26
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 19200,
+        "kernel_count": 2,
+        "dominant_kernel_id": "k_00044",
+        "total_dram_bytes_read": 16,
+        "total_dram_bytes_written": 0,
+        "memory_throughput_pct": 34.92105,
+        "dram_throughput_pct": 34.92105,
+        "mem_busy_pct": 41.7003,
+        "l1_hit_rate": 29.945449999999994,
+        "l2_hit_rate": 29.894449999999996,
+        "sm_throughput_pct": 20.1802,
+        "tensor_core_active_pct": 0.26,
+        "achieved_occupancy": 25.803949999999997,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 26.149800000000003,
+        "total_executed_instructions": 2277376,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.26,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": 68.0,
+        "local_memory_spills": 0,
+        "dynamic_smem_per_block": 4.1
+      }
+    },
+    {
+      "operator_id": "aten::_flash_attention_forward, op_id = 44, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(38,0), (40,0), (42,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::_flash_attention_forward, op_id = 44, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(38,0), (40,0), (42,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_scaled_dot_product_flash_attention, op_id = 37, sizes = [[8, 8, 512, 64], [8, 8, 512, 64], [8, 8, 512, 64], [], [], [], []], input_op_ids = [(0,-1), (13,0), (15,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::_flash_attention_forward, op_id = 44, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(38,0), (40,0), (42,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4145974522,
+        "end_ns": 4146049662,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00042",
+          "kernel_name": "flash_fwd_kernel",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4146039540,
+          "end_ns": 4146085908,
+          "duration_ns": 46368,
+          "grid_dim": [
+            4,
+            8,
+            8
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_read.sum": 12.65,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 12.78,
+              "fbpa__dram_read_bytes.sum": 12.65,
+              "fbpa__dram_write_bytes.sum": 55.17,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 12.78,
+              "gpu__time_duration.sum": 48.83,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 152576,
+              "l1tex__t_sector_hit_rate.pct": 26.11,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 34.24,
+              "launch__registers_per_thread": 255,
+              "launch__shared_mem_per_block_dynamic": 49.15,
+              "lts__t_request_hit_rate.pct": 43.64,
+              "lts__t_sector_hit_rate.pct": 65.53,
+              "sm__cycles_active.sum": 4486022,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 34.64,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 11.21,
+              "smsp__inst_executed.avg.per_cycle_active": 0.4,
+              "smsp__inst_executed.sum": 7313408,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 40.23,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 45.98
+            }
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::_flash_attention_forward, op_id = 44, sizes = [[8, 512, 8, 64], [8, 512, 8, 64], [8, 512, 8, 64], [], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(38,0), (40,0), (42,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4145974522,
+            "end_ns": 4146049662,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 46368,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00042",
+        "total_dram_bytes_read": 12,
+        "total_dram_bytes_written": 55,
+        "memory_throughput_pct": 12.779999999999998,
+        "dram_throughput_pct": 12.779999999999998,
+        "mem_busy_pct": 34.24,
+        "l1_hit_rate": 26.11,
+        "l2_hit_rate": 43.64,
+        "sm_throughput_pct": 34.64,
+        "tensor_core_active_pct": 45.97999999999999,
+        "achieved_occupancy": 11.21,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 40.23,
+        "total_executed_instructions": 7313408,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.4,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": 255.0,
+        "local_memory_spills": 152576,
+        "dynamic_smem_per_block": 49.15
+      }
+    }
+  ],
+  "unattributed_kernels": [],
+  "warnings": [
+    "k_00000 (distribution_elementwise_grid_stride_kernel): flagged as initialization kernel",
+    "k_00001 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00002 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00003 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00004 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00005 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00006 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00007 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00008 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00009 (vectorized_elementwise_kernel): flagged as initialization kernel",
+    "k_00010 (triton_per_fused_native_layer_norm_0): flagged as initialization kernel",
+    "k_00011 (triton_tem_fused_mm_t_view_1): flagged as initialization kernel",
+    "k_00012 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00013 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00014 (flash_fwd_kernel): flagged as initialization kernel",
+    "k_00015 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00016 (triton_per_fused__unsafe_view_add_native_layer_norm_3): flagged as initialization kernel",
+    "k_00017 (triton_per_fused_native_layer_norm_0): flagged as initialization kernel",
+    "k_00018 (triton_tem_fused_mm_t_view_1): flagged as initialization kernel",
+    "k_00019 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00020 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00021 (flash_fwd_kernel): flagged as initialization kernel",
+    "k_00022 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00023 (triton_per_fused__unsafe_view_add_native_layer_norm_3): flagged as initialization kernel",
+    "k_00024 (triton_per_fused_native_layer_norm_0): flagged as initialization kernel",
+    "k_00025 (triton_tem_fused_mm_t_view_1): flagged as initialization kernel",
+    "k_00026 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00027 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00028 (flash_fwd_kernel): flagged as initialization kernel",
+    "k_00029 (triton_tem_fused_mm_t_view_2): flagged as initialization kernel",
+    "k_00030 (triton_per_fused__unsafe_view_add_native_layer_norm_3): flagged as initialization kernel"
+  ]
+}

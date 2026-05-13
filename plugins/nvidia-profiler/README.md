@@ -92,9 +92,9 @@ The primary entry point. Orchestrates all 8 stages and writes every artifact.
 
 | Option | Default | Description |
 |---|---|---|
-| `--compile-backend` | `inductor` | `inductor`, `none` (eager), `cudagraphs`, or any registered backend |
-| `--warmup-iters` | `5` | Must match between Stage 0 and Stage 5 |
-| `--measure-iters` | `10` | Must match between Stage 0 and Stage 5 |
+| `--compile-backend` | *(none)* | Named `@register_backend` backend for optimized workloads. Omit for baseline profiling (uses built-in dedup+inductor). Pass at Stage 5 for optimized workloads with complex FX passes. |
+| `--warmup-iters` | `2` | Must match between Stage 0 and Stage 5 |
+| `--measure-iters` | `2` | Must match between Stage 0 and Stage 5 |
 | `--ncu-sudo` | `auto` | `auto` detects, `true` forces, `false` skips |
 | `--ncu-path` / `--nsys-path` | `auto` | Explicit path to profiler executables |
 | `--confidence-threshold` | `medium` | Only implement optimizations at or above this level |
@@ -120,16 +120,16 @@ Runs the complete nsys + ncu pipeline on a workload and produces `profile.json` 
 
 ```
 /capture workload.py
-/capture workload.py --compile-backend=none          # eager mode
-/capture workload.py --ncu-sudo=true                 # force sudo for ncu
-/capture workload.py --profile-name=optimized        # → profile_optimized.json
-/capture workload.py --warmup-iters=10 --measure-iters=20
+/capture workload.py --ncu-sudo=true                               # force sudo for ncu
+/capture workload.py --profile-name=optimized                      # → profile_optimized.json
+/capture workload.py --warmup-iters=5 --measure-iters=5            # more iterations for lower variance
+/capture workload_optimized.py --compile-backend=my_model_opt      # profile optimized workload
 ```
 
 **Internal pipeline stages:**
 
-1. **Correlation pass** — runs `torch.profiler` as a plain Python invocation (not inside nsys — both use CUPTI and cannot run simultaneously). Produces a `.corr.json` sidecar for HIGH-confidence kernel→operator attribution.
-2. **nsys capture** — runs the workload under `nsys profile --trace=cuda,nvtx`. Produces `.nsys-rep`.
+1. **Correlation pass** — runs `run_workload.py --correlation-pass` as a plain Python invocation (not inside nsys). nsys and torch.profiler both use CUPTI and cannot run simultaneously. Produces `.corr.json` for HIGH-confidence kernel→operator attribution, and `.part.json` (partition equivalence map) when using the built-in dedup backend.
+2. **nsys capture** — runs the workload under `nsys profile --trace=cuda,nvtx` (without `--correlation-pass`). Reuses Inductor cache from step 1. Produces `.nsys-rep`.
 3. **SQLite export** — `nsys export --type=sqlite` for programmatic parsing.
 4. **Manifest build** — joins CUDA kernel launches to NVTX operator ranges; applies attribution tiers.
 5. **ncu kernel replay** — `--replay-mode application`: replays the full workload once per counter group (4–8 passes), collecting 20 hardware counters for all kernels simultaneously. Produces `profile.json`.
@@ -138,11 +138,11 @@ Runs the complete nsys + ncu pipeline on a workload and produces `profile.json` 
 
 | Tier | Confidence | Method |
 |---|---|---|
-| torch.profiler correlation | `high` | CUPTI correlation IDs via `--correlation-pass` |
+| torch.profiler correlation | `high` | External-id link in Chrome trace; written to `.corr.json` |
 | NVTX enclosure | `medium` | Kernel falls within an `aten::` NVTX range from `emit_nvtx` |
 | Unattributed | — | Stored in `unattributed_kernels[]`; never silently dropped |
 
-Expected unattributed rate: 20–40% for Inductor-compiled models without `--correlation-pass`. Always use the correlation pass to minimize this.
+Expected unattributed rate: near 0% when both `.corr.json` (from the standalone correlation pass) and the Inductor fusion map are active. If the correlation pass was accidentally run inside nsys (CUPTI conflict), `.corr.json` will have 0 entries and unattributed rates rise to 20–40%.
 
 **System auto-detection:**
 

@@ -14,7 +14,7 @@ The single command that drives the complete GPU optimization pipeline. Pass your
 /optimize workload.py
 
 # Full pipeline with explicit options
-/optimize workload.py --compile-backend=inductor --ncu-sudo=true
+/optimize workload.py --ncu-sudo=true
 
 # Resume from a specific stage (skips completed stages)
 /optimize workload.py --resume --from=analyze
@@ -38,11 +38,15 @@ The single command that drives the complete GPU optimization pipeline. Pass your
 ### Stage 0: Capture (→ profile.json)
 Runs nsys+ncu pipeline on `workload.py`. Auto-detects executables, sudo requirement, and PYTHONPATH. Produces `profile.json` with per-operator hardware metrics.
 
-If `--layer-deduplicate` is set: also produces `profiler_output/{stem}.part.json` (partition equivalence map), passed to ncu replay via `--partition-map` to skip duplicate-partition kernel replay and propagate metrics.
+Two-phase capture to avoid CUPTI conflict (nsys and torch.profiler cannot share CUPTI simultaneously):
+- Phase A (no nsys): `run_workload.py --correlation-pass` → `.corr.json` + `.part.json`
+- Phase B (under nsys): `run_workload.py` (no `--correlation-pass`) → `.nsys-rep`
+
+Layer deduplication is unconditional when using the built-in backend: the FX graph is always split by detected layer structure; only unique representatives are compiled; structural duplicates share the same compiled callable. `profiler_output/{stem}.part.json` is written in Phase A; pass it to ncu replay via `--partition-map` to skip replaying duplicate-partition kernels.
 
 ```
 Delegates to: capture-agent
-Output: profile.json (+ .part.json if --layer-deduplicate)
+Output: profile.json, profiler_output/{stem}.part.json (when built-in backend used)
 Skip if: profile.json exists and --resume is set
 ```
 
@@ -144,9 +148,9 @@ Without `--resume`, all stages run even if artifacts exist (fresh run).
 
 | Option | Default | Applies To |
 |---|---|---|
-| `--compile-backend` | `inductor` | Stages 0, 3, 5 |
-| `--warmup-iters` | `5` | Stages 0, 5 (must match) |
-| `--measure-iters` | `10` | Stages 0, 5 (must match) |
+| `--compile-backend` | *(none)* | Stages 0, 5 — named `@register_backend` backend for optimized workloads. Omit for baseline (uses built-in dedup+inductor backend). Required at Stage 5 when the optimized workload has complex FX passes (SDPA, BN fold, pre-transposed weights). |
+| `--warmup-iters` | `2` | Stages 0, 5 (must match) |
+| `--measure-iters` | `2` | Stages 0, 5 (must match) |
 | `--ncu-sudo` | `auto` | Stages 0, 5 |
 | `--ncu-path` | `auto` | Stages 0, 5 |
 | `--nsys-path` | `auto` | Stages 0, 5 |
@@ -156,7 +160,6 @@ Without `--resume`, all stages run even if artifacts exist (fresh run).
 | `--resume` | `false` | Skip stages with existing artifacts |
 | `--from` | `capture` | Which stage to resume from |
 | `--audience` | `team` | Report audience for Stage 7 |
-| `--layer-deduplicate` | `false` | Stages 0, 5 — profile only unique layer reps; propagate metrics to structural duplicates. Recommended for transformer models. Produces `.part.json` in Stage 0. |
 
 ## Progress Output
 

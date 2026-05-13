@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "file_path": "transformer_stack_optimized.py",
+  "backend_name": "transformer_stack_opt",
+  "steps": [
+    {
+      "step": 1,
+      "name": "Syntax",
+      "status": "PASS"
+    },
+    {
+      "step": 2,
+      "name": "Import",
+      "status": "PASS"
+    },
+    {
+      "step": 3,
+      "name": "Registration",
+      "status": "PASS",
+      "details": "transformer_stack_opt found in torch._dynamo.list_backends()"
+    },
+    {
+      "step": 4,
+      "name": "Forward Pass",
+      "status": "PASS",
+      "details": "output shape [4,128,512], no NaN/Inf"
+    },
+    {
+      "step": 5,
+      "name": "Smoke Test",
+      "status": "PASS",
+      "details": "compiled forward with 7 duplicate partitions sharing 1 compiled callable"
+    }
+  ],
+  "pass_application": [
+    {
+      "pass": "OPT-1 BF16 dtype promotion",
+      "status": "APPLIED",
+      "details": "model.to(bfloat16) in get_model_and_input()"
+    },
+    {
+      "pass": "OPT-2 QKV fusion",
+      "status": "NOT_APPLIED",
+      "details": "Weight placeholders in partitioned subgraph \u2014 tensor not in named_parameters()"
+    },
+    {
+      "pass": "OPT-3 SDPA replacement",
+      "status": "NOT_APPLIED",
+      "details": "Softmax/matmul targets in Dynamo pre-partition IR did not match pattern"
+    }
+  ],
+  "dedup_summary": {
+    "total_partitions": 8,
+    "unique_reps": 1,
+    "duplicates": 7,
+    "compiled_count": 1
+  },
+  "overall": "READY FOR PROFILING"
+}

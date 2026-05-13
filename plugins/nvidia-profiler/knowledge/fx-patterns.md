@@ -5,51 +5,74 @@ Complete, copy-pasteable implementations for the most common GPU optimization pa
 All patterns assume the standard imports:
 ```python
 import logging
+import operator
 import torch
 import torch.fx as fx
+import torch.nn.functional as F
 from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx  # function, not module
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 ```
 
 ---
 
+## Pre-Inductor vs Post-Inductor IR
+
+`@register_backend` functions receive the graph **before** Inductor lowers it. At this level ops are Python-level callables, not aten primitives:
+
+| Source code | Pre-Inductor node (what your pass sees) |
+|---|---|
+| `nn.Linear(x)` | `call_function: F.linear` — weight is a `placeholder` node |
+| `x @ y` | `call_function: operator.matmul` |
+| `x * scale` | `call_function: operator.mul` |
+| `x / scale` | `call_function: operator.truediv` |
+| `torch.softmax(x, dim)` | `call_function: torch.softmax` (same object as `F.softmax`) |
+| `x.tanh()` | `call_method: "tanh"` or `call_function: torch.tanh` |
+| `nn.Conv2d(x)` | `call_function: F.conv2d` — weight is a `placeholder` node |
+| `nn.BatchNorm2d(x)` | `call_function: F.batch_norm` — all stats are `placeholder` nodes |
+| `x.transpose(-2, -1)` | `call_method: "transpose"` |
+| Any `nn.Module` parameter | `placeholder` node (Dynamo lifts ALL params to function args) |
+
+Inductor later decomposes these: `F.linear → mm + t`, `torch.softmax → amax + sub + exp + sum + div`, etc. Passes that target `aten.mm.default` or `aten._softmax.default` find nothing when applied to the pre-Inductor graph.
+
+---
+
 ## Pass Taxonomy
 
-Before writing any FX pass, classify each optimization into one of three categories. The category determines exactly how the backend-engineer applies it.
+Before writing any FX pass, classify each optimization into one of three categories:
 
 | Category | Criteria | How to apply |
 |---|---|---|
-| **`replace_pattern`-compatible** | Pure functional pattern: no tuple outputs, no `register_buffer`, no control flow | Define `_pattern_fn` + `_replacement_fn`; call `runner.apply_pass(_pattern_fn, _replacement_fn)` — `FxPassRunner` handles unique-rep application and propagation to duplicates automatically |
-| **Manual per-rep** | Tuple outputs, decomposed ops, or `register_buffer` needed | Write `def _pass_name(gm) -> gm`; call it in `for rep_name, rep_mod in registry.unique_reps`, then repeat for each duplicate |
-| **Non-graph** | dtype, memory_format, batch shape — invisible in Aten IR | Stays in `get_model_and_input()`, not in the backend at all |
+| **`replace_pattern`-compatible** | Pure functional: no tuple outputs, no `register_buffer`, no `call_method` nodes | Define `_pattern_fn` + `_replacement_fn`; call `runner.apply_pass(_pattern_fn, _replacement_fn)` |
+| **Manual per-rep** | Requires `register_buffer`, involves `call_method` nodes, or needs actual tensor values from `partition_inputs` | Write `def _pass_name(gm, partition_inputs) -> gm`; call per unique rep, then propagate to duplicates |
+| **Non-graph** | dtype, memory_format, batch shape — not visible in FX IR | Stays in `get_model_and_input()`, not in the backend at all |
 
-**Why SDPA replacement must be manual per-rep:** Inductor decomposes `softmax` into `exp + sum + div` before FX passes run. `replace_pattern` never sees a `softmax` node — only its decomposed form. The manual graph traversal in Pattern 2 matches the decomposed nodes directly.
+**Why SDPA replacement must be manual per-rep:** The pattern involves `call_method "transpose"` nodes, which `replace_pattern` cannot match. It also requires extracting the pre-transposed `k` from the transpose node's input.
 
-**Why BN fold must be manual per-rep:** `aten._native_batch_norm_legit_no_training` returns a 3-tuple `(output, mean, rstd)`. `replace_pattern` cannot match or produce tuple-returning patterns, so Pattern 3 uses direct node surgery instead.
+**Why BN fold must be manual per-rep:** Folding writes new weight tensors via `register_buffer`. `replace_pattern` cannot call `register_buffer` on the module.
 
-**`replace_pattern`-compatible:** QKV fusion (Pattern 1), tanh→GELU substitution (Pattern 5).
+**Why QKV fusion must be manual per-rep:** The weight tensors are `placeholder` nodes — their actual values must be retrieved from `partition_inputs` (captured by running the partition once). `replace_pattern` operates purely structurally and cannot access tensor values.
+
+**`replace_pattern`-compatible:** tanh→GELU substitution (Pattern 4). QKV and SDPA are manual per-rep.
 
 ---
 
 ## Utility: `_capture_partition_inputs`
 
-When compiling each unique partition with `compile_fx`, you must pass that partition's actual input tensors — not the original model's inputs, which have a different shape. Use this utility to capture them via forward-pre hooks:
+Required for any pass that needs to read actual weight tensor values. Dynamo lifts all `nn.Module` parameters as `placeholder` nodes, so the values flow in as function arguments — the `partition_inputs` list gives the tensor at each placeholder's position.
 
 ```python
 def _capture_partition_inputs(
     split_gm: fx.GraphModule,
     example_inputs: list,
 ) -> dict[str, list]:
-    """Capture actual input tensors for each partition by running split_gm once.
-    Required to compile each unique rep with its real partition inputs."""
+    """Capture actual input tensors for each partition by running split_gm once."""
     partition_inputs: dict[str, list] = {}
     hooks = []
     for name, submod in split_gm.named_children():
         if isinstance(submod, fx.GraphModule):
-            def _hook(mod, args, _name=name):   # _name= captures loop var by value
+            def _hook(mod, args, _name=name):
                 partition_inputs[_name] = list(args)
             hooks.append(submod.register_forward_pre_hook(_hook))
     with torch.no_grad():
@@ -59,95 +82,84 @@ def _capture_partition_inputs(
     return partition_inputs
 ```
 
-Usage in the backend:
+Usage in the backend — call this BEFORE applying any pass that needs weight values:
 ```python
 partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
 for rep_name, rep_mod in registry.unique_reps:
-    compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+    inputs = partition_inputs.get(rep_name, example_inputs)
+    _pass_fuse_qkv(rep_mod, inputs)
+    _pass_replace_sdpa(rep_mod)
+    compiled = compile_fx(rep_mod, inputs)
 ```
 
 ---
 
 ## Pattern 1: QKV Weight Fusion
 
-Fuses 3 independent `mm(x, W_q)`, `mm(x, W_k)`, `mm(x, W_v)` calls (same input `x`) into a single batched `mm(x, W_fused)` + `chunk(3, dim=-1)`. Reduces kernel launches from 3 to 1.
+Fuses 3 independent `F.linear(x, W_q)`, `F.linear(x, W_k)`, `F.linear(x, W_v)` calls sharing the same input `x` into a single `F.linear(x, W_qkv)` + `torch.chunk(3, dim=-1)`.
 
-**Detection signal:** Three `aten::mm` / `aten::linear` nodes sharing the same input activation node.
+**Detection signal:** Three `F.linear` nodes whose first argument is the same node.
 
-**Weight-node detection note:** Inductor wraps parameters as `t(get_attr('weight'))`. Must look through the transpose wrapper.
+**Weight access:** weights are `placeholder` nodes — resolve actual tensors from `partition_inputs` by matching placeholder node to its position in the inputs list.
 
 ```python
-def pass_fuse_qkv(gm: fx.GraphModule) -> fx.GraphModule:
+def _pass_fuse_qkv(gm: fx.GraphModule, partition_inputs: list) -> fx.GraphModule:
     try:
-        # Build map: input_node → list of mm nodes consuming it
-        input_to_mms: dict = defaultdict(list)
-        for node in gm.graph.nodes:
-            if node.target == torch.ops.aten.mm.default:
-                input_node = node.args[0]
-                input_to_mms[input_node].append(node)
+        # Map placeholder node → actual tensor value
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
 
-        for input_node, mm_nodes in input_to_mms.items():
-            if len(mm_nodes) < 3:
+        # Group F.linear calls by their first argument (shared x input)
+        lin_groups: dict[str, list] = {}
+        for n in gm.graph.nodes:
+            if n.op == "call_function" and n.target is F.linear:
+                lin_groups.setdefault(n.args[0].name, []).append(n)
+
+        fused = False
+        for x_name, lin_list in lin_groups.items():
+            if len(lin_list) < 3:
+                continue
+            q_lin, k_lin, v_lin = lin_list[0], lin_list[1], lin_list[2]
+
+            W_q = ph_to_tensor.get(q_lin.args[1])
+            W_k = ph_to_tensor.get(k_lin.args[1])
+            W_v = ph_to_tensor.get(v_lin.args[1])
+            if W_q is None or W_k is None or W_v is None:
+                logger.warning("[pass_fuse_qkv] Weight tensors not in partition inputs")
                 continue
 
-            # Extract weight from each mm node, looking through aten.t() wrapper
-            weights = []
-            weight_names = []
-            for mm_node in mm_nodes[:3]:
-                w_node = mm_node.args[1]
-                if (w_node.target == torch.ops.aten.t.default
-                        and w_node.args[0].op == 'get_attr'):
-                    param_name = w_node.args[0].target
-                    weight = gm.get_parameter(param_name)
-                    weights.append(weight)
-                    weight_names.append(param_name)
-                else:
-                    weights = []
-                    break
-
-            if len(weights) != 3:
-                logger.warning("[pass_fuse_qkv] Could not extract weights — pattern not matched")
+            # Validate shapes are fusible
+            if not (W_q.shape[1] == W_k.shape[1] == W_v.shape[1]):
+                logger.warning("[pass_fuse_qkv] Weight K dims differ — skipping")
                 continue
 
-            # Validate shapes are fusable (all weights must have same K dim)
-            if not (weights[0].shape[1] == weights[1].shape[1] == weights[2].shape[1]):
-                logger.warning("[pass_fuse_qkv] Weight K dims differ — skipping fusion")
-                continue
+            W_qkv = torch.cat([W_q, W_k, W_v], dim=0)
+            gm.register_buffer("_fused_qkv_weight", W_qkv)
 
-            # Fuse: cat along output dim
-            W_fused = torch.cat([w.T for w in weights], dim=1).T.contiguous()
-            fused_name = "fused_qkv_weight"
-            gm.register_buffer(fused_name, W_fused)
+            with gm.graph.inserting_before(q_lin):
+                w_buf = gm.graph.get_attr("_fused_qkv_weight")
+                fused_lin = gm.graph.call_function(F.linear, (q_lin.args[0], w_buf))
+                chunks = gm.graph.call_function(torch.chunk, (fused_lin, 3), {"dim": -1})
+                q_out = gm.graph.call_function(operator.getitem, (chunks, 0))
+                k_out = gm.graph.call_function(operator.getitem, (chunks, 1))
+                v_out = gm.graph.call_function(operator.getitem, (chunks, 2))
 
-            # Insert fused mm + chunk
-            with gm.graph.inserting_after(mm_nodes[2]):
-                fused_attr = gm.graph.get_attr(fused_name)
-            with gm.graph.inserting_after(fused_attr):
-                fused_mm = gm.graph.call_function(
-                    torch.ops.aten.mm.default, (input_node, fused_attr)
-                )
-            total_out = W_fused.shape[0]
-            chunk_size = total_out // 3
-            with gm.graph.inserting_after(fused_mm):
-                chunks = gm.graph.call_function(
-                    torch.ops.aten.split.Tensor,
-                    (fused_mm, chunk_size),
-                    {"dim": -1},
-                )
-            for i, mm_node in enumerate(mm_nodes[:3]):
-                with gm.graph.inserting_after(chunks):
-                    chunk_i = gm.graph.call_function(
-                        operator.getitem, (chunks, i)
-                    )
-                mm_node.replace_all_uses_with(chunk_i)
-                gm.graph.erase_node(mm_node)
+            q_lin.replace_all_uses_with(q_out)
+            k_lin.replace_all_uses_with(k_out)
+            v_lin.replace_all_uses_with(v_out)
+            for dead in (q_lin, k_lin, v_lin):
+                gm.graph.erase_node(dead)
 
-            logger.info(f"[pass_fuse_qkv] Fused 3 mm nodes into 1")
+            gm.graph.lint()
+            gm.recompile()
+            logger.info("[pass_fuse_qkv] Fused 3 F.linear into 1 (input '%s')", x_name)
+            fused = True
+            break  # one fusion per unique rep; call again for multiple attention heads
 
-        gm.graph.lint()
-        gm.recompile()
+        if not fused:
+            logger.warning("[pass_fuse_qkv] Pattern not found — pass not applied")
     except Exception as e:
-        logger.warning(f"[pass_fuse_qkv] Failed: {e}")
+        logger.warning("[pass_fuse_qkv] Failed: %s", e)
     return gm
 ```
 
@@ -155,72 +167,73 @@ def pass_fuse_qkv(gm: fx.GraphModule) -> fx.GraphModule:
 
 ## Pattern 2: SDPA Replacement (FlashAttention)
 
-Replaces the `mm(Q, K^T) → div/scale → softmax → mm(attn, V)` chain with `F.scaled_dot_product_attention`, which dispatches to FlashAttention-2 on supported hardware.
+Replaces `operator.matmul(softmax(operator.matmul(q, k_t) * scale), v)` with `F.scaled_dot_product_attention(q, k, v)`.
 
-**Why `replace_pattern` fails:** Inductor decomposes `softmax` into `exp + sum + div` before FX IR reaches the pass. The decomposed subgraph does not match the high-level pattern function. Use manual graph traversal instead.
+**Detection anchor:** The final `operator.matmul` that multiplies attention weights by V. Walk backwards through `softmax → scale → qk_matmul → transpose` to verify the full attention pattern.
+
+**K transpose:** `F.scaled_dot_product_attention` transposes K internally. Extract the pre-transposed K from the `call_method "transpose"` node's first argument.
 
 ```python
-def pass_replace_sdpa(gm: fx.GraphModule) -> fx.GraphModule:
+def _pass_replace_sdpa(gm: fx.GraphModule) -> fx.GraphModule:
     try:
-        nodes = list(gm.graph.nodes)
-        for node in nodes:
-            # Look for softmax → mm chain
-            if node.target != torch.ops.aten._softmax.default:
+        replaced = 0
+        for n in list(gm.graph.nodes):
+            # Anchor on the final matmul: out = attn @ v
+            if n.op != "call_function" or n.target is not operator.matmul:
                 continue
-            softmax_node = node
 
-            # softmax consumer should be mm(attn, V)
-            softmax_users = list(softmax_node.users)
-            if len(softmax_users) != 1:
-                continue
-            attn_mm = softmax_users[0]
-            if attn_mm.target != torch.ops.aten.mm.default:
-                continue
-            V_node = attn_mm.args[1]
+            attn_node, v_node = n.args[0], n.args[1]
 
-            # softmax input should be div(scores) or mul(scores, scale)
-            scores_node = softmax_node.args[0]
-            scale = None
-            if scores_node.target in (torch.ops.aten.div.Tensor, torch.ops.aten.mul.Tensor):
-                scale_arg = scores_node.args[1]
-                if isinstance(scale_arg, (int, float)):
-                    scale = float(scale_arg)
-                qk_mm = scores_node.args[0]
+            # attn must be softmax output
+            if not (attn_node.op == "call_function"
+                    and attn_node.target is torch.softmax):
+                continue
+
+            # softmax input: scaled scores = qk * scale
+            scaled_node = attn_node.args[0]
+            if not (scaled_node.op == "call_function"
+                    and scaled_node.target is operator.mul):
+                continue
+
+            # scores: q @ k_t
+            qk_node = scaled_node.args[0]
+            if not (qk_node.op == "call_function"
+                    and qk_node.target is operator.matmul):
+                continue
+
+            q_node, k_t_node = qk_node.args[0], qk_node.args[1]
+
+            # Unwrap k.transpose(-2, -1) to get bare k
+            # F.scaled_dot_product_attention transposes k internally
+            if k_t_node.op == "call_method" and k_t_node.target == "transpose":
+                k_node = k_t_node.args[0]
             else:
-                qk_mm = scores_node
-
-            if qk_mm.target != torch.ops.aten.mm.default:
+                logger.warning("[pass_replace_sdpa] k_t is not call_method transpose — skipping")
                 continue
 
-            Q_node = qk_mm.args[0]
-            K_T_node = qk_mm.args[1]
-
-            # K_T should be a transpose of K
-            if K_T_node.target != torch.ops.aten.t.default:
-                continue
-            K_node = K_T_node.args[0]
-
-            # Replace with SDPA
-            with gm.graph.inserting_after(attn_mm):
-                sdpa_node = gm.graph.call_function(
-                    torch.nn.functional.scaled_dot_product_attention,
-                    (Q_node, K_node, V_node),
-                    {"scale": scale},
+            with gm.graph.inserting_before(n):
+                sdpa = gm.graph.call_function(
+                    F.scaled_dot_product_attention,
+                    (q_node, k_node, v_node),
                 )
-            attn_mm.replace_all_uses_with(sdpa_node)
-            gm.graph.erase_node(attn_mm)
-            # Clean up intermediates if no other users
-            for dead in [softmax_node, scores_node, qk_mm, K_T_node]:
-                if dead in gm.graph.nodes and len(list(dead.users)) == 0:
-                    gm.graph.erase_node(dead)
 
-            logger.info("[pass_replace_sdpa] Replaced attention chain with SDPA")
-            break  # Only replace first occurrence; call multiple times for multi-head
+            n.replace_all_uses_with(sdpa)
+            for dead in (n, attn_node, scaled_node, qk_node):
+                try:
+                    if not dead.users:
+                        gm.graph.erase_node(dead)
+                except Exception:
+                    pass
+            replaced += 1
 
-        gm.graph.lint()
-        gm.recompile()
+        if replaced:
+            gm.graph.lint()
+            gm.recompile()
+            logger.info("[pass_replace_sdpa] Replaced %d attention block(s) with SDPA", replaced)
+        else:
+            logger.warning("[pass_replace_sdpa] Attention pattern not found — pass not applied")
     except Exception as e:
-        logger.warning(f"[pass_replace_sdpa] Failed: {e}")
+        logger.warning("[pass_replace_sdpa] Failed: %s", e)
     return gm
 ```
 
@@ -228,192 +241,130 @@ def pass_replace_sdpa(gm: fx.GraphModule) -> fx.GraphModule:
 
 ## Pattern 3: Conv-BN Fold (Inference)
 
-Folds `batch_norm(training=False)` into the preceding `conv2d` by absorbing the BN scale/shift into conv weights and bias. Eliminates the separate BN kernel entirely.
+Folds `F.batch_norm(training=False)` into the preceding `F.conv2d` by absorbing the BN scale/shift into conv weights and bias.
 
-**When to apply:** Only when `training=False` (inference mode). BN running stats must be finalized.
+**Note:** In pre-Inductor form, `F.batch_norm` with `training=False` returns a single tensor (not a tuple). The post-Inductor `getitem(0)` workaround is not needed here.
+
+**Weight access:** All BN and conv parameters are `placeholder` nodes — resolve via `partition_inputs`.
 
 ```python
-def pass_fold_bn(gm: fx.GraphModule) -> fx.GraphModule:
+def _pass_fold_bn(gm: fx.GraphModule, partition_inputs: list) -> fx.GraphModule:
     try:
-        nodes = list(gm.graph.nodes)
-        for node in nodes:
-            if node.target not in (
-                torch.ops.aten._native_batch_norm_legit_no_training.default,
-                torch.ops.aten.batch_norm.default,
-            ):
-                continue
-            bn_node = node
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
 
-            # BN inputs: (input, weight, bias, running_mean, running_var, training, momentum, eps, ...)
-            bn_args = bn_node.args
-            conv_node = bn_args[0]
-            if conv_node.target != torch.ops.aten.convolution.default:
+        for bn_node in list(gm.graph.nodes):
+            if bn_node.op != "call_function" or bn_node.target is not F.batch_norm:
                 continue
 
-            # Extract BN parameters
-            bn_weight_node = bn_args[1]  # gamma
-            bn_bias_node = bn_args[2]    # beta
-            running_mean_node = bn_args[3]
-            running_var_node = bn_args[4]
-            eps = bn_args[7] if len(bn_args) > 7 else 1e-5
-
-            # Only handle get_attr parameters (not computed tensors)
-            def get_param(n):
-                if n is not None and n.op == 'get_attr':
-                    return gm.get_parameter(n.target)
-                return None
-
-            gamma = get_param(bn_weight_node)
-            beta = get_param(bn_bias_node)
-            mean = get_param(running_mean_node)
-            var = get_param(running_var_node)
-            if any(t is None for t in [gamma, beta, mean, var]):
+            # F.batch_norm args: (input, weight, bias, running_mean, running_var, training, ...)
+            conv_node = bn_node.args[0]
+            if conv_node.op != "call_function" or conv_node.target is not F.conv2d:
                 continue
 
-            # Get conv weight/bias
-            conv_args = conv_node.args
-            conv_weight_node = conv_args[1]
-            conv_bias_node = conv_args[2]
-            conv_weight = get_param(conv_weight_node)
-            conv_bias = get_param(conv_bias_node)
+            # Resolve BN stats from partition_inputs
+            bn_weight = ph_to_tensor.get(bn_node.args[1])
+            bn_bias   = ph_to_tensor.get(bn_node.args[2])
+            run_mean  = ph_to_tensor.get(bn_node.args[3])
+            run_var   = ph_to_tensor.get(bn_node.args[4])
+            training  = bn_node.args[5] if len(bn_node.args) > 5 else False
+            eps       = bn_node.args[7] if len(bn_node.args) > 7 else 1e-5
+
+            if training or any(t is None for t in (bn_weight, bn_bias, run_mean, run_var)):
+                continue
+
+            # F.conv2d args: (input, weight, bias, stride, padding, dilation, groups)
+            conv_weight = ph_to_tensor.get(conv_node.args[1])
+            conv_bias   = ph_to_tensor.get(conv_node.args[2]) if len(conv_node.args) > 2 else None
+
             if conv_weight is None:
                 continue
 
-            # Fold: new_weight = gamma / sqrt(var + eps) * weight
-            scale = gamma / torch.sqrt(var + eps)
+            # Fold: scale BN into conv weight/bias
+            scale = bn_weight / torch.sqrt(run_var + eps)
             new_weight = conv_weight * scale.view(-1, 1, 1, 1)
             if conv_bias is not None:
-                new_bias = (conv_bias - mean) * scale + beta
+                new_bias = (conv_bias - run_mean) * scale + bn_bias
             else:
-                new_bias = beta - mean * scale
+                new_bias = bn_bias - run_mean * scale
 
-            # Register folded parameters
-            gm.register_buffer('_folded_conv_weight', new_weight)
-            gm.register_buffer('_folded_conv_bias', new_bias)
+            gm.register_buffer("_folded_conv_weight", new_weight)
+            gm.register_buffer("_folded_conv_bias", new_bias)
 
-            # Rewire conv to use folded parameters
             with gm.graph.inserting_before(conv_node):
-                fw_node = gm.graph.get_attr('_folded_conv_weight')
-                fb_node = gm.graph.get_attr('_folded_conv_bias')
-            new_conv_args = (conv_args[0], fw_node, fb_node) + conv_args[3:]
-            with gm.graph.inserting_after(conv_node):
-                new_conv = gm.graph.call_function(
-                    torch.ops.aten.convolution.default, new_conv_args
-                )
+                fw = gm.graph.get_attr("_folded_conv_weight")
+                fb = gm.graph.get_attr("_folded_conv_bias")
 
-            # BN output is a tuple (out, mean, rstd); replace the getitem(0) user
-            for user in list(bn_node.users):
-                if user.target == operator.getitem and user.args[1] == 0:
-                    user.replace_all_uses_with(new_conv)
-                    gm.graph.erase_node(user)
-            conv_node.replace_all_uses_with(new_conv)
-            gm.graph.erase_node(conv_node)
-            if len(list(bn_node.users)) == 0:
-                gm.graph.erase_node(bn_node)
+            # Rebuild conv args with folded weight/bias
+            new_conv_args = (conv_node.args[0], fw, fb) + conv_node.args[3:]
+            with gm.graph.inserting_before(bn_node):
+                new_conv = gm.graph.call_function(F.conv2d, new_conv_args)
 
+            bn_node.replace_all_uses_with(new_conv)
+            gm.graph.erase_node(bn_node)
+            if not conv_node.users:
+                gm.graph.erase_node(conv_node)
+
+            gm.graph.lint()
+            gm.recompile()
             logger.info("[pass_fold_bn] Folded BatchNorm into Conv2d")
+            break  # fold one BN per call; call again for multiple conv-BN pairs
 
-        gm.graph.lint()
-        gm.recompile()
     except Exception as e:
-        logger.warning(f"[pass_fold_bn] Failed: {e}")
+        logger.warning("[pass_fold_bn] Failed: %s", e)
     return gm
 ```
 
 ---
 
-## Pattern 4: Pre-Transposed Weights
+## Pattern 4: Activation Substitution (tanh → GELU)
 
-Detects `mm(x, aten.t(W))` where W is a large parameter (K ≥ 512) and replaces with `mm(x, W_T_pre)` using a pre-stored transposed buffer. Switches cuBLAS from `gemmSN_TN` (transposed path) to `gemmSN_NN` (non-transposed path).
+Replaces `tanh` with `F.gelu(approximate='tanh')` when tanh appears in an FFN context (linear → tanh → linear). Avoids SFU pipeline serialization.
 
-```python
-def pass_pretranspose_weights(gm: fx.GraphModule, min_k: int = 512) -> fx.GraphModule:
-    try:
-        pretransposed: dict[str, str] = {}  # original param name → buffer name
+**Pre-Inductor forms of tanh:** Dynamo may trace `x.tanh()` as `call_method "tanh"` or `call_function torch.tanh` depending on whether it was called as a method or function. Both are matched below.
 
-        for node in list(gm.graph.nodes):
-            if node.target != torch.ops.aten.mm.default:
-                continue
-            w_node = node.args[1]
-
-            # Detect aten.t() wrapping a parameter
-            if (w_node.target != torch.ops.aten.t.default
-                    or w_node.args[0].op != 'get_attr'):
-                continue
-
-            param_name = w_node.args[0].target
-            weight = gm.get_parameter(param_name)
-
-            # Only pre-transpose large weights
-            if weight.shape[0] < min_k and weight.shape[1] < min_k:
-                continue
-
-            # Register pre-transposed buffer (once per unique parameter)
-            if param_name not in pretransposed:
-                buf_name = f"_pretransposed_{param_name.replace('.', '_')}"
-                gm.register_buffer(buf_name, weight.T.contiguous())
-                pretransposed[param_name] = buf_name
-            else:
-                buf_name = pretransposed[param_name]
-
-            # Replace t(get_attr(param)) with get_attr(buf)
-            with gm.graph.inserting_before(w_node):
-                buf_node = gm.graph.get_attr(buf_name)
-            w_node.replace_all_uses_with(buf_node)
-            if len(list(w_node.users)) == 0:
-                gm.graph.erase_node(w_node)
-
-            logger.info(f"[pass_pretranspose_weights] Pre-transposed {param_name} ({weight.shape})")
-
-        gm.graph.lint()
-        gm.recompile()
-    except Exception as e:
-        logger.warning(f"[pass_pretranspose_weights] Failed: {e}")
-    return gm
-```
-
----
-
-## Pattern 5: Activation Substitution (tanh → GELU)
-
-Replaces `aten.tanh.default` with `aten.gelu.default(approximate='tanh')` when the tanh node appears in an FFN context (mm → tanh → mm). Avoids SFU pipeline serialization that makes `tanh` 5–10× slower than GELU on modern hardware.
-
-**When to apply:** Only in FFN-like contexts. Do NOT apply to attention scaling or output-projection activations.
+**`replace_pattern`-compatible** for the `call_function` form only. Use manual traversal to handle both forms.
 
 ```python
-def pass_tanh_to_gelu(gm: fx.GraphModule) -> fx.GraphModule:
+def _pass_tanh_to_gelu(gm: fx.GraphModule) -> fx.GraphModule:
     try:
         replaced = 0
         for node in list(gm.graph.nodes):
-            if node.target != torch.ops.aten.tanh.default:
+            is_tanh = (
+                (node.op == "call_function" and node.target is torch.tanh)
+                or (node.op == "call_method" and node.target == "tanh")
+            )
+            if not is_tanh:
                 continue
-            tanh_node = node
 
-            # Check FFN context: producer is mm AND consumer is mm
-            producer = tanh_node.args[0]
+            # FFN context: producer is F.linear AND at least one consumer is F.linear
+            producer = node.args[0]
             is_ffn = (
-                producer.target == torch.ops.aten.mm.default
-                and any(u.target == torch.ops.aten.mm.default for u in tanh_node.users)
+                producer.op == "call_function" and producer.target is F.linear
+                and any(
+                    u.op == "call_function" and u.target is F.linear
+                    for u in node.users
+                )
             )
             if not is_ffn:
                 continue
 
-            with gm.graph.inserting_after(tanh_node):
-                gelu_node = gm.graph.call_function(
-                    torch.ops.aten.gelu.default,
-                    (tanh_node.args[0],),
+            with gm.graph.inserting_after(node):
+                gelu = gm.graph.call_function(
+                    F.gelu,
+                    (node.args[0],),
                     {"approximate": "tanh"},
                 )
-            tanh_node.replace_all_uses_with(gelu_node)
-            gm.graph.erase_node(tanh_node)
+            node.replace_all_uses_with(gelu)
+            gm.graph.erase_node(node)
             replaced += 1
 
         if replaced:
-            logger.info(f"[pass_tanh_to_gelu] Replaced {replaced} tanh → gelu(tanh)")
             gm.graph.lint()
             gm.recompile()
+            logger.info("[pass_tanh_to_gelu] Replaced %d tanh → gelu(tanh)", replaced)
     except Exception as e:
-        logger.warning(f"[pass_tanh_to_gelu] Failed: {e}")
+        logger.warning("[pass_tanh_to_gelu] Failed: %s", e)
     return gm
 ```
 
@@ -421,57 +372,42 @@ def pass_tanh_to_gelu(gm: fx.GraphModule) -> fx.GraphModule:
 
 ## Stub Pattern: LayerNorm-Linear Fusion
 
-Detection only. Full implementation requires a custom Triton kernel that fuses the LN normalization epilogue into the subsequent GEMM prologue.
+Detection only. Full implementation requires a custom Triton kernel.
 
 ```python
-def pass_fuse_ln_linear_stub(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    Detection stub for LayerNorm → Linear fusion.
-    Full implementation requires a custom Triton kernel.
-    """
+def _pass_fuse_ln_linear_stub(gm: fx.GraphModule) -> fx.GraphModule:
+    """Detection stub — full implementation requires a custom Triton kernel."""
     try:
-        for node in list(gm.graph.nodes):
-            if node.target != torch.ops.aten.native_layer_norm.default:
+        for ln_node in gm.graph.nodes:
+            if ln_node.op != "call_function" or ln_node.target is not F.layer_norm:
                 continue
-            ln_node = node
-            for user in ln_node.users:
-                # layer_norm output is tuple; getitem(0) is the normalized tensor
-                if (user.target == __import__('operator').getitem
-                        and user.args[1] == 0):
-                    for mm_user in user.users:
-                        if mm_user.target == torch.ops.aten.mm.default:
-                            logger.warning(
-                                "[pass_fuse_ln_linear] LayerNorm→Linear pattern detected "
-                                "but not applied — requires custom Triton kernel "
-                                "(e.g. triton-flash-attn or liger-kernel LN-MM)"
-                            )
+            for linear_node in ln_node.users:
+                if linear_node.op == "call_function" and linear_node.target is F.linear:
+                    logger.warning(
+                        "[pass_fuse_ln_linear] LayerNorm→Linear detected but not applied "
+                        "— requires custom Triton kernel (e.g. liger-kernel LN-MM)"
+                    )
     except Exception as e:
-        logger.warning(f"[pass_fuse_ln_linear_stub] Failed: {e}")
-    return gm  # gm is unchanged
+        logger.warning("[pass_fuse_ln_linear_stub] Failed: %s", e)
+    return gm  # gm is ALWAYS returned unchanged
 ```
 
 ---
 
 ## Channels-Last Conversion (Non-Graph)
 
-This optimization is applied in `get_model_and_input()`, not as an FX pass, because `memory_format` is a tensor property not visible in the Aten IR graph.
+Applied in `get_model_and_input()` — not an FX pass. `memory_format` is a tensor property, not visible in the FX graph.
 
 ```python
 def apply_channels_last(model: torch.nn.Module) -> torch.nn.Module:
-    """Convert all Conv2d modules to channels_last memory format.
-    
-    Eliminates convertTensor_kernel launches from cuDNN NHWC coercion.
-    Only effective for models with Conv2d layers.
-    """
     has_conv = any(isinstance(m, torch.nn.Conv2d) for m in model.modules())
     if not has_conv:
         return model
     return model.to(memory_format=torch.channels_last)
 ```
 
-Apply in `get_model_and_input()`:
 ```python
-# Check if already channels_last before applying
+# In get_model_and_input():
 if not next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
     model = apply_channels_last(model)
     x = x.to(memory_format=torch.channels_last)

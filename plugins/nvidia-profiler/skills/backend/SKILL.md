@@ -30,9 +30,13 @@ Implements N operator-level optimizations via FX graph passes:
   1. pass_name — brief description
   ...
 
-To profile:
-    python scripts/run_workload.py --workload {workload}_optimized.py \
-        --compile-backend {model_name}_opt
+To profile (baseline comparison):
+    nsys profile --trace=cuda,nvtx --output=profiler_output/{stem}_opt \\
+        python nvidia/scripts/run_workload.py \\
+            --workload {workload}_optimized.py \\
+            --compile-backend {model_name}_opt \\
+            --warmup-iters 2 --measure-iters 2 \\
+            --output-prefix profiler_output/{stem}_opt
 """
 
 from torch._inductor.compile_fx import compile_fx  # function, not module
@@ -93,14 +97,13 @@ from torch._inductor.compile_fx import compile_fx
 from torch._inductor import compile_fx
 ```
 
-### Weight Node Detection in Inductor-Traced Graphs
-Inductor wraps parameters as `t(get_attr('weight'))` in the FX graph. The bare `get_attr` pattern does not work. Always look through the `aten.t()` wrapper:
+### Weight Node Detection (Pre-Inductor Form)
+`@register_backend` receives the graph **before** Inductor lowers it. Parameters are `placeholder` nodes — there are no `get_attr` nodes and no `aten.t()` wrappers. Build a placeholder→tensor map from `example_inputs`:
 
 ```python
-if (node.target == torch.ops.aten.t.default
-        and node.args[0].op == 'get_attr'):
-    param_name = node.args[0].target
-    weight = gm.get_parameter(param_name)
+placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
+# actual_weight = ph_to_tensor.get(linear_node.args[1])
 ```
 
 ### Graph Mutation Discipline

@@ -92,7 +92,7 @@ x = x.to(memory_format=torch.channels_last)
 
 **Key steps:**
 1. Detect 3 mm nodes with identical first argument (input activation) — use the `defaultdict(list)` grouping pattern
-2. Extract weights: look through `aten.t()` wrapper on `get_attr` nodes (Inductor weight detection pattern)
+2. Extract weights: build a `placeholder → tensor` map from `example_inputs` (pre-Inductor form — no `get_attr` nodes)
 3. Concatenate weights: `W_fused = torch.cat([W_q.T, W_k.T, W_v.T], dim=0).T.contiguous()`
 4. Register buffer: `gm.register_buffer('fused_qkv_weight', W_fused)`
 5. Replace 3 mm nodes with 1 mm + split/chunk

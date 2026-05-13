@@ -87,7 +87,7 @@ For full documentation — agents, hooks, knowledge base, and per-skill referenc
 In any Claude Code session:
 
 ```
-/plugin marketplace add profiler-plugins
+/plugin marketplace add yottalabsai/Profiler
 /plugin install nvidia-profiler@profiler-plugins
 ```
 
