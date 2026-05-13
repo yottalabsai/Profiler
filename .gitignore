@@ -47,6 +47,9 @@ coverage.xml
 Thumbs.db
 desktop.ini
 
+# Malformed pip install artifacts (e.g. `pip install pydantic >=2.0` with a space)
+=*
+
 # Profiling artifacts (can be large / machine-specific)
 *.nsys-rep
 *.ncu-rep

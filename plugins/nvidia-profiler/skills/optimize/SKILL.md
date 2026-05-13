@@ -33,6 +33,14 @@ The single command that drives the complete GPU optimization pipeline. Pass your
 /optimize workload.py --compile-backend=none
 ```
 
+## Pre-Flight Check
+
+Before starting any stage, run `/preflight` to validate the full environment. If any required check fails, report the failure and fix to the user before proceeding. The preflight output is authoritative — do not attempt to work around failures by adjusting commands.
+
+```
+/preflight
+```
+
 ## The 8-Stage Pipeline
 
 ### Stage 0: Capture (→ profile.json)
@@ -92,6 +100,20 @@ Runs the same nsys+ncu pipeline on `workload_optimized.py`. Uses the same `--war
 ```
 Delegates to: capture-agent (with --profile-name=optimized)
 Output: profile_optimized.json
+```
+
+### Stage 5.5: Cleanup intermediary files
+After both `profile.json` and `profile_optimized.json` are verified, remove Inductor debug directories from `profiler_output/`. These directories (named `{stem}_inductor_debug/`) contain Triton-compiled artifacts used only for kernel attribution during the pipeline; they are not needed afterward and can be large.
+
+```bash
+rm -rf profiler_output/*_inductor_debug/
+```
+
+Do not remove other files in `profiler_output/` (`.nsys-rep`, `.sqlite`, `.ncu-rep`, `.manifest.json`, `.corr.json`, `.part.json`) — they are useful for debugging and re-running individual stages without a full re-capture.
+
+```
+Output: (none — cleanup only)
+Skip if: neither inductor_debug directory exists
 ```
 
 ### Stage 6: Compare (→ comparison table)

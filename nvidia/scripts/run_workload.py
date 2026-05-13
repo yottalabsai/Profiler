@@ -85,12 +85,14 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+ROOT = Path(__file__).resolve().parent.parent.parent  # repo root, contains nvidia/
+sys.path.insert(0, str(ROOT))
+
+from nvidia.scripts.preflight import check_all as _preflight  # noqa: E402
+
 import torch
 import torch.autograd.profiler as autograd_profiler
 import torch.fx as fx
-
-ROOT = Path(__file__).resolve().parent.parent.parent  # repo root, contains nvidia/
-sys.path.insert(0, str(ROOT))
 
 
 def _load_workload(script_path: str):
@@ -273,6 +275,8 @@ def _make_dedup_backend(
 
 
 def main() -> None:
+    _preflight(require_tools=True, label="run_workload")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--workload", required=True,
@@ -366,9 +370,21 @@ def main() -> None:
         # with inductor, wraps NVTX ranges, writes .part.json.
         print("[run_workload] Compiling with dedup+inductor backend...", flush=True)
         _compiled = torch.compile(original_model, backend=dedup_backend)
-        with torch.no_grad():
-            _compiled(x)
-        torch.cuda.synchronize()
+        try:
+            with torch.no_grad():
+                _compiled(x)
+            torch.cuda.synchronize()
+        except Exception as _dynamo_err:
+            # torch 2.11 raises InternalTorchDynamoError during guard finalisation
+            # after a custom backend succeeds.  If run_fn was set, compilation
+            # completed successfully — the guard-building error is safe to ignore.
+            if _state.get('run_fn') is None:
+                raise
+            print(
+                f"[run_workload] WARNING: dynamo guard error suppressed "
+                f"(backend completed OK): {type(_dynamo_err).__name__}",
+                flush=True,
+            )
         print("[run_workload] Compilation complete.", flush=True)
 
         # Use registry.split directly for warmup and capture so that emit_nvtx

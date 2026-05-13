@@ -62,37 +62,50 @@ Prepend the project root to this output. This is the value for `--ncu-env PYTHON
 
 **CRITICAL — must include user-local site-packages.** When ncu runs with `sudo -E`, `sudo` drops user-local paths (`~/.local/lib/python3.x/site-packages/`) from the effective environment. Torch and other user-installed packages live there. If `--ncu-env PYTHONPATH=` does not include this path, the ncu subprocess will fail with `ModuleNotFoundError: No module named 'torch'`. Always use the full `sys.path` output (which includes user-local paths) as the PYTHONPATH value, not just the project root.
 
-### 6. MANDATORY: Validate imports before proceeding
+### 6. MANDATORY: Run preflight before proceeding
 
-**Do not skip this step.** Run a quick import check with the exact PYTHONPATH you will use for all subsequent commands. If this fails, fix it before running nsys or ncu — a broken PYTHONPATH will silently fail inside nsys subprocesses with no useful error output.
+**Do not skip this step.** Run the preflight script with the exact PYTHONPATH you will use for all subsequent commands. It checks every dependency in one shot and prints each failure with the exact fix command. A broken environment will silently fail inside nsys/ncu subprocesses with no useful error output.
 
 ```bash
-PYTHONPATH={project_root}:{pythonpath} python3 -c "
-import nvidia.operator_profiler
-import torch
-print('OK: nvidia.operator_profiler and torch importable')
-print('torch version:', torch.__version__)
-print('CUDA available:', torch.cuda.is_available())
-"
+PYTHONPATH={project_root}:{pythonpath} python3 {project_root}/nvidia/scripts/preflight.py
 ```
 
-If this fails:
-- `ModuleNotFoundError: nvidia` → project root is wrong or package not installed (`pip install -e .` from project root)
-- `ModuleNotFoundError: torch` → user-local site-packages missing from PYTHONPATH
-- `CUDA not available` → GPU driver issue, not a PYTHONPATH issue
+Parse the output:
+- All lines `OK` → environment is ready, proceed
+- Any line `FAIL` → report the check name, error, and fix to the user; **do not proceed** until fixed
 
-**Do not proceed past this step if the import check fails.**
+Common failures and fixes:
+- `nvidia.operator_profiler importable FAIL` → project root wrong or package not installed: `pip install -e .` from project root
+- `torch importable FAIL` → user-local site-packages missing from PYTHONPATH; add `~/.local/lib/python3.x/site-packages` to PYTHONPATH
+- `CUDA available FAIL` → GPU driver issue, not a PYTHONPATH issue; check `nvidia-smi`
+- `nsys FAIL` / `ncu FAIL` → tools not installed or not on PATH; see fix commands in preflight output
+
+**Do not proceed past this step if any required check fails.**
 
 ## Output Path Convention
 
-Derive from the workload file path:
-- `output_dir = {workload_parent}/profiler_output/` (create with `mkdir -p`)
+**CRITICAL — two common mistakes that put files in the wrong place:**
+1. Using `--output-prefix {workload_stem}` (bare stem) instead of `--output-prefix {output_dir}/{workload_stem}`. This causes `.nsys-rep`, `.sqlite`, `.corr.json`, `.manifest.json`, and `.part.json` to land in the workload parent directory instead of `profiler_output/`.
+2. Using `--inductor-debug-dir inductor_debug` (bare name) instead of `--inductor-debug-dir {output_dir}/{workload_stem}_inductor_debug`. This causes the Inductor cache to land in the workload parent directory.
+
+Resolve all paths to absolute values from the workload file before building any command:
+```
+workload_path   = /abs/path/to/workload.py            (resolve symlinks)
+workload_parent = /abs/path/to/                        (workload_path.parent)
+workload_stem   = workload                             (workload_path.stem)
+output_dir      = /abs/path/to/profiler_output/        (workload_parent / "profiler_output")
+```
+
+Then derive every path from these resolved values:
+- `output_dir` — create with `mkdir -p {output_dir}/ncu_reps`
 - `ncu_reps_dir = {output_dir}/ncu_reps/` (where .ncu-rep files are written — persistent, not /tmp/)
 - `nsys_rep = {output_dir}/{workload_stem}.nsys-rep`
 - `sqlite_path = {output_dir}/{workload_stem}.sqlite`
 - `manifest_path = {output_dir}/{workload_stem}.manifest.json`
 - `inductor_debug_dir = {output_dir}/{workload_stem}_inductor_debug/` (Inductor compiled artifacts for fusion attribution)
 - `profile_path` = `{workload_parent}/profile.json` (baseline) or `{workload_parent}/profile_optimized.json` (with `--profile-name=optimized`)
+
+The only files written directly to `{workload_parent}/` are the final deliverables: `profile.json` and `profile_optimized.json`. Everything else goes inside `profiler_output/`.
 
 ## Stage 0a-pre: Correlation Pass (standalone, before nsys)
 

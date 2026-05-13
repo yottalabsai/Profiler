@@ -57,12 +57,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e \"process.stdout.write('[profiler-plugin] Commands: /capture /analyze /propose /backend /validate /compare /report /optimize\\n')\"",
+            "command": "node -e \"process.stdout.write('[profiler-plugin] Commands: /preflight /capture /analyze /propose /backend /validate /compare /report /optimize\\n')\"",
             "timeout": 3000
           }
         ],
         "description": "Announce available commands at session start",
         "id": "session:start:announce"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/../../nvidia/scripts/preflight.py\" --no-tools 2>&1",
+            "timeout": 60000
+          }
+        ],
+        "description": "Validate Python environment (packages + CUDA) at session start. Skips nsys/ncu checks for speed — run /preflight for the full check.",
+        "id": "session:start:preflight"
       }
     ]
   }

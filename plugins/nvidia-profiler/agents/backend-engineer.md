@@ -29,9 +29,16 @@ Before writing any code, fetch the current PyTorch FX API documentation via cont
 
 ## Output Files
 
-1. `{workload_basename}_optimized.py` — the optimized workload with custom backend
-2. `test_{workload_basename}_optimized.py` — validation test script
-3. `OPTIMIZED_WORKLOAD.md` — documentation
+All output files must be written to the **same directory as the workload file**, not to the current working directory. Resolve the workload file's absolute path first, then write all outputs there.
+
+```
+workload_path = /abs/path/to/examples/gpt2/gpt2.py   (resolved)
+workload_dir  = /abs/path/to/examples/gpt2/           (workload_path.parent)
+```
+
+1. `{workload_dir}/{workload_basename}_optimized.py` — the optimized workload with custom backend
+2. `{workload_dir}/test_{workload_basename}_optimized.py` — validation test script
+3. `{workload_dir}/OPTIMIZED_WORKLOAD.md` — documentation
 
 Derive `{workload_basename}` from the workload file name (e.g. `conv_block.py` → `conv_block_optimized.py`).
 Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.model` (e.g. `ConvBlock` → `conv_block_opt`).
