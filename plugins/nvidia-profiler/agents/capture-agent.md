@@ -130,7 +130,14 @@ When the built-in dedup backend runs (no `--compile-backend`): also writes `{out
 
 ## Stage 0a: nsys Capture
 
-When called without `--correlation-pass`, `run_workload.py` runs the NVTX capture path. Pass the same `--inductor-debug-dir` so Inductor reuses the cached compilation (same `TORCHINDUCTOR_CACHE_DIR`) and kernel names stay identical between the nsys trace and the ncu replay.
+When called without `--correlation-pass`, `run_workload.py` runs the NVTX capture path. Pass the same `--inductor-debug-dir` so Inductor reuses the compiled artifacts from Stage 0a-pre.
+
+**Kernel name consistency — three-way guarantee:**
+1. **Stage 0a-pre** compiles the model *without* `emit_nvtx` and populates `TORCHINDUCTOR_CACHE_DIR`.
+2. **Stage 0a (nsys)** re-enters the same cache; the `run_fn` workaround calls the pre-compiled callable directly, bypassing dynamo re-tracing even though `emit_nvtx` is active. The nsys trace therefore records the same kernel names as Stage 0a-pre.
+3. **Stage 0d (ncu)**: `KernelProfileOrchestrator._ncu_env()` auto-forwards `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` from the current process environment into the ncu subprocess. ncu loads the same compiled artifacts and launches the same kernel names.
+
+All three phases observe the same compiled kernels, making `(kernel_name, invocation_index)` matching in `_merge_metrics` reliable. **Do not add `TORCHINDUCTOR_CACHE_DIR` or `TRITON_CACHE_DIR` to `--ncu-env`** — they are forwarded automatically.
 
 `run_workload.py` (without `--correlation-pass`) performs two phases inside the nsys subprocess:
 1. **Compilation** — reuses cached Inductor artifacts from Stage 0a-pre. Deduplication runs unconditionally: the FX graph is always split by detected layer structure; unique representative partitions are compiled with Inductor; structural duplicates share the same compiled callable.
@@ -230,6 +237,8 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
 
 Where `{pythonpath}` is the full `sys.path` output from Step 5 of Pre-Run System Detection. (See PYTHONPATH note in Step 5 above.)
 
+**`--ncu-env` only needs `PYTHONPATH`**: `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` are auto-forwarded from the current process by `KernelProfileOrchestrator._ncu_env()`. Do not add them to `--ncu-env` — they are already handled.
+
 **Do NOT use `python -m nvidia.operator_profiler map`** — the package has no `__main__.py` and this invocation fails. Use the `operator-profiler` CLI entry point (installed via `pip install .` from the project root).
 
 ### Command (Linux without sudo, or Windows):
@@ -256,6 +265,7 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
 | `no such table: NVTX_EVENTS` | nsys was run on raw workload (not run_workload.py) | Re-run Stage 0a with `run_workload.py`, not the raw workload file |
 | `Kernel count mismatch` | warmup/measure-iters differ between Stage 0a and Stage 0d | Re-run both stages with matching `--warmup-iters` and `--measure-iters` |
 | `metrics.raw is empty` | `--script-args` was not last flag | Rebuild command with `--script-args` strictly at the end |
+| Many `metrics.raw` dicts empty despite matching kernel names | `TORCHINDUCTOR_CACHE_DIR` not forwarded to ncu (pre-fix) — ncu recompiled to different cache, kernel names shifted | Should not occur with current orchestrator; if seen, verify `_ncu_env()` is being called in both `_profile_one` and `_profile_all` |
 | `ncu: command not found` | ncu not in PATH | Use full path: `/opt/nvidia/nsight-compute/*/ncu` |
 | `operator-profiler: command not found` | Package not installed | Run `pip install .` from project root (requires `pyproject.toml` with `where = ["nvidia"]`) |
 | Duplicate partition metrics identical to zero | `--partition-map` not passed but `.part.json` exists | Pass `--partition-map {output_dir}/{workload_stem}.part.json` to `operator-profiler map` |

@@ -37,6 +37,7 @@ with kernel_name == K, never using absolute timestamps across tools.
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -158,6 +159,25 @@ class KernelProfileOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _ncu_env(self) -> dict[str, str]:
+        """
+        Build the env dict for ncu subprocesses.
+
+        Starts from ncu_extra_env and forwards TORCHINDUCTOR_CACHE_DIR and
+        TRITON_CACHE_DIR from the current process when not already present.
+        This ensures the ncu replay loads the same compiled Inductor graph
+        and Triton kernels as the nsys capture, preventing name mismatches
+        caused by the ncu subprocess recompiling to a different cache location.
+
+        Explicit entries in ncu_extra_env take precedence over the environment.
+        """
+        env = dict(self.config.ncu_extra_env)
+        for var in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
+            if var not in env and var in os.environ:
+                env[var] = os.environ[var]
+                log.debug("Forwarding %s=%s to ncu subprocess", var, os.environ[var])
+        return env
+
     def _build_replay_targets(self) -> list[KernelReplayTarget]:
         """
         Collect unique kernel names from the manifest in launch order.
@@ -215,7 +235,7 @@ class KernelProfileOrchestrator:
             output_path=ncu_rep_path,
             ncu_executable=self.config.ncu_executable,
             use_sudo=self.config.ncu_sudo,
-            extra_env=self.config.ncu_extra_env,
+            extra_env=self._ncu_env(),
         )
         run_kernel_profile(ncu_config)
 
@@ -255,7 +275,7 @@ class KernelProfileOrchestrator:
             output_path=ncu_rep_path,
             ncu_executable=self.config.ncu_executable,
             use_sudo=self.config.ncu_sudo,
-            extra_env=self.config.ncu_extra_env,
+            extra_env=self._ncu_env(),
         )
         run_kernel_profile(ncu_config)
 

@@ -54,7 +54,8 @@ Before writing any FX pass, classify each optimization into one of three categor
 
 **Why QKV fusion must be manual per-rep:** The weight tensors are `placeholder` nodes — their actual values must be retrieved from `partition_inputs` (captured by running the partition once). `replace_pattern` operates purely structurally and cannot access tensor values.
 
-**`replace_pattern`-compatible:** tanh→GELU substitution (Pattern 4). QKV and SDPA are manual per-rep.
+**`replace_pattern`-compatible:** tanh→GELU substitution only.
+**Manual per-rep:** QKV fusion, SDPA, BN fold, SiLU/GEGLU fusion, pre-transposed weights.
 
 ---
 
@@ -370,6 +371,262 @@ def _pass_tanh_to_gelu(gm: fx.GraphModule) -> fx.GraphModule:
 
 ---
 
+## Pattern 5: Pre-Transposed Weight Buffer
+
+Eliminates runtime transpose overhead on `F.linear` / `operator.matmul` calls where the weight is transposed on every forward pass. Pre-stores `weight.T.contiguous()` as a buffer so cuBLAS receives a contiguous row-major matrix.
+
+**Detection signal:** `call_method "t"` node whose arg is a `placeholder`, consumed as the weight argument of `F.linear` or `operator.matmul`. Co-occurs with `gemmSN_TN` kernel name in the profile.
+
+**Mutual exclusion:** Do NOT apply if `_pass_fuse_qkv` already ran on the same weight nodes — QKV fusion eliminates the original placeholder nodes, leaving no `t()` node to rewrite.
+
+**Why `matmul` not `F.linear`:** `F.linear(x, w)` computes `x @ w.T` internally. If `w` is already the transposed buffer, `F.linear(x, w_T)` = `x @ w_T.T` = `x @ w_original` — wrong. Use `operator.matmul(x, w_T)` directly.
+
+```python
+def _pass_pretranspose_weights(gm: fx.GraphModule, partition_inputs: list) -> fx.GraphModule:
+    try:
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
+
+        replaced = 0
+        for node in list(gm.graph.nodes):
+            # Find: call_method "t" on a placeholder
+            if not (node.op == "call_method" and node.target == "t"):
+                continue
+            ph_node = node.args[0]
+            if ph_node.op != "placeholder":
+                continue
+            weight = ph_to_tensor.get(ph_node)
+            if weight is None or not isinstance(weight, torch.Tensor):
+                continue
+            # Skip small weights — register_buffer overhead not worth it below 512×512
+            if weight.shape[0] < 512:
+                continue
+
+            # Find consumers: F.linear or operator.matmul using this t() node as weight
+            for user in list(node.users):
+                if not (
+                    (user.op == "call_function" and user.target is F.linear and user.args[1] is node)
+                    or (user.op == "call_function" and user.target is operator.matmul and user.args[1] is node)
+                ):
+                    continue
+
+                buf_name = f"_pretransposed_weight_{replaced}"
+                weight_T = weight.T.contiguous()
+                gm.register_buffer(buf_name, weight_T)
+
+                with gm.graph.inserting_before(user):
+                    buf_node = gm.graph.get_attr(buf_name)
+                    if user.target is F.linear:
+                        # Replace F.linear(x, t_node, bias?) with matmul(x, w_T) [+ bias]
+                        x_node = user.args[0]
+                        bias_node = user.args[2] if len(user.args) > 2 else None
+                        new_mm = gm.graph.call_function(operator.matmul, (x_node, buf_node))
+                        if bias_node is not None:
+                            new_node = gm.graph.call_function(operator.add, (new_mm, bias_node))
+                        else:
+                            new_node = new_mm
+                    else:
+                        # matmul(x, t_node) → matmul(x, w_T)
+                        new_node = gm.graph.call_function(
+                            operator.matmul, (user.args[0], buf_node)
+                        )
+
+                user.replace_all_uses_with(new_node)
+                gm.graph.erase_node(user)
+                replaced += 1
+
+        if replaced:
+            # Erase orphaned t() nodes
+            for node in list(gm.graph.nodes):
+                if node.op == "call_method" and node.target == "t" and not node.users:
+                    gm.graph.erase_node(node)
+            gm.graph.lint()
+            gm.recompile()
+            logger.info("[pass_pretranspose_weights] Pre-transposed %d weight(s)", replaced)
+        else:
+            logger.warning("[pass_pretranspose_weights] Pattern not found — pass not applied")
+    except Exception as e:
+        logger.warning("[pass_pretranspose_weights] Failed: %s", e)
+    return gm
+```
+
+---
+
+## Pattern 6: SiLU/GEGLU Gated Activation Fusion
+
+Fuses the LLaMA/Mistral FFN gated activation pattern — two parallel `F.linear` calls from the same input `x`, one fed through `F.silu` then element-wise multiplied with the other — into a single wider `F.linear` + `torch.chunk` + `F.silu` + `operator.mul`.
+
+**Detection signal:** `call_function F.silu` whose input is `F.linear(x, W_gate)`, consumed by an `operator.mul` that also takes `F.linear(x, W_up)` with the same `x` node.
+
+**Model context:** `gate_proj` + `up_proj` in HuggingFace LLaMA/Mistral naming.
+
+**Effect:** 2 separate GEMM launches → 1. Eliminates W_up GEMM launch and its DRAM traffic.
+
+```python
+def _pass_fuse_silu_geglu(gm: fx.GraphModule, partition_inputs: list) -> fx.GraphModule:
+    try:
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
+
+        fused = False
+        for silu_node in list(gm.graph.nodes):
+            if not (silu_node.op == "call_function" and silu_node.target is F.silu):
+                continue
+
+            gate_lin = silu_node.args[0]
+            if not (gate_lin.op == "call_function" and gate_lin.target is F.linear):
+                continue
+            x_node = gate_lin.args[0]
+
+            # Find mul node consuming silu output
+            mul_node = None
+            for user in silu_node.users:
+                if user.op == "call_function" and user.target is operator.mul:
+                    mul_node = user
+                    break
+            if mul_node is None:
+                continue
+
+            # Find the other operand of mul: F.linear(x, W_up)
+            other = mul_node.args[1] if mul_node.args[0] is silu_node else mul_node.args[0]
+            if not (other.op == "call_function" and other.target is F.linear):
+                continue
+            if other.args[0] is not x_node:
+                continue
+
+            W_gate = ph_to_tensor.get(gate_lin.args[1])
+            W_up   = ph_to_tensor.get(other.args[1])
+            if W_gate is None or W_up is None:
+                logger.warning("[pass_fuse_silu_geglu] Weight tensors not in partition inputs")
+                continue
+            if W_gate.shape != W_up.shape:
+                logger.warning("[pass_fuse_silu_geglu] W_gate/W_up shapes differ — skipping")
+                continue
+
+            W_fused = torch.cat([W_gate, W_up], dim=0)
+            gm.register_buffer("_fused_gate_up_weight", W_fused)
+
+            with gm.graph.inserting_before(gate_lin):
+                w_buf       = gm.graph.get_attr("_fused_gate_up_weight")
+                fused_lin   = gm.graph.call_function(F.linear, (x_node, w_buf))
+                chunks      = gm.graph.call_function(torch.chunk, (fused_lin, 2), {"dim": -1})
+                gate_out    = gm.graph.call_function(operator.getitem, (chunks, 0))
+                up_out      = gm.graph.call_function(operator.getitem, (chunks, 1))
+                gated       = gm.graph.call_function(F.silu, (gate_out,))
+                fused_out   = gm.graph.call_function(operator.mul, (gated, up_out))
+
+            mul_node.replace_all_uses_with(fused_out)
+            for dead in (mul_node, silu_node, gate_lin, other):
+                if not dead.users:
+                    try:
+                        gm.graph.erase_node(dead)
+                    except Exception:
+                        pass
+
+            gm.graph.lint()
+            gm.recompile()
+            logger.info("[pass_fuse_silu_geglu] Fused gate_proj + up_proj into single linear")
+            fused = True
+            break  # one fusion per call; call again for multiple FFN blocks
+
+        if not fused:
+            logger.warning("[pass_fuse_silu_geglu] SiLU/GEGLU pattern not found — pass not applied")
+    except Exception as e:
+        logger.warning("[pass_fuse_silu_geglu] Failed: %s", e)
+    return gm
+```
+
+---
+
+## Stub Pattern: Grouped Query Attention (GQA) Detection
+
+Detection only. Full implementation requires `F.scaled_dot_product_attention(enable_gqa=True)` (PyTorch ≥ 2.3) and explicit K/V head expansion.
+
+```python
+def _pass_detect_gqa_stub(gm: fx.GraphModule, partition_inputs: list) -> fx.GraphModule:
+    """Detection stub — reports GQA head ratio; does not transform the graph."""
+    try:
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
+
+        # Group F.linear nodes by input activation
+        lin_groups: dict[str, list] = {}
+        for n in gm.graph.nodes:
+            if n.op == "call_function" and n.target is F.linear:
+                lin_groups.setdefault(n.args[0].name, []).append(n)
+
+        for x_name, lins in lin_groups.items():
+            if len(lins) < 3:
+                continue
+            out_dims = []
+            for ln in lins:
+                w = ph_to_tensor.get(ln.args[1])
+                if w is not None:
+                    out_dims.append(w.shape[0])
+            if len(set(out_dims)) > 1:
+                q_dim = max(out_dims)
+                kv_dim = min(out_dims)
+                ratio = q_dim // kv_dim if kv_dim > 0 else "?"
+                logger.warning(
+                    "[pass_detect_gqa] GQA detected on input '%s': Q heads=%d, KV heads=%d "
+                    "(expansion ratio %s). Use F.scaled_dot_product_attention(enable_gqa=True) "
+                    "(requires torch >= 2.3). No transformation applied.",
+                    x_name, q_dim, kv_dim, ratio,
+                )
+    except Exception as e:
+        logger.warning("[pass_detect_gqa_stub] Failed: %s", e)
+    return gm
+```
+
+---
+
+## Stub Pattern: Rotary Position Embedding (RoPE) Detection
+
+Detection only. Fusion requires a custom Triton kernel (e.g., `flash-attn` `rotary_embedding` or `liger-kernel`).
+
+```python
+def _pass_detect_rope_stub(gm: fx.GraphModule) -> fx.GraphModule:
+    """Detection stub — reports RoPE presence; does not transform the graph."""
+    try:
+        for node in gm.graph.nodes:
+            # Signal A: mul(cos_output, ...) or mul(sin_output, ...)
+            if node.op == "call_function" and node.target is operator.mul:
+                for arg in node.args[:2]:
+                    if (
+                        hasattr(arg, "target")
+                        and arg.op == "call_function"
+                        and arg.target in (torch.cos, torch.sin)
+                    ):
+                        logger.warning(
+                            "[pass_detect_rope] RoPE pattern detected (cos/sin mul) — "
+                            "requires custom Triton kernel for fusion "
+                            "(e.g. flash-attn rotary_embedding or liger-kernel). "
+                            "No transformation applied."
+                        )
+                        return gm
+            # Signal B: rotate_half — two getitem slices + cat
+            if node.op == "call_function" and node.target is torch.cat:
+                cat_args = node.args[0] if node.args else []
+                if (
+                    len(cat_args) == 2
+                    and all(
+                        a.op == "call_function" and a.target is operator.getitem
+                        for a in cat_args
+                        if hasattr(a, "op")
+                    )
+                ):
+                    logger.warning(
+                        "[pass_detect_rope] RoPE pattern detected (rotate_half cat) — "
+                        "requires custom Triton kernel for fusion. No transformation applied."
+                    )
+                    return gm
+    except Exception as e:
+        logger.warning("[pass_detect_rope_stub] Failed: %s", e)
+    return gm
+```
+
+---
+
 ## Stub Pattern: LayerNorm-Linear Fusion
 
 Detection only. Full implementation requires a custom Triton kernel.
@@ -412,3 +669,22 @@ if not next(model.parameters()).is_contiguous(memory_format=torch.channels_last)
     model = apply_channels_last(model)
     x = x.to(memory_format=torch.channels_last)
 ```
+
+---
+
+## Pass Composition Rules
+
+### Mutual Exclusions
+
+| Pass A | Pass B | Conflict | Resolution |
+|---|---|---|---|
+| `_pass_fuse_qkv` | `_pass_pretranspose_weights` | Both target the same Q/K/V weight placeholder nodes | Run QKV first; after fusion the original placeholder nodes are gone — pre-transpose finds nothing |
+| `_pass_replace_sdpa` | `_pass_fuse_qkv` | SDPA must walk the graph after QKV output nodes exist | Always run `_pass_fuse_qkv` before `_pass_replace_sdpa` |
+
+### Ordering Requirements
+
+1. **Non-graph passes** (`dtype_promotion`, `channels_last`, `batch_padding`) live in `get_model_and_input()` only — never inside the `@register_backend` function. They run before `torch.compile` is called.
+2. **Node-count reducing FX passes first:** `_pass_fuse_qkv`, `_pass_fold_bn`, `_pass_fuse_silu_geglu`. These replace multiple nodes with fewer, so downstream passes see the simplified graph.
+3. **Attention restructuring next:** `_pass_replace_sdpa`. Must see the QKV output nodes produced in step 2.
+4. **Weight layout last:** `_pass_pretranspose_weights`. Runs after all fusion passes have finalized the weight node set.
+5. **Activation substitution** (`_pass_tanh_to_gelu`) is independent — convention places it at step 5 but it has no structural ordering requirement.

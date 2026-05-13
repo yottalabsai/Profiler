@@ -35,7 +35,7 @@ Before writing `fx_steps[]`, use MCP tools if available:
 
 ### Fallback Behavior When MCP Tools Are Unavailable
 
-- **If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative reference for all FX API patterns. It contains complete, tested implementations for QKV fusion, SDPA replacement, BN fold, pre-transposed weights, and activation substitution. Proceed without live PyTorch docs.
+- **If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative reference for all FX API patterns. It contains complete, tested implementations for QKV fusion, SDPA replacement, BN fold, pre-transposed weights, SiLU/GEGLU gated activation fusion, and tanh→GELU substitution. Proceed without live PyTorch docs.
 - **If exa-search is unavailable:** Skip the web search step. Use the Transformation Taxonomy below plus `knowledge/fx-patterns.md` for all patterns. Set confidence for any transformation that would have benefited from web search to at most `medium`.
 - **If memory is unavailable:** Skip the memory lookup and caching steps. Proceed directly to transformation analysis.
 - **If sequential-thinking is unavailable:** Manually construct the dependency DAG using the "Dependency DAG Construction" table below. Apply the static ordering rules (dtype first, fusion before layout) without tool assistance.
@@ -43,6 +43,8 @@ Before writing `fx_steps[]`, use MCP tools if available:
 **Critical:** MCP tool unavailability is never a reason to produce no output. Always produce `optimizations.json` using the available knowledge and the Transformation Taxonomy.
 
 ## Transformation Taxonomy
+
+**The taxonomy below is a guide, not an exhaustive enum.** For bottleneck patterns not covered here, reason directly from hardware counter evidence and FX IR structure. Propose transformations by evidence, not by matching to this list.
 
 For each bottleneck class in `triage.json`, map to the appropriate transformation(s):
 
@@ -135,7 +137,11 @@ x = x.to(memory_format=torch.channels_last)
 
 **When to apply:** `aten.t()` node feeds into `mm()` and weight K-dimension ≥ 512. Often co-occurs with `gemmSN_TN` in kernel name.
 
-**FX pass:** `pass_pretranspose_weights()` (see `knowledge/fx-patterns.md`)
+**Pre-Inductor detection note:** `aten.t()` does NOT appear at the pre-Inductor level. Look for a `call_method "t"` node on a `placeholder`, feeding into `F.linear` or `operator.matmul` as the weight argument.
+
+**Mutual exclusion:** Do NOT propose for any weight node already targeted by `_pass_fuse_qkv` — QKV fusion eliminates the original placeholder nodes.
+
+**FX pass:** `_pass_pretranspose_weights()` (see `knowledge/fx-patterns.md` Pattern 5)
 
 **Effect:** Switches cuBLAS from `gemmSN_TN` (row-major transposed) to `gemmSN_NN` (column-major contiguous). Eliminates the DRAM latency of the on-the-fly transpose.
 
@@ -159,6 +165,22 @@ x = x.to(memory_format=torch.channels_last)
 
 ---
 
+### latency_bound on Activation (SiLU/GEGLU) → SiLU-GEGLU Fusion
+
+**When to apply:** `F.silu(F.linear(x, W_gate)) * F.linear(x, W_up)` pattern — two parallel linear projections from the same input `x`, one gated through silu. Evidence: `latency_bound` or `tensor_core_idle` classification on two mm operators that share the same input activation.
+
+**FX pass:** `_pass_fuse_silu_geglu()` (see `knowledge/fx-patterns.md` Pattern 6)
+
+**Effect:** 2 separate GEMM launches + silu + mul → 1 fused GEMM + chunk + silu + mul. Eliminates one GEMM kernel launch and W_up memory traffic.
+
+**Model context:** `gate_proj` + `up_proj` in LLaMA/Mistral FFN blocks (HuggingFace naming).
+
+**Prerequisite:** Apply AFTER dtype promotion — the fused weight buffer is registered at runtime dtype.
+
+**Confidence:** medium (same structural detection approach as QKV fusion; weight shape validation adds safety)
+
+---
+
 ### Algorithm Selection Proposals (No Graph Change Needed)
 
 These are proposals that don't require FX passes:
@@ -177,6 +199,8 @@ The `prerequisite_for[]` field encodes transformation order constraints:
 | SDPA replacement | dtype promotion | FlashAttention requires uniform dtype across Q, K, V |
 | Pre-transposed weights | dtype promotion | Pre-transposed buffer must match the runtime dtype of mm inputs |
 | BN fold | channels_last | Apply channels_last first (BN fold formula is layout-agnostic, but keeping order consistent avoids confusion) |
+| SiLU/GEGLU fusion | dtype promotion | Fused weight buffer is registered at runtime dtype — must match after dtype cast |
+| Pre-transposed weights | QKV fusion (if applied) | QKV fusion eliminates original weight placeholder nodes; pre-transpose finds nothing to act on |
 
 Build the dependency DAG. If a cycle is detected, remove the lower-confidence transformation from the cycle.
 

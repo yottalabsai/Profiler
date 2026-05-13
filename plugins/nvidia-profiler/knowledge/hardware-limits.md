@@ -45,6 +45,35 @@ For Tensor Cores to fire, the GEMM tile dimensions must meet minimum alignment. 
 
 If `block_dim.x * block_dim.y < tile_min`, Tensor Cores cannot engage regardless of dtype.
 
+## FP8 Support and Tile Requirements
+
+FP8 (`torch.float8_e4m3fn`, `torch.float8_e5m2`) is Hopper/Blackwell only. On Ampere, FP8 ops silently fall back to FP16 or raise a runtime error depending on PyTorch version. **Never propose FP8 for `device_name` matching `a100`, `a10`, `3090`, or `4090`.**
+
+| GPU | FP8 Hardware Support | Peak FP8 TFLOPS (e4m3) | FP8 Min Tile M/N/K | Notes |
+|---|---|---|---|---|
+| Ampere (A100, A10G) | No | N/A | N/A | Falls back to FP16 silently |
+| Hopper (H100 SXM5) | Yes | 1979 | 64 / 64 / 32 | Requires `torch >= 2.1`, `cuBLAS >= 12.4` |
+| Hopper (H200) | Yes | 1979 | 64 / 64 / 32 | Same as H100 FP8 path |
+| Blackwell (B100) | Yes | 7000 | 64 / 64 / 32 | Use `torch.float8_e4m3fn` |
+| Blackwell (B200) | Yes | 9000 | 64 / 64 / 32 | Use `torch.float8_e4m3fn` |
+| Ada (RTX 4090) | Software emulated | N/A | N/A | No dedicated FP8 Tensor Core path; avoid |
+
+When proposing FP8 for eligible GPUs, add to notes: `"Requires torch >= 2.1 and cuBLAS >= 12.4. Verify: torch.cuda.get_device_capability() >= (9, 0)."`
+
+## L2 Cache Sizes
+
+L2 size determines whether intermediate tensors from adjacent fused operators fit in cache between kernel launches. If the intermediate exceeds L2, fusion saves no memory traffic.
+
+| GPU | L2 Cache | Key Implication |
+|---|---|---|
+| A100 SXM5 | 40 MB | ~10M elements (BF16); elementwise fusion with GEMM output is effective |
+| H100 SXM5 | 50 MB | ~12.5M elements; activation fusion with transformer FFN output is effective |
+| H200 | 50 MB | Same as H100 |
+| B100 / B200 | 192 MB | Most transformer layer intermediates fit; prefer aggressive fusion |
+| RTX 4090 | 72 MB | Larger than A100; lower HBM BW limits fusion ROI despite large cache |
+| A10G | 24 MB | Smaller; be conservative with fusion proposals |
+| RTX 3090 | 6 MB | Very small; HBM bandwidth is the primary limit, not cache |
+
 ## Architecture-Specific Counter Availability
 
 | Counter | Ampere | Hopper | Blackwell |
@@ -81,3 +110,22 @@ Key cuBLAS kernel names and what they indicate:
 | `convertTensor_kernel` | Memory layout coercion (NCHW ↔ NHWC) | Apply `memory_format=torch.channels_last` at model creation |
 | `triton__*_fused_*` | Fused Triton kernel from Inductor | Attribution via NVTX or torch.profiler correlation only; appears in `unattributed_kernels` if neither matched |
 | `volta_fp16_s884*` | Legacy FP16 Tensor Core (Volta/Turing) | Use `torch.compile` with `mode='max-autotune'` |
+| `cudnn_infer_ampere_*` | cuDNN Ampere inference conv (FP16/INT8) | Optimal — no action needed |
+| `sm80_xmma_implicit_gemm_*` | Ampere implicit GEMM for convolution | Optimal — no action needed |
+| `sm90_xmma_implicit_gemm_*` | Hopper implicit GEMM for convolution | Optimal — no action needed |
+| `wgrad_*` / `dgrad_*` | Weight/data gradient kernels (backward pass) | Only in training profiles; skip in inference analysis |
+
+## Triton Kernel Naming Conventions (Inductor-Generated)
+
+Inductor-generated Triton kernels follow a consistent naming pattern used by nsys and ncu. Recognizing these names is essential for attribution.
+
+| Prefix | Meaning | Attribution |
+|---|---|---|
+| `triton_poi_fused_*` | Pointwise (elementwise) fused kernel | NVTX range if `emit_nvtx` was active; else `unattributed_kernels` |
+| `triton_tem_fused_*` | Template-based (reduction, softmax, layernorm) | Same; often spans multiple `aten::` operators |
+| `triton_red_fused_*` | Reduction-specific fused kernel | Same |
+| `triton_per_fused_*` | Persistent kernel (e.g. persistent reduction) | Same |
+| `triton__*` (generic) | Any Inductor Triton kernel not matching above | Treat as `unattributed_kernels` unless `corr.json` links it |
+| `_triton_gemm_*` | Triton GEMM (rare; cuBLAS preferred for large GEMMs) | Attribution via NVTX only |
+
+**High unattributed Triton kernel count?** Re-run manifest build with `--inductor-fusion-dir <inductor_debug_dir>` to upgrade these to MEDIUM-confidence attribution.

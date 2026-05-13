@@ -130,3 +130,54 @@ The 8 edge cases handled by `attribution_engine.py`, written for users reading `
 - A 2× speedup in ncu-replayed durations corresponds to a real 2× speedup (within ~10% measurement noise)
 - For absolute wall-clock latency, use `torch.utils.benchmark` or nsys timeline view (not `profile.json`)
 - The `/compare` skill and `/report` skill always include this caveat
+
+---
+
+## Edge Case 9: torch.compile Graph Breaks
+
+**What it looks like in profile.json:**
+- `unattributed_kernels` count > 30% of total kernels despite the model being compiled with `torch.compile`
+- Some unattributed kernels have names like `aten_*` or standard cuBLAS names without any NVTX annotation — these are eager-mode kernels
+
+**Cause:** TorchDynamo falls back to eager execution for subgraphs containing Python data-dependent control flow, `.item()` calls, or non-traceable Python builtins. Kernels from graph-break subgraphs execute without `emit_nvtx` annotation, so they appear unattributed in the manifest.
+
+**Impact:** FX passes do NOT run on graph-break subgraphs. Any optimization proposed by `/propose` has zero effect on those portions of the model. The reported time budget understates the true cost of the eager subgraph.
+
+**Action:** Set `TORCH_COMPILE_DEBUG=1` before profiling and scan the output for `"Graph break reason:"` messages. Fix the source of breaks (replace `.item()` with tensor ops, eliminate data-dependent control flow), then re-run `/capture`.
+
+**Notes:** `--inductor-fusion-dir` does not help here — graph-break kernels are never compiled by Inductor, so they do not appear in the fusion map.
+
+---
+
+## Edge Case 10: Host-Device Synchronization Stalls
+
+**What it looks like in profile.json:**
+- `total_duration_ns` for an operator is disproportionately large relative to its compute intensity (e.g., a small elementwise op dominates the time budget)
+- The stall is invisible in `profile.json` — it does not appear in any `OperatorRecord` because `profile.json` only captures kernel durations
+
+**Cause:** Calls to `.item()`, `.cpu()`, `.numpy()`, or `torch.cuda.synchronize()` inside `forward()` force the CPU to wait for all preceding GPU work before returning. The GPU is idle during this wait; nsys captures the idle gap in the timeline but `profile.json` only sees kernel durations.
+
+**Impact:** `total_attributed_ns` may severely undercount actual wall time when synchronization stalls are frequent. The stall cost is hidden from optimization targeting.
+
+**Action:** Inspect the `.nsys-rep` timeline for long gaps (>1ms) between consecutive kernel launches. Search the model source for `.item()`, `.cpu()`, `.numpy()`, or `torch.cuda.synchronize()` in the hot path. Remove or defer these calls outside the profiled region.
+
+**Notes:** `.item()` is also the most common cause of graph breaks (Edge Case 9) — fixing it reduces both problems simultaneously.
+
+---
+
+## Edge Case 11: SM Occupancy Misreporting on Shared-Memory-Heavy Kernels
+
+**What it looks like in profile.json:**
+- `aggregated.achieved_occupancy < 0.30` AND `aggregated.dynamic_smem_per_block > 32768` (32 KB)
+- Computed `waves_per_sm ≥ 2.0` (the grid is large — this is not wave starvation)
+- Bottleneck classifier would label this `wave_starvation` but batch padding will not help
+
+**Cause:** Kernels allocating large shared memory per block are limited in how many blocks can co-reside on a single SM. On Ampere the maximum shared memory per SM is 164 KB; a kernel using 48 KB/block fits at most 3 blocks/SM, capping theoretical occupancy at ~37.5%. This is a hardware constraint, not a tuning opportunity.
+
+**Impact:** `achieved_occupancy` appears to signal wave starvation, but standard remediations (QKV fusion, batch padding) will not help. Proposing batch padding for these kernels wastes memory without improving occupancy.
+
+**Action:** Classify as `shared_memory_limited` (a sub-class of `wave_starvation` with a different fix). The correct remediation is reducing per-block shared memory usage (requires kernel rewrite or Triton `maxnreg` hint). Do NOT propose batch padding.
+
+**Detection threshold:** `dynamic_smem_per_block > 32768 AND achieved_occupancy < 0.30 AND waves_per_sm >= 2.0`
+
+**Notes:** `waves_per_sm` is not stored in `profile.json` — compute it as `ceil(grid_x * grid_y * grid_z / sm_count)` using the SM count from `knowledge/hardware-limits.md`.

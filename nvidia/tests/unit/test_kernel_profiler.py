@@ -337,3 +337,69 @@ class TestRunIntegration:
         orch._profile_all = lambda output_dir: {}
         orch.run()  # must not raise
         assert op.kernels[0].metrics.raw == {}
+
+
+# ---------------------------------------------------------------------------
+# _ncu_env()
+# ---------------------------------------------------------------------------
+
+class TestNcuEnv:
+    """
+    _ncu_env() must forward TORCHINDUCTOR_CACHE_DIR and TRITON_CACHE_DIR from
+    the current process into the ncu subprocess env so the replay loads the
+    same compiled graph as the nsys capture, preventing kernel-name mismatches.
+    """
+
+    def _make_orch_with_extra_env(self, extra_env: dict) -> KernelProfileOrchestrator:
+        manifest = _make_manifest()
+        config = KernelProfileConfig(
+            replay_script="/tmp/fake.py",
+            ncu_extra_env=extra_env,
+        )
+        return KernelProfileOrchestrator(manifest, [], config)
+
+    def test_forwards_torchinductor_cache_dir_when_set(self, monkeypatch):
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/tmp/inductor_cache")
+        monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+        orch = self._make_orch_with_extra_env({"PYTHONPATH": "/repo"})
+        env = orch._ncu_env()
+        assert env["TORCHINDUCTOR_CACHE_DIR"] == "/tmp/inductor_cache"
+
+    def test_forwards_triton_cache_dir_when_set(self, monkeypatch):
+        monkeypatch.setenv("TRITON_CACHE_DIR", "/tmp/triton_cache")
+        monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+        orch = self._make_orch_with_extra_env({})
+        env = orch._ncu_env()
+        assert env["TRITON_CACHE_DIR"] == "/tmp/triton_cache"
+
+    def test_forwards_both_when_both_set(self, monkeypatch):
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/tmp/ind")
+        monkeypatch.setenv("TRITON_CACHE_DIR", "/tmp/tri")
+        orch = self._make_orch_with_extra_env({})
+        env = orch._ncu_env()
+        assert env["TORCHINDUCTOR_CACHE_DIR"] == "/tmp/ind"
+        assert env["TRITON_CACHE_DIR"] == "/tmp/tri"
+
+    def test_explicit_ncu_extra_env_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/tmp/from_env")
+        orch = self._make_orch_with_extra_env(
+            {"TORCHINDUCTOR_CACHE_DIR": "/explicit/override"}
+        )
+        env = orch._ncu_env()
+        assert env["TORCHINDUCTOR_CACHE_DIR"] == "/explicit/override"
+
+    def test_no_forwarding_when_vars_absent(self, monkeypatch):
+        monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+        monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+        orch = self._make_orch_with_extra_env({"PYTHONPATH": "/repo"})
+        env = orch._ncu_env()
+        assert "TORCHINDUCTOR_CACHE_DIR" not in env
+        assert "TRITON_CACHE_DIR" not in env
+        assert env == {"PYTHONPATH": "/repo"}
+
+    def test_does_not_mutate_ncu_extra_env(self, monkeypatch):
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/tmp/ind")
+        original = {"PYTHONPATH": "/repo"}
+        orch = self._make_orch_with_extra_env(original)
+        orch._ncu_env()
+        assert "TORCHINDUCTOR_CACHE_DIR" not in original

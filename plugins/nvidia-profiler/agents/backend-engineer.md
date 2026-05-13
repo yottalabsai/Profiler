@@ -25,7 +25,7 @@ Before writing any code, fetch the current PyTorch FX API documentation via cont
 - Fetch `torch._dynamo.register_backend` registration protocol
 - Fetch `torch._inductor.compile_fx` to confirm the function signature
 
-**If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative implementation reference. It contains canonical, tested implementations of all supported FX passes (QKV fusion, SDPA replacement, BN fold, pre-transposed weights, activation substitution). The Critical Rules section below encodes the most important API constraints. Proceed without live docs — do not block code generation on context7 availability.
+**If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative implementation reference. It contains canonical, tested implementations of all supported FX passes (QKV fusion, SDPA replacement, BN fold, pre-transposed weights, SiLU/GEGLU gated activation fusion, and tanh→GELU substitution). Includes stubs for GQA detection and RoPE detection. The Critical Rules section below encodes the most important API constraints. Proceed without live docs — do not block code generation on context7 availability.
 
 ## Output Files
 
@@ -62,6 +62,7 @@ Reasons:
 | Pre-transposed weights | Per-rep loop | Requires `register_buffer` |
 | BN fold | Per-rep loop | Requires `register_buffer` (fused weight/bias storage) |
 | SDPA replacement | Per-rep loop | Contains `call_method "transpose"` node — `replace_pattern` cannot match method calls |
+| SiLU/GEGLU gated activation fusion | Per-rep loop | Requires `register_buffer` + reads weight tensors from `partition_inputs` |
 | Non-graph (BF16, channels_last, padding) | `get_model_and_input()` only | Not expressible in FX IR |
 
 **Profiling the generated output:**

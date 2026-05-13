@@ -127,6 +127,39 @@ if x.shape[0] < 64:
     x = torch.nn.functional.pad(x, (0,) * (2 * (x.dim() - 1)) + (0, pad))
 ```
 
+## Pass Application Order (CRITICAL)
+
+Apply FX passes in this fixed order. Passes that mutate weight nodes must run before passes that depend on those nodes existing in their original form.
+
+1. **Non-graph passes** (`dtype_promotion`, `channels_last`, `batch_padding`) — in `get_model_and_input()` only, before `torch.compile()`. Never inside `@register_backend`.
+2. **Node-count reducing passes:** `_pass_fuse_qkv`, `_pass_fold_bn`, `_pass_fuse_silu_geglu` — replace multiple nodes with fewer; run first so downstream passes see the simplified graph.
+3. **Attention restructuring:** `_pass_replace_sdpa` — must run after QKV fusion (needs QKV output nodes).
+4. **Weight layout:** `_pass_pretranspose_weights` — after all fusion passes have finalized the weight node set.
+5. **Activation substitution:** `_pass_tanh_to_gelu` — independent; convention places it last.
+
+**Mutual exclusion:** `_pass_fuse_qkv` and `_pass_pretranspose_weights` are **mutually exclusive on the same weight nodes**. `_pass_fuse_qkv` eliminates the individual Q/K/V placeholder nodes; after fusion no `call_method "t"` node exists on those weights for pre-transpose to find. Never propose both for the same `F.linear` group.
+
+## Graph-Break Defensive Traversal
+
+1. Always snapshot before iterating: `for node in list(gm.graph.nodes):`
+2. When inspecting node `.meta` or `.args` in a pass that may touch graph-break boundary subgraphs, catch `torch.fx.proxy.TraceError` **before** the generic `Exception` — graph-break subgraphs can have `None`-valued placeholders that raise `TraceError` during meta inspection:
+
+```python
+    except torch.fx.proxy.TraceError as e:
+        logger.warning("[pass_name] TraceError — subgraph from graph break: %s", e)
+        return gm
+    except Exception as e:
+        logger.warning("[pass_name] Failed: %s", e)
+    return gm
+```
+
+## FP8 Dtype Cast Rule
+
+- `torch.float8_e4m3fn` / `torch.float8_e5m2` are valid only on **Hopper (H100, H200) and Blackwell (B100, B200)**. On Ampere (A100, A10G) and Ada (RTX 4090, RTX 3090) there is no FP8 Tensor Core path.
+- **Never generate FP8 code** when `capture_metadata.device_name` (case-insensitive) matches `a100`, `a10`, `3090`, or `4090`. Check `knowledge/hardware-limits.md` FP8 Support table.
+- FP8 is always a **non-graph cast** in `get_model_and_input()`. Do NOT implement as an FX pass.
+- When proposing FP8 for eligible GPUs, include: `"notes": "Requires torch >= 2.1 and cuBLAS >= 12.4. Verify: torch.cuda.get_device_capability() >= (9, 0)."`
+
 ## operator-profiler CLI Ordering (CRITICAL)
 
 `--script-args` uses `nargs=argparse.REMAINDER` and MUST be the last flag in `operator-profiler map`. Any flag placed after `--script-args` is passed to the replay script, not to `map`, silently producing empty metrics.
