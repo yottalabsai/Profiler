@@ -8,9 +8,15 @@ Operator Profiler captures real NVIDIA hardware counter data (`nsys` + `ncu`) an
 
 ## Quick Start
 
-For a complete walkthrough — baseline capture, hardware metric analysis, FX graph optimizations, and before/after comparison with real measured numbers — see **[examples/example.md](examples/example.md)**.
+Three complete examples are in `examples/`, each with a baseline profile, optimized backend, validation test suite, and before/after comparison:
 
-The example walks through a TransformerBlock workload on an NVIDIA RTX PRO 6000 Blackwell GPU, achieving a **6.3× per-sample speedup** purely from profiler-guided changes.
+| Example | Model | GPU | Speedup |
+|---|---|---|---|
+| [`examples/conv_block/`](examples/conv_block/) | VGG-style ConvBlock | A100 SXM4-80GB | **2.93×** measured |
+| [`examples/gpt2/`](examples/gpt2/) | GPT-2 small (117M) | A100 SXM4-80GB | **~2.5–3.0×** estimated |
+| [`examples/embedding_projection/`](examples/embedding_projection/) | Embedding + FFN + logit projection | A100 SXM4-80GB | **~2–5×** estimated |
+
+Each directory contains `profile.json`, `*_optimized.py`, `comparison.md`, `OPTIMIZED_WORKLOAD.md`, `test_*.py`, and `validation_report.json`. Four additional baseline workloads (`mlp_activations`, `sdpa_attention`, `depthwise_separable_conv`, `lstm_sequence_encoder`) are included and will have results in the future.
 
 ---
 
@@ -23,13 +29,20 @@ Most profiling tools tell you *what* ran. Operator Profiler tells you *why it wa
 Rather than relying on PyTorch's built-in timing hooks, Operator Profiler:
 
 1. Runs your workload under `nsys` to capture the full CUDA kernel timeline and NVTX operator annotations
-2. Replays each NVTX range under `ncu` to collect hardware counters — DRAM bandwidth, L1/L2 hit rates, tensor-core utilization, warp occupancy, arithmetic intensity, and more
+2. Replays the workload under `ncu` in application-mode replay to collect hardware counters — DRAM bandwidth, L1/L2 hit rates, tensor-core utilization, warp occupancy, arithmetic intensity, and more
 3. Attributes every CUDA kernel back to the PyTorch operator that launched it via a confidence-ranked chain:
    - **torch.profiler correlation** (`high` confidence) — kernel matched to an `aten::` op via CUPTI `EXTERNAL_ID` links from an optional `--correlation-pass` run
    - **NVTX enclosure** (`medium` confidence) — kernel falls within an `aten::` NVTX range emitted by `emit_nvtx`
+   - **Inductor fusion enrichment** (`medium` confidence) — when `--inductor-debug-dir` is set, unattributed Triton fused kernels are matched to their fused `aten::` ops via Inductor debug artifacts
    - **Unattributed** — kernels with no match are collected in `unattributed_kernels[]`; nothing is silently dropped
 
-   Pass `--inductor-debug-dir` at capture time to enrich Triton fused kernels using Inductor debug artifacts (`TORCH_COMPILE_DEBUG=1`).
+### Layer deduplication
+
+For models with repeated structure (e.g., transformer blocks), the profiler automatically detects structurally identical FX subgraphs, compiles only one representative per equivalence class, and propagates hardware metrics to all duplicates.
+
+`UniqueSubgraphRegistry` splits the FX graph by structural signature (op kinds + targets), tags each partition as `layer::unique::<label>` or `layer::duplicate::<label>` in the NVTX trace, and writes a `.part.json` equivalence map during capture. Pass `--partition-map <prefix>.part.json` to `map` to skip duplicate-partition kernels during ncu replay and propagate metrics by positional index.
+
+GPT-2's 12 identical transformer blocks go from ~30–45 min ncu replay time to ~3–5 min.
 
 ---
 
@@ -43,8 +56,8 @@ Rather than relying on PyTorch's built-in timing hooks, Operator Profiler:
    pass)
 ```
 
-1. **`profile`** — runs the target script under `nsys` and builds a mapping manifest (kernel → NVTX ranges); requires `--inductor-debug-dir` for Inductor fusion enrichment; pass `--correlation-pass` to also run a `torch.profiler` capture for high-confidence attribution
-2. **`map`** — runs `ncu` in application-replay mode to collect hardware counters, attributes kernels to operators, and produces the final `profile.json`
+1. **`profile`** — runs the target script under `nsys` and builds a mapping manifest (kernel → NVTX ranges); layer deduplication is always active; requires `--inductor-debug-dir` for Inductor fusion enrichment; pass `--correlation-pass` to also run a `torch.profiler` capture for high-confidence attribution
+2. **`map`** — runs `ncu` in application-replay mode to collect hardware counters, attributes kernels to operators, and produces the final `profile.json`; pass `--partition-map` to enable dedup-aware replay
 
 ---
 
@@ -120,7 +133,7 @@ operator-profiler profile model.py \
 | `--inductor-debug-dir` | required | Directory of Inductor trace artifacts (`output_code.py` files) written when `TORCH_COMPILE_DEBUG=1` is set |
 | `--correlation-pass` | disabled | Run a `torch.profiler` pre-capture pass to build a `HIGH`-confidence CUPTI correlation map |
 
-Outputs: `<output>.nsys-rep`, `<output>.manifest.json`
+Outputs: `<output>.nsys-rep`, `<output>.manifest.json`, `<output>.part.json` (partition equivalence map)
 
 ---
 
@@ -132,6 +145,7 @@ Runs `ncu` in application-replay mode, attributes kernels to operators, and prod
 operator-profiler map runs/my_run.manifest.json \
     --script model.py \
     --output runs/profile.json \
+    --partition-map runs/my_run.part.json \
     --device-name "A100 SXM4 80GB"
 ```
 
@@ -144,6 +158,7 @@ operator-profiler map runs/my_run.manifest.json \
 | `--ncu-executable` | `ncu` | Path to `ncu` binary |
 | `--ncu-sudo` | disabled | Prefix `ncu` with `sudo -E`; required on most Linux systems to access GPU performance counters |
 | `--ncu-env KEY=VAL` | `[]` | Extra env vars forwarded under `sudo` (e.g. `PYTHONPATH=/path/to/repo`); needed because `sudo` drops the environment |
+| `--partition-map` | `None` | Path to `.part.json` from capture; enables dedup-aware ncu replay — skips duplicate-partition kernels and propagates metrics from unique representatives |
 | `--device-name` | auto | GPU name (stored in metadata for reference) |
 
 Output: `profile.json` — an `OperatorAttributedProfile` with per-operator hardware metrics.
@@ -152,21 +167,22 @@ Output: `profile.json` — an `OperatorAttributedProfile` with per-operator hard
 
 ## Example Workloads
 
-Six ready-to-run workloads are in `scripts/workloads/`. Each exposes a `get_model_and_input()` function compatible with `scripts/run_workload.py`:
+Seven ready-to-run workloads are in `examples/`. Each exposes a `get_model_and_input()` function compatible with `nvidia/scripts/run_workload.py`:
 
-| Workload | What it covers |
-|---|---|
-| `transformer_block` | Attention + FFN + LayerNorm — the reference workload for `examples/example.md` |
-| `conv_block` | Conv2d + BatchNorm + ReLU |
-| `mlp_activations` | Deep MLP with multiple activation types |
-| `sdpa_attention` | Multi-head SDPA (routes to FlashAttention-2 under Inductor) |
-| `depthwise_separable_conv` | Depthwise + pointwise convolutions |
-| `embedding_projection` | Embedding lookup + linear projection |
+| Workload | What it covers | Status |
+|---|---|---|
+| `conv_block` | Conv2d + BatchNorm + ReLU | Complete — profiled, optimized, validated |
+| `gpt2` | GPT-2 small (117M), 12 transformer blocks | Complete — profiled, optimized, validated |
+| `embedding_projection` | Embedding lookup + LayerNorm + FFN + logit projection | Complete — profiled, optimized, validated |
+| `mlp_activations` | Deep MLP with multiple activation types | Baseline only |
+| `sdpa_attention` | Multi-head SDPA (routes to FlashAttention-2 under Inductor) | Baseline only |
+| `depthwise_separable_conv` | Depthwise + pointwise convolutions | Baseline only |
+| `lstm_sequence_encoder` | LSTM sequence encoder | Baseline only |
 
-To profile all six in one batch:
+To profile all seven in one batch:
 
 ```bash
-python scripts/run_all_profiles.py
+python nvidia/scripts/run_all_profiles.py
 ```
 
 Results land in `runs/<workload_name>/`.
@@ -183,7 +199,7 @@ All data is serialized as JSON using Pydantic v2 models.
   "capture_metadata": {
     "model_name": "MyModel",
     "torch_version": "2.3.0",
-    "compile_mode": "eager",
+    "compile_mode": "inductor",
     "device_name": "A100 SXM4 80GB",
     "capture_timestamp_utc": "2026-04-07T12:00:00+00:00"
   },
@@ -204,12 +220,11 @@ All data is serialized as JSON using Pydantic v2 models.
           "duration_ns": 14321000,
           "metrics": {
             "raw": {
-              "dram_bytes_read": 1073741824,
-              "dram_bytes_written": 67108864,
-              "achieved_occupancy": 0.87,
-              "tensor_core_active_pct": 91.2,
-              "l1_hit_rate": 0.34,
-              "l2_hit_rate": 0.71
+              "dram__bytes_read.sum": 1073741824,
+              "dram__bytes_write.sum": 67108864,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 7.19,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 82.4,
+              "smsp__inst_executed.sum": 12345678
             }
           }
         }
@@ -231,6 +246,8 @@ All data is serialized as JSON using Pydantic v2 models.
   "warnings": []
 }
 ```
+
+Raw metric names use ncu's namespaced format (`counter__metric.aggregation`). The `aggregated` block contains pre-computed Python fields derived from the raw counters.
 
 The profile contains hardware metrics for every operator: DRAM throughput, cache hit rates, occupancy, compute utilization (Tensor Cores), and instruction throughput. You can then use these metrics to reason about bottlenecks and optimization strategies — either manually, or by passing the profile to Claude or another tool for analysis.
 
@@ -293,10 +310,10 @@ Pass the optimization recommendations and your workload to this prompt. It gener
 - A test script to verify the optimized workload
 - Before/after documentation
 
-See **[examples/example.md](examples/example.md)** for a full walkthrough of this workflow with real measured improvements (6.3× speedup on a TransformerBlock).
+See **[`examples/conv_block/`](examples/conv_block/)** for a complete walkthrough — `report.md` for the summary, `comparison.md` for before/after hardware counter evidence, and `OPTIMIZED_WORKLOAD.md` for implementation details.
 
 ---
 
 ## Version
 
-`0.1.0` — see `operator_profiler/__init__.py`.
+`0.1.0` — see `pyproject.toml`.
