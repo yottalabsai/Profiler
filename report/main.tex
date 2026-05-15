@@ -44,14 +44,16 @@ counters without operator attribution. Bridging this gap manually is error-prone
 We present \textbf{\sys}, which automatically links NVIDIA Nsight Compute hardware metrics to
 PyTorch \texttt{aten::} operators via NVTX temporal enclosure with per-stream interval trees and
 invocation-order matching---avoiding timestamp joins across incompatible clock domains. A curated
-20-counter metric set with duration-weighted aggregation covers all hardware bottleneck axes across
-Ampere, Hopper, and Blackwell architectures. Attributed profiles drive a custom Torch Dynamo backend
-that applies hardware-evidence-motivated FX graph passes---BF16 casting, QKV fusion, FlashAttention
-substitution, weight pre-transposition---before Inductor compilation. Across six workloads on two
-production GPUs (RTX PRO 6000 Blackwell, H100 SXM5 and PCIe), \sys achieves \textbf{1.8--6.3$\times$}
-end-to-end speedup, with hardware counters confirming bottleneck elimination in every case: Tensor
-Core utilization rises from 0\% to ${\sim}85\%$, register spills drop from 757,760 to zero, and
-achieved occupancy improves from 8.3\% to ${\sim}50\%$.
+20-counter metric set with duration-weighted aggregation covers all hardware bottleneck axes.
+Attributed profiles drive a custom Torch Dynamo backend; \texttt{FxPassRunner} and
+\texttt{UniqueSubgraphRegistry} apply hardware-evidence-motivated optimization patterns---BF16
+dtype promotion, \texttt{channels\_last} memory layout, BatchNorm folding, weight
+pre-transposition---to unique layer representatives before Inductor compilation, with layer
+deduplication reducing \ncu replay time by $O(\text{num\_duplicate\_layers})$.
+On an NVIDIA A100-SXM4-80GB, \sys achieves \textbf{2.93$\times$} speedup on a VGG-style
+ConvBlock and ${\sim}$\textbf{2.5--3.0$\times$} on GPT-2 (12 layers, B=4), with hardware
+counters confirming bottleneck elimination: Tensor Core utilization rises from 0\% to 55.9\%
+on GEMM operators, and register spills in the FMHA kernel drop from 24.5\,MB to zero.
 \end{abstract}
 
 \input{intro}

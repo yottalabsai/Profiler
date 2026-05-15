@@ -255,8 +255,9 @@ and are surfaced explicitly in the profile output.
 \begin{table}[t]
 \centering
 \caption{Attribution methods in \sys.  Coverage percentages are measured over kernel
-  \emph{runtime} (not kernel count) across the six evaluated workloads; the UNATTRIBUTED rate
-  varies widely with compile mode and operator backend.}
+  \emph{runtime} (not kernel count); the UNATTRIBUTED rate varies widely with compile mode and
+  operator backend.  Ranges shown are typical across PyTorch-native workloads; see
+  \tabref{tab:coverage} for per-workload values.}
 \label{tab:tiers}
 \small
 \setlength{\tabcolsep}{4pt}
@@ -391,102 +392,128 @@ spills), \sys uses plain summation.  For per-kernel constants (register count, s
 \section{Profile-Guided Optimization Backend}
 \label{sec:pgo}
 
-\subsection{Torch Dynamo Integration}
+\subsection{FX Pass Infrastructure}
 
-\sys registers a custom backend under the Torch Dynamo compilation stack:
+\sys provides two composable components for graph-level optimization.
+\textbf{UniqueSubgraphRegistry} partitions the FX graph by detected layer
+structure, identifies structurally identical subgraphs via hash comparison,
+and compiles a single representative per equivalence class.  Duplicate
+partitions share the compiled callable, reducing compilation and ncu replay
+time by $O(\text{num\_duplicate\_layers})$.
+
+\textbf{FxPassRunner} applies user-defined pattern rewrites to unique
+representatives only, then propagates the transformed compiled callables to
+all structural duplicates:
 
 \begin{lstlisting}[style=pystyle]
-@torch._dynamo.register_backend("operator_profiler")
-def op_profiler_backend(
+runner = FxPassRunner(registry)
+for pattern_fn, replacement_fn in get_passes():
+    runner.apply_pass(pattern_fn, replacement_fn)
+\end{lstlisting}
+
+Custom backends are registered via Torch Dynamo's backend hook and receive
+the Aten IR \texttt{GraphModule} before Inductor lowering:
+
+\begin{lstlisting}[style=pystyle]
+@torch._dynamo.register_backend("my_workload_opt")
+def my_backend(
     gm: torch.fx.GraphModule,
     example_inputs: list[torch.Tensor],
 ) -> Callable:
-    gm = pass_bf16_cast(gm, example_inputs, profile)
-    gm = pass_fuse_qkv(gm, profile)
-    gm = pass_replace_sdpa(gm, profile)
-    gm = pass_normalize_gelu(gm, profile)
-    gm = pass_pretranspose_weights(gm, profile)
-    gm = pass_batch_padding(gm, example_inputs, profile)
-    return torch._inductor.compile_fx(gm, example_inputs)
+    # apply profile-guided modifications, then delegate to Inductor
+    return compile_fx(gm, example_inputs,
+                      config_patches={"max_autotune": True})
 \end{lstlisting}
 
-The backend receives the Aten IR \texttt{GraphModule} and applies passes sequentially before
-delegating to Inductor for Triton code generation.  A profiling JSON (\texttt{profile}) loaded from
-the most recent profiling run provides the hardware counter evidence that triggers each pass.
-
-\subsection{FX Pass Architecture and Preconditions}%
+\subsection{Optimization Patterns}
 \label{sec:passes}
 
-Each pass implements a precondition check against operator-level aggregated metrics before
-modifying the graph.  Passes that fail their precondition log a diagnostic warning and return the
-graph unmodified.  \tabref{tab:passes} summarizes all six passes.
+Hardware-evidence-motivated optimization patterns are implemented per-workload
+in each example's \texttt{*\_optimized.py}.  Patterns fall into two categories:
+\emph{pre-compile model modifications} applied before \texttt{torch.compile} is
+called, and \emph{FX graph pattern rewrites} applied inside a custom backend via
+\texttt{torch.fx.subgraph\_rewriter.replace\_pattern}.  Each pattern fires only
+when the profiler has diagnosed the specific counter symptom that motivates it.
+\tabref{tab:passes} summarizes the patterns demonstrated across the evaluated
+workloads.
 
 \begin{table}[t]
 \centering
-\caption{Profile-guided FX graph passes.  Each pass fires only when the stated counter precondition
-  is satisfied by the baseline profile; it transforms the Aten IR graph and delegates to Inductor
-  for final compilation.}
+\caption{Hardware-evidence-motivated optimization patterns demonstrated across
+  the evaluated workloads.  ``Pre-compile'' patterns modify the \texttt{nn.Module}
+  or tensor before \texttt{torch.compile}; ``FX rewrite'' patterns modify the
+  Aten IR graph inside a custom backend.}
 \label{tab:passes}
 \small
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{p{1.9cm}p{3.0cm}p{3.5cm}p{1.5cm}}
+\begin{tabular}{p{2.0cm}p{1.5cm}p{2.8cm}p{3.3cm}}
 \toprule
-\textbf{Pass} & \textbf{Counter Precondition} & \textbf{Graph Transformation} & \textbf{Bottleneck Axis} \\
+\textbf{Pattern} & \textbf{Type} & \textbf{Counter Evidence} & \textbf{Transformation} \\
 \midrule
-BF16 casting
+BF16 promotion
+  & Pre-compile
   & \texttt{tensor\_core\_active\_pct < 5\%}
-  & Insert \texttt{to(bfloat16)} before GEMM/conv nodes; \texttt{to(float32)} after output
-  & TC idle \\[4pt]
-QKV fusion
-  & $\ge 2$ \texttt{mm} nodes share input; combined \texttt{dram\_bytes\_read} $>$ threshold
-  & Concat $[W_Q, W_K, W_V]$ $\to$ single \texttt{mm} + \texttt{chunk(n)}
-  & Wave starvation \\[4pt]
-FlashAttn sub.
-  & \texttt{softmax} preceded by \texttt{mm}; \texttt{l2\_hit\_rate < 20\%}
-  & Replace \texttt{mm$\to$scale$\to$softmax$\to$mm} with \texttt{F.scaled\_dot\_product\_attention}
-  & Register spill \\[4pt]
+  & \texttt{model.to(bfloat16)} before compile; routes GEMM to HMMA Tensor Core path \\[4pt]
+\texttt{channels\_last} layout
+  & Pre-compile
+  & \texttt{convertTensor\_kernel} in \nsys trace
+  & \texttt{model.to(channels\_last)}; eliminates cuDNN NCHW$\to$NHWC coercion \\[4pt]
+BatchNorm folding
+  & Pre-compile
+  & \texttt{\_native\_batch\_norm\_legit\_no\_training} in profile
+  & Fold BN running statistics into preceding Conv2d weights; replace module with \texttt{Identity} \\[4pt]
 Weight pretranspose
-  & \texttt{aten.t()} on weight $\ge 512$-dim; low \texttt{sm\_throughput\_pct}
-  & Pre-compute \texttt{W.T.contiguous()}, register as buffer; remove runtime transpose
-  & Cache miss \\[4pt]
-Activation norm.
-  & \texttt{relu} between two \texttt{mm} nodes; low \texttt{ipc\_active}
-  & Replace \texttt{relu} with \texttt{gelu(approximate=`tanh')}
-  & SFU serialization \\[4pt]
-Batch padding
-  & \texttt{achieved\_occupancy < 30\%} and Waves/SM $< 1$
-  & Pad batch dim $B \to B'$; slice output back to $B$
-  & Wave starvation \\
+  & FX rewrite
+  & Low \texttt{sm\_throughput\_pct} on TN GEMM
+  & Replace \texttt{aten.t(W)} + \texttt{aten.mm} with pre-computed \texttt{W$^\top$.contiguous()} buffer \\[4pt]
+max-autotune
+  & Compiler setting
+  & Sub-optimal tile selection (SM throughput below peak)
+  & \texttt{config\_patches=\{`max\_autotune': True\}} in \texttt{compile\_fx} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\textbf{BF16 casting} is the highest-leverage pass.  On Blackwell and Hopper, BF16 operands route
-all GEMM calls through Tensor Core HMMA tiles (128$\times$128$\times$32 for WGMMA), delivering up
-to $8\times$ raw FLOP throughput over FP32 scalar SIMT.  The pass is triggered exclusively by the
-profiler's observation that \texttt{tensor\_core\_active\_pct} $\approx 0$, ruling out models that
-already use mixed precision.
+\textbf{BF16 promotion} is the highest-leverage pattern.  On Ampere and newer
+architectures, BF16 operands route all GEMM calls through Tensor Core HMMA tiles,
+delivering up to $16\times$ raw FLOP throughput over FP32 scalar SIMT on A100
+(312\,TFLOPS vs.\ 19.5\,TFLOPS).  It is applied only when the profiler diagnoses
+\texttt{tensor\_core\_active\_pct} $\approx 0$, ruling out models that already use
+mixed precision.
 
-\textbf{QKV fusion} detects groups of \texttt{aten::mm} nodes with an identical input activation
-node.  It concatenates their weight parameters ($[D_\text{out}, D_\text{in}]$ each) into a single
-fused weight $[n \cdot D_\text{out}, D_\text{in}]$, replaces the $n$ separate GEMMs with one
-\texttt{mm} call, and splits the result with \texttt{chunk(n, dim=1)}.  The transformation raises
-Waves/SM from 0.11 to 0.68 for the TransformerBlock Q/K/V projections by replacing three
-128-CTA dispatches with one 384-CTA dispatch across 188 SMs.
+\textbf{Weight pre-transposition} uses \texttt{torch.fx.subgraph\_rewriter.replace\_pattern}
+to detect the pattern \texttt{mm(x, aten.t(W))} where $W.\textit{shape}[0] \ge 512$.
+It pre-computes $W^\top.\texttt{contiguous()}$ at graph compile time, registers it
+as a model buffer, and replaces the runtime transpose node with a direct
+\texttt{get\_attr}.  This switches cuBLAS from the \texttt{gemmSN\_TN} path
+(sub-optimal L2 tiling for tall-$K$ TN matrices) to the \texttt{gemmSN\_NN} path.
+In \texttt{gpt2\_optimized.py}, this pass ran but did not apply because the
+\texttt{aten.t(get\_attr)} pattern is absent from the pre-Inductor graph; the pass
+degrades gracefully with a diagnostic warning.
 
-\textbf{FlashAttention substitution} uses \texttt{torch.fx.subgraph\_rewriter.replace\_pattern}
-to identify the four-node pattern
-\texttt{mm(Q,\,$K^\top$)}~$\to$~\texttt{mul(scale)}~$\to$~\texttt{softmax}~$\to$~\texttt{mm(attn,\,V)}
-and replace it with \texttt{F.scaled\_dot\_product\_attention}, which Inductor lowers to a
-FlashAttention-2 Triton kernel.  This eliminates the $[B, H, S, S]$ attention matrix DRAM
-round-trip and drops local memory spills from 757,760 per call to zero.
+\subsection{Layer Deduplication}
+\label{sec:dedup}
 
-\textbf{Weight pre-transposition} detects the pattern \texttt{mm(x, aten.t(W))} where
-$W.\textit{shape}[0] \ge 512$.  It pre-computes $W^\top.\texttt{contiguous()}$ at graph compile
-time, registers it as a model buffer, and replaces the runtime transpose node with a direct
-\texttt{get\_attr}.  This switches cuBLAS from the \texttt{gemmSN\_TN} path (sub-optimal L2 tiling
-for tall-$K$ TN matrices) to the \texttt{gemmSN\_NN} path, yielding the largest single-operator
-speedup (10.8$\times$) observed in our evaluation.
+For models with repeated structure (\eg transformer decoder blocks), profiling and
+compiling every layer independently costs $O(N)$ ncu replay time.
+\texttt{UniqueSubgraphRegistry} detects structurally identical FX subgraphs by
+computing a canonical hash of each partition's node types and connectivity.  Only
+one representative per equivalence class is compiled and profiled; metrics and
+compiled callables are propagated to all structural duplicates by positional index
+within each partition group.
+
+The deduplication is transparent to the outer profiling loop: each duplicate
+partition's forward pass is wrapped with an NVTX range tagged
+\texttt{layer::duplicate::<label>}, and the partition equivalence map (written to
+\texttt{<prefix>.part.json} during the correlation pass) is passed to
+\texttt{KernelProfileConfig} so the \ncu orchestrator skips duplicate-partition
+kernels during replay and propagates metrics from the unique representative.
+
+\textbf{Impact.}  For GPT-2 (12 identical transformer blocks),
+deduplication reduces \ncu replay time from ${\sim}$30--45\,min to
+${\sim}$3--5\,min---a 12$\times$ improvement.  Layer deduplication is activated
+automatically by \texttt{run\_workload.py} when structurally repeated partitions
+are detected.
 
 \subsection{Closed-Loop Validation Protocol}
 \label{sec:validation}
@@ -494,10 +521,13 @@ speedup (10.8$\times$) observed in our evaluation.
 The full optimization cycle consists of four steps:
 \begin{enumerate}
   \item \textbf{Profile}: capture baseline \texttt{profile.json} via \nsys + \ncu pipeline.
-  \item \textbf{Diagnose}: \texttt{DiagnosisEngine} maps per-operator counter values to bottleneck
-    classes from the taxonomy in \secref{sec:roofline}, selecting the applicable FX passes.
-  \item \textbf{Transform}: run \texttt{torch.compile(model, backend="operator\_profiler")} to
-    apply passes and compile.
+  \item \textbf{Diagnose}: \texttt{profile.json} is examined per-operator; the Claude Code
+    plugin's \textbf{profile-analyzer} agent maps each operator's counter values to bottleneck
+    classes from the taxonomy in \secref{sec:roofline} and produces \texttt{triage.json} with
+    ranked bottleneck diagnoses and recommended optimization patterns.
+  \item \textbf{Transform}: implement a workload-specific optimized backend (or use the
+    plugin's \textbf{backend-engineer} agent to generate one); run
+    \texttt{torch.compile(model, backend="<workload>\_opt")} to apply the patterns and compile.
   \item \textbf{Validate}: capture optimized \texttt{profile\_optimized.json}; generate a delta
     report comparing per-operator counter values, flagging any regression.
 \end{enumerate}
@@ -524,8 +554,8 @@ The plugin orchestrates six specialized LLM agents.  \textbf{capture-agent} hand
 \textbf{profile-analyzer} applies the bottleneck decision tree and computes per-operator
 time-budget percentages; \textbf{optimization-strategist} produces \texttt{optimizations.json}
 with ranked FX proposals, exact metric-evidence citations, and dependency ordering;
-\textbf{backend-engineer} generates \texttt{workload\_optimized.py} with defensive FX passes
-and a pytest suite; \textbf{validation-agent} runs the 5-step pass/fail validation sequence
+\textbf{backend-engineer} generates \texttt{workload\_optimized.py} with workload-specific
+optimization patterns (pre-compile modifications and/or FX graph rewrites) and a pytest suite; \textbf{validation-agent} runs the 5-step pass/fail validation sequence
 and classifies which FX passes applied vs.\ fell through gracefully; and
 \textbf{comparison-agent} normalizes for batch-size differences and attributes measured counter
 deltas to specific transformations.

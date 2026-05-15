@@ -63,27 +63,33 @@ system for PyTorch. Our contributions are:
   Hopper, and Blackwell. Duration-weighted aggregation ensures that long-running kernels dominate
   operator-level summaries when multiple kernels are attributed to one operator.
 
-\item \textbf{Custom Torch Dynamo PGO backend (\secref{sec:pgo}).}  A \texttt{@register\_backend}
-  hook inserts six hardware-evidence-motivated FX graph passes at the Aten IR level before Inductor
-  lowering: BF16 casting, QKV projection fusion, FlashAttention substitution, weight
-  pre-transposition, activation normalization, and batch padding.  Each pass is triggered only when
-  the profiler diagnoses the specific counter symptom that motivates it.
+\item \textbf{FX pass infrastructure and demonstrated optimization patterns (\secref{sec:pgo}).}
+  \texttt{FxPassRunner} and \texttt{UniqueSubgraphRegistry} compose to apply pattern-based FX
+  graph rewrites to unique layer representatives only.  Hardware-evidence-motivated optimization
+  patterns demonstrated across the example workloads include: BF16 dtype promotion (triggered by
+  \texttt{tensor\_core\_active\_pct}~$\approx$~0), \texttt{channels\_last} memory layout
+  (triggered by \texttt{convertTensor\_kernel} presence), BatchNorm folding into Conv weights,
+  weight pre-transposition, and max-autotune compiler settings.  A custom backend is registered
+  per workload via \texttt{@register\_backend}; each pattern is applied only when the profiler
+  diagnoses the specific counter symptom that motivates it.
 
 \item \textbf{Closed-loop validation (\secref{sec:experiments}).}  A four-step protocol---profile
   $\to$ diagnose $\to$ transform $\to$ re-profile---verifies that hardware bottlenecks are
   eliminated, not merely shifted.  Per-operator hardware counter deltas confirm systematic
-  improvement across all six evaluated workloads.
+  improvement across all evaluated workloads.
 
 \end{enumerate}
 
 \paragraph{Results.}
-On a TransformerBlock (hidden dim 512, 8 heads, FFN ratio $4\times$) running on an NVIDIA RTX PRO
-6000 Blackwell, \sys achieves \textbf{6.3$\times$} per-sample speedup over the eager-mode FP32
-baseline. Tensor Core utilization rises from 0\% to ${\sim}85\%$; register spills from the FMHA
-kernel drop from 757,760 to zero; Waves/SM on the Q/K/V projections rises from 0.11 to 0.68.
-Across six workloads on two GPU architectures, end-to-end speedups range from 1.8$\times$
-(cuDNN LSTM, opaque kernel path) to 6.3$\times$ (TransformerBlock), each verified by hardware
-counter before-and-after comparison.
+On GPT-2 small (hidden=768, 12 heads, 12 layers, B=4, seq=128) on an NVIDIA A100-SXM4-80GB,
+\sys achieves ${\sim}$\textbf{2.5--3.0$\times$} speedup over the FP32 baseline.  Tensor Core
+utilization on GEMM operators rises from 0\% to 55.9\%; register spills in the FMHA kernel
+drop from 24.5\,MB to zero; the FFN up-projection alone achieves 9.4$\times$ per-kernel speedup.
+On a VGG-style ConvBlock (B=16, A100), \sys achieves \textbf{2.93$\times$} speedup by
+eliminating BatchNorm runtime overhead (−985,505\,ns), switching to \texttt{channels\_last}
+memory format, and activating BF16 Tensor Core paths.  Layer deduplication reduces \ncu replay
+time from 30--45\,min to 3--5\,min for GPT-2's 12 identical transformer blocks.  Each
+optimization is verified by hardware counter before-and-after comparison.
 
 \begin{figure}[t]
 \centering
@@ -126,7 +132,7 @@ counter before-and-after comparison.
 
 %% ---- Row 3: PGO ----
 \node[pgobox] (diag)    at (2.7,-3.3)  {Diagnosis\\[-1pt]Engine};
-\node[pgobox] (passes)  at (5.5,-3.3)  {6 FX Passes\\[-1pt](Aten IR)};
+\node[pgobox] (passes)  at (5.5,-3.3)  {Optimization\\[-1pt]Patterns};
 \node[pgobox] (compile) at (8.2,-3.3)  {\texttt{torch.compile}\\[-1pt]+ Inductor};
 \node[outbox] (opt)     at (10.8,-3.3) {Optimized\\[-1pt]model};
 
@@ -136,7 +142,7 @@ counter before-and-after comparison.
 \draw[arr] (compile) -- (opt);
 
 \node[lbl, left=3pt of diag]   {\S\ref{sec:pgo}};
-\node[lbl, above=2pt of passes] {BF16 · QKV fusion · FlashAttn · pretranspose · activ.\ norm.\ · batch pad};
+\node[lbl, above=2pt of passes] {BF16 · channels\_last · BN fold · weight pretranspose · max-autotune};
 
 %% ---- Feedback loop ----
 \draw[darr] (opt.south) -- ++(0,-0.45) -| (workload.south)

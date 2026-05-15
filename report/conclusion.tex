@@ -5,20 +5,23 @@ We presented \sys, a hardware-attributed GPU profiling and profile-guided optimi
 bridges the gap between PyTorch's operator-level abstractions and NVIDIA's kernel-level hardware
 performance counters. Our contributions---an attribution pipeline with per-stream interval trees,
 invocation-order matching, and Inductor debug-artifact enrichment for compiled models; a 20-counter
-curated metric set with duration-weighted aggregation and architecture-specific fallbacks; a custom
-Torch Dynamo PGO backend with six FX graph passes; a closed-loop validation protocol; and a Claude
-Code plugin that automates the full eight-stage optimization workflow via a single
-\texttt{/optimize~workload.py} command---collectively enable the first automated, evidence-driven
+curated metric set with duration-weighted aggregation and architecture-specific fallbacks;
+\texttt{FxPassRunner} and \texttt{UniqueSubgraphRegistry} for pattern-based FX graph optimization
+of unique layer representatives with hardware-evidence-motivated patterns; layer deduplication that
+reduces \ncu replay time by $O(\text{num\_duplicate\_layers})$; a closed-loop validation protocol;
+and a Claude Code plugin that automates the full eight-stage optimization workflow via a single
+\texttt{/optimize~workload.py} command---collectively enable an automated, evidence-driven
 optimization loop at the intersection of PyTorch operator profiling and hardware counter measurement.
 
-The key result is not the 6.3$\times$ speedup number itself, but what it is built from: every
-optimization decision is grounded in a specific hardware counter reading (e.g., \texttt{tensor\_core\_active\_pct
-= 0\%} $\to$ apply BF16 cast; \texttt{local\_memory\_spills = 757,760} $\to$ apply FlashAttention
-substitution; \texttt{Waves/SM = 0.11} $\to$ apply QKV fusion), and every claimed improvement is
-verified by re-profiling with the same hardware counter pipeline.  This makes optimizations
-reproducible, auditable, and non-trivially distinct from rule-of-thumb best practices: some
-bottlenecks (register spill in FMHA, TN layout penalty in the FFN down-projection) are invisible
-to wall-clock profilers and require hardware counter attribution to diagnose.
+The key results are not the speedup numbers themselves, but what they are built from: every
+optimization decision is grounded in a specific hardware counter reading (e.g.,
+\texttt{tensor\_core\_active\_pct = 0\%} $\to$ apply BF16 promotion achieving 2.93$\times$ on
+ConvBlock and ${\sim}$2.5--3.0$\times$ on GPT-2 on NVIDIA A100-SXM4-80GB;
+\texttt{local\_memory\_spills = 24,468,480\,B} $\to$ BF16 fmha eliminates spills entirely), and
+every claimed improvement is verified by re-profiling with the same hardware counter pipeline.
+This makes optimizations reproducible, auditable, and non-trivially distinct from rule-of-thumb
+best practices: some bottlenecks (register spill in FMHA, NHWC layout coercion on every forward
+pass) are invisible to wall-clock profilers and require hardware counter attribution to diagnose.
 
 \paragraph{Limitations.}
 Attribution coverage degrades for cuDNN-backed operators (\texttt{nn.LSTM},
@@ -26,9 +29,10 @@ Attribution coverage degrades for cuDNN-backed operators (\texttt{nn.LSTM},
 correspondence and no Inductor debug metadata is available; expected unattributed rates of
 80--90\% make hardware-counter-driven optimization inapplicable, and bottleneck diagnosis must
 fall back to kernel-name inference.  \ncu serializes kernels for replay, making concurrent
-multi-stream profiles require separate per-stream runs.  The FX pass set is hand-designed;
-automatic pass selection from counter evidence---for example, via learned thresholds or
-reinforcement learning over the bottleneck-to-pass mapping---is left as future work.
+multi-stream profiles require separate per-stream runs.  Optimization patterns are currently
+user-defined per-workload (implemented in each \texttt{*\_optimized.py}); automatic pattern
+selection from counter evidence---via learned thresholds or a rule engine over the
+bottleneck-to-pattern mapping---is left as future work.
 
 \paragraph{Future work.}
 Online profiling via CUPTI Perfworks streaming would eliminate the separate \ncu pass, enabling

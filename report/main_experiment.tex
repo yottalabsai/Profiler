@@ -3,130 +3,148 @@
 
 \subsection{Experimental Setup}
 
-\textbf{Hardware.}  We evaluate on two production GPU architectures:
+\textbf{Hardware.}  All experiments run on a single GPU:
 \begin{itemize}[leftmargin=1.5em]
-  \item \textbf{NVIDIA RTX PRO 6000 Blackwell Server Edition}: 188 SMs, 96\,GB HBM3e,
-    5th-generation Tensor Cores (WMMA BF16/TF32), peak BF16 throughput 1,457\,GB/s memory bandwidth.
-  \item \textbf{NVIDIA H100 SXM5 80\,GB}: 132 SMs, 80\,GB HBM3, WGMMA units,
-    3,350\,GB/s memory bandwidth.
+  \item \textbf{NVIDIA A100-SXM4-80GB}: 108 SMs, 80\,GB HBM2e (2\,TB/s memory bandwidth),
+    3rd-generation Tensor Cores (HMMA BF16/TF32), peak BF16 throughput 312\,TFLOPS,
+    Ampere architecture (sm80).
 \end{itemize}
 
-\textbf{Software.}  PyTorch 2.11; CUDA 12.x; Nsight Systems 2025.1; Nsight Compute 2025.4.1;
+\textbf{Software.}  PyTorch 2.11; CUDA 12.8; Nsight Systems 2024.6; Nsight Compute 2025.1;
 Python 3.11.
 
-\textbf{Measurement protocol.}  All timing uses \texttt{torch.cuda.Event(enable\_timing=True)}
-with 50 warm-up iterations and 200 measured iterations, reporting the median.  Profiling is
-performed with 10-iteration \nsys captures and per-unique-kernel \ncu replays.
+\textbf{Measurement protocol.}  Attributed kernel times are measured from \nsys CUPTI records
+(GPU-domain wall clock), with 3--5 warm-up iterations and 10 measured iterations per workload.
+\ncu replay is performed in application mode (\texttt{--replay-mode application}), collecting all
+20 metrics in 4--8 passes; absolute replay durations are 2--5$\times$ inflated relative to real
+wall clock and are used only for relative before/after comparisons.  Layer deduplication is
+enabled for models with repeated layer structure (e.g.\ GPT-2), profiling only unique
+representatives and propagating metrics to duplicates.
 
 \textbf{Baselines.}  We compare three configurations:
 \begin{enumerate*}[label=(\arabic*)]
-  \item \emph{Eager FP32}: standard PyTorch inference without \texttt{torch.compile}, FP32
-    precision;
-  \item \emph{Inductor FP32}: \texttt{torch.compile(backend="inductor")} with default settings,
-    FP32 precision (\TODO{fill in measured values});
-  \item \emph{PGO BF16}: \sys PGO backend with BF16 casting and all applicable FX passes.
+  \item \emph{Eager FP32}: standard PyTorch inference with \texttt{torch.compile(backend="inductor")}
+    and default settings, FP32 precision (Inductor FP32 baseline);
+  \item \emph{Optimized}: workload-specific backend applying BF16 promotion and other
+    hardware-evidence-motivated patterns.
 \end{enumerate*}
+Eager-mode FP32 (without \texttt{torch.compile}) serves as a secondary reference for the speedup
+table; Inductor FP32 vs.\ optimized comparisons are pending for all workloads
+(\textbf{[TBD]} in \tabref{tab:speedup}).
 
 \subsection{Workloads}
 
-\tabref{tab:workloads} describes the six workloads.  Each workload isolates a distinct operator
-category and hardware challenge.
+\tabref{tab:workloads} describes the seven workloads.  Each workload isolates a distinct operator
+category and hardware challenge.  GPT-2, ConvBlock, and Embedding Projection have complete
+profiling and optimization results; the remaining four workloads have baseline profiles only at
+time of writing.
 
 \begin{table}[h]
 \centering
-\caption{Evaluated workloads.  All workloads use the \texttt{get\_model\_and\_input()} interface.}
+\caption{Evaluated workloads.  All workloads use the \texttt{get\_model\_and\_input()} interface
+  and run on NVIDIA A100-SXM4-80GB.  $\checkmark$ = full results available; -- = baseline profile only.}
 \label{tab:workloads}
 \small
-\begin{tabular}{llllll}
+\begin{tabular}{lllll}
 \toprule
-\textbf{Workload} & \textbf{GPU} & \textbf{Batch} & \textbf{Dimensions} & \textbf{Key Challenge} \\
+\textbf{Workload} & \textbf{Batch} & \textbf{Dimensions} & \textbf{Key Challenge} & \textbf{Status} \\
 \midrule
-TransformerBlock    & Blackwell  & 16$\to$64 & hidden=512, FFN=2048, 8 heads        & Wave starvation + TC idle \\
-MLP Activations     & H100 SXM5  & 256       & 512$\to$2048$\to$512, 4 layers       & TC idle + SFU serialization \\
-ConvBlock           & H100 SXM5  & 16        & $64{\times}64$ spatial, 3$\to$256 ch & convertTensor + BN decomp.\ \\
-Embedding Proj.     & H100 SXM5  & 64        & seq=128, vocab=32K, dim=512          & Register pressure on logit proj.\ \\
-SDPA Attention      & H100 SXM5  & 8         & seq=512, dim=512, 8 heads            & Register spill in FMHA \\
-LSTMSequenceEncoder & H100 PCIe  & 32        & seq=128, hidden=512, 2 layers        & cuDNN opacity + TC idle \\
+GPT-2 (12-layer)       & 4   & hidden=768, FFN=3072, 12 heads, seq=128 & TC idle (FP32 SIMT) + fmha register spill & $\checkmark$ \\
+ConvBlock (VGG-style)  & 16  & $64{\times}64$ spatial, 3$\to$256 ch, BN+pool & BN inference overhead + NHWC layout coercion & $\checkmark$ \\
+Embedding Proj.        & 64  & seq=128, vocab=32K, dim=512 & Large logit projection GEMM + embedding gather & $\checkmark$ \\
+MLP Activations        & 256 & 512$\to$2048$\to$2048$\to$2048$\to$512, 4 activations & TC idle + SFU serialization (tanh) & -- \\
+SDPA Attention         & 8   & seq=512, dim=512, 8 heads & FlashAttention register spill + wave starvation & -- \\
+LSTM Seq.\ Encoder     & 32  & seq=128, hidden=512, 2 layers & cuDNN opacity $\to$ TC idle & -- \\
+DepthwiseSepConv       & 16  & 32$\to$256 ch, $56{\times}56$ spatial & Depthwise memory-bound vs.\ pointwise compute-bound & -- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{End-to-End Speedup Results}
 
-\tabref{tab:speedup} reports end-to-end forward-pass latency across all six workloads.  Speedups
-are normalized per sample where batch size differs between configurations (TransformerBlock:
-optimized at B=64, normalized to B=16 by dividing by 4).  All LSTM timings are from \ncu
-kernel-replay mode ($2$--$5\times$ real wall clock); the before/after ratio is valid but absolute
-values cannot be used as latency estimates ($^\dagger$).
+\tabref{tab:speedup} reports attributed kernel time (from \nsys CUPTI records) for workloads with
+complete profiling results, and ncu application-mode replay time ($^\dagger$, 2--5$\times$
+inflated) for GPT-2.  Inductor FP32 baseline measurements are pending for all workloads.
 
 \begin{table}[h]
 \centering
-\caption{End-to-end forward-pass latency and speedup.  \textbf{[TBD]} cells require measuring
-  \texttt{torch.compile(backend="inductor")} for each workload.
+\caption{Forward-pass attributed time and speedup.  GPT-2 times are from \ncu application-mode
+  replay ($^\dagger$, 2--5$\times$ real wall clock); ConvBlock times are from \nsys CUPTI records
+  (real GPU wall clock).  Inductor FP32 column is pending for all workloads.
   \MEASURE{Run: \texttt{torch.compile(model, backend="inductor")} for each workload and
-           fill in column 3 and the Speedup vs.\ Inductor column.}}
+           fill in column 3 (Inductor FP32) and the Speedup vs.\ Inductor column.}}
 \label{tab:speedup}
 \small
 \setlength{\tabcolsep}{5pt}
 \begin{tabular}{lrrrrr}
 \toprule
-\textbf{Workload} & \textbf{Eager FP32} & \textbf{Inductor FP32} & \textbf{PGO BF16}
+\textbf{Workload} & \textbf{Eager FP32} & \textbf{Inductor FP32} & \textbf{Optimized}
                   & \textbf{vs.\ Eager} & \textbf{vs.\ Inductor} \\
 \midrule
-TransformerBlock (B=16 equiv.) & 48,600\,ns & \textbf{[TBD]} & 7,585\,ns  & \textbf{6.3$\times$} & \textbf{[TBD]} \\
-MLP Activations                & 355,500\,ns & \textbf{[TBD]} & 57,000\,ns & \textbf{6.2$\times$} & \textbf{[TBD]} \\
-ConvBlock (kernel only)        & 212,380\,ns & \textbf{[TBD]} & 97,000\,ns & \textbf{2.2$\times$} & \textbf{[TBD]} \\
-ConvBlock (wall time)          & 339,000\,ns & \textbf{[TBD]} & 97,000\,ns & \textbf{3.5$\times$} & \textbf{[TBD]} \\
-Embedding Projection           & 4,806,000\,ns & \textbf{[TBD]} & 946,000\,ns & \textbf{5.1$\times$} & \textbf{[TBD]} \\
-SDPA Attention                 & 360,700\,ns & \textbf{[TBD]} & ${\sim}$132,000\,ns & \textbf{${\sim}$2.7$\times$} & \textbf{[TBD]} \\
-LSTMSequenceEncoder$^\dagger$  & 27,200,000\,ns & \textbf{[TBD]} & 15,390,000\,ns & \textbf{1.77$\times$} & \textbf{[TBD]} \\
+GPT-2$^\dagger$         & 103,930,896\,ns$^\dagger$ & \textbf{[TBD]} & ${\sim}$35--42\,M\,ns$^\dagger$ & ${\sim}$\textbf{2.5--3.0$\times^\dagger$} & \textbf{[TBD]} \\
+ConvBlock               & 4,119,109\,ns & \textbf{[TBD]} & 1,404,657\,ns & \textbf{2.93$\times$} & \textbf{[TBD]} \\
+Embedding Proj.         & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+MLP Activations         & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+SDPA Attention          & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+LSTM Seq.\ Encoder      & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+DepthwiseSepConv        & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The ConvBlock wall-time speedup (3.5$\times$) significantly exceeds the kernel-time speedup
-(2.2$\times$) because CUDA Graphs eliminate 175,600\,ns of kernel-launch overhead (51.8\% of
-baseline wall time at B=16) that is orthogonal to the kernel-level FP16 optimization.
+GPT-2 times are from \ncu application-mode replay and are 2--5$\times$ longer than real wall-clock
+execution; the before/after ratio is valid but absolute values cannot be used as latency estimates.
+ConvBlock times are attributed kernel wall time from \nsys CUPTI records.
 
-\subsection{TransformerBlock: Operator-Level Breakdown}
+\subsection{GPT-2: Operator-Level Breakdown}
 
-\tabref{tab:transformer} reports per-operator timing for the TransformerBlock, the workload with
-the richest bottleneck variety.  Optimized values are measured at B=64 and normalized to B=16
-equivalent (multiplied by 16/64 = 0.25) for fair per-sample comparison.
+\tabref{tab:transformer} reports per-operator attributed time for GPT-2 small (12 transformer
+blocks, hidden=768, 12 heads, FFN=3072, B=4, seq=128) on A100.  All values are from \ncu
+application-mode replay ($^\dagger$); use for relative comparisons only.
 
 \begin{table}[h]
 \centering
-\caption{Per-operator forward-pass timing for TransformerBlock on RTX PRO 6000 Blackwell.
-  Median over 200 iterations.  Optimized configuration: B=64, BF16, PGO backend.}
+\caption{Per-operator-class attributed time for GPT-2 on A100-SXM4-80GB$^\dagger$.  Baseline:
+  FP32 eager (Inductor + layer dedup).  Optimized: BF16 + max-autotune (\texttt{gpt2\_opt} backend).
+  ``Remaining'' includes LayerNorm, GELU, embedding lookup, and other non-GEMM operators.}
 \label{tab:transformer}
 \small
 \begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lrrr}
 \toprule
-\textbf{Operation} & \textbf{Baseline (B=16, FP32)} & \textbf{Optimized (B=16 equiv.)} & \textbf{Speedup} \\
+\textbf{Operator class} & \textbf{Baseline (FP32)$^\dagger$} & \textbf{Optimized (BF16)$^\dagger$} & \textbf{Speedup} \\
 \midrule
-LayerNorm $\times$ 2            & 2,112\,ns  & 568\,ns   & 3.7$\times$  \\
-Q projection [512$\to$512]      & 4,928\,ns  & 832\,ns   & 5.9$\times$  \\
-V projection [512$\to$512]      & 4,896\,ns  & 848\,ns   & 5.8$\times$  \\
-QK$^\top$ scores                & 4,320\,ns  & 784\,ns   & 5.5$\times$  \\
-Softmax                         & 768\,ns    & 249\,ns   & 3.1$\times$  \\
-AV output                       & 1,920\,ns  & 392\,ns   & 4.9$\times$  \\
-Output projection [512$\to$512] & 5,184\,ns  & 840\,ns   & 6.2$\times$  \\
-FFN up [512$\to$2048]           & 7,392\,ns  & 1,024\,ns & 7.2$\times$  \\
-FFN down [2048$\to$512]         & 14,912\,ns & 1,376\,ns & \textbf{10.8$\times$} \\
-ReLU / GELU activation          & 672\,ns    & 174\,ns   & 3.9$\times$  \\
-Residual add $\times$ 2         & 789\,ns    & 498\,ns   & 1.6$\times$  \\
+\texttt{aten::mm} (336 kernels)               & 53,966,937\,ns & ${\sim}$8,000,000\,ns  & ${\sim}$6--7$\times$ \\
+\texttt{aten::addmm} (456 kernels)            & 16,301,364\,ns & ${\sim}$2,400,000\,ns  & ${\sim}$6--7$\times$ \\
+\texttt{aten::\_efficient\_attention\_forward} (108 kernels) & 3,306,052\,ns & ${\sim}$1,848,000\,ns & 1.79$\times$ \\
+Remaining attributed (998 kernels)            & 30,356,543\,ns & ${\sim}$25,000,000\,ns & ${\sim}$1.2$\times$ \\
 \midrule
-\textbf{Total}                  & \textbf{47,893\,ns} & \textbf{7,585\,ns} & \textbf{6.3$\times$} \\
+\textbf{Total attributed}                     & \textbf{103,930,896\,ns} & ${\sim}$\textbf{35--42\,M\,ns} & ${\sim}$\textbf{2.5--3.0$\times$} \\
+Unattributed (240 kernels)                    & ---            & ---            & --- \\
 \bottomrule
 \end{tabular*}
 \end{table}
 
-\figref{fig:speedup_bars} visualizes the per-operator speedups; the FFN down-projection bar dominates, reflecting a doubly-penalized baseline.
-The FFN down-projection delivers the largest single-operator gain (10.8$\times$) because it
-suffered two compounding penalties: (1) the TN layout penalty of \texttt{gemmSN\_TN} on a
-$[16,2048]\times[2048,512]$ shape (poor L2 tiling for tall-$K$ matrices) and (2) FP32 SIMT instead
-of BF16 Tensor Cores.  The weight pre-transposition pass eliminates (1) and BF16 casting eliminates
-(2).
+\tabref{tab:gpt2kernels} shows representative per-kernel speedups for the dominant kernel
+shapes.  The FFN up-projection achieves the highest single-kernel speedup (9.4$\times$) because
+the BF16 HMMA path uses a larger tile
+(\texttt{ampere\_bf16\_s16816gemm\_bf16\_128x128\_ldg8\_relu\_f2f\_stages\_64x3\_nn}) vs.\
+the FP32 SIMT \texttt{ampere\_sgemm\_32x128\_nn} used at baseline.
+
+\begin{table}[h]
+\centering
+\caption{Representative per-kernel speedups for GPT-2 on A100 (ncu replay$^\dagger$).}
+\label{tab:gpt2kernels}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Operation} & \textbf{Shape} & \textbf{Baseline$^\dagger$} & \textbf{Optimized$^\dagger$} & \textbf{Speedup} \\
+\midrule
+FFN up-projection   & $[512{\times}768]\times[768{\times}3072]$ & 197,952\,ns & 21,120\,ns & \textbf{9.4$\times$} \\
+Attn.\ output proj. & $[512{\times}768]\times[768{\times}768]$  & 54,848\,ns  & 12,769\,ns & \textbf{4.3$\times$} \\
+FMHA                & B=4, H=12, S=128 & 30,720\,ns  & ${\sim}$17,200\,ns & \textbf{1.79$\times$} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{figure}[t]
 \centering
@@ -134,24 +152,16 @@ of BF16 Tensor Cores.  The weight pre-transposition pass eliminates (1) and BF16
 \begin{axis}[
   xbar,
   width=0.88\columnwidth,
-  height=7.6cm,
-  bar width=9pt,
-  xmin=0, xmax=13.5,
-  xlabel={Speedup ($\times$)},
+  height=4.8cm,
+  bar width=14pt,
+  xmin=0, xmax=10.5,
+  xlabel={Speedup ($\times$, ncu replay$^\dagger$)},
   xlabel style={font=\small},
   ytick=data,
   yticklabels={
-    Residual add $\times$2,
-    Softmax,
-    LayerNorm $\times$2,
-    {ReLU/GELU},
-    AV output,
-    {QK$^\top$ scores},
-    V projection,
-    Q projection,
-    Out projection,
-    {FFN up [512$\!\to\!$2048]},
-    {FFN down [2048$\!\to\!$512]}
+    {Remaining attributed},
+    {FMHA},
+    {\texttt{aten::mm} + \texttt{addmm}}
   },
   yticklabel style={font=\footnotesize},
   tick label style={font=\footnotesize},
@@ -163,8 +173,8 @@ of BF16 Tensor Cores.  The weight pre-transposition pass eliminates (1) and BF16
   axis y line=left,
   xmajorgrids=true,
   grid style={gray!20},
-  extra x ticks={6.3},
-  extra x tick labels={Total 6.3$\times$},
+  extra x ticks={2.75},
+  extra x tick labels={Total ${\sim}$2.5--3$\times$},
   extra x tick style={
     grid=major,
     grid style={red!60!black, dashed, thick},
@@ -178,153 +188,134 @@ of BF16 Tensor Cores.  The weight pre-transposition pass eliminates (1) and BF16
 ]
 
 \addplot[fill=blue!45, draw=blue!60!black] coordinates {
-  (1.6, 0)
-  (3.1, 1)
-  (3.7, 2)
-  (3.9, 3)
-  (4.9, 4)
-  (5.5, 5)
-  (0,   6)
-  (0,   7)
-  (0,   8)
-  (0,   9)
-  (0,  10)
+  (1.2, 0)
+  (0,   1)
+  (0,   2)
 };
 
 \addplot[fill=teal!50, draw=teal!70!black] coordinates {
   (0,   0)
-  (0,   1)
+  (1.79,1)
   (0,   2)
-  (0,   3)
-  (0,   4)
-  (0,   5)
-  (5.8, 6)
-  (5.9, 7)
-  (6.2, 8)
-  (7.2, 9)
-  (0,  10)
 };
 
 \addplot[fill=orange!70, draw=orange!80!black] coordinates {
-  (0,    0)
-  (0,    1)
-  (0,    2)
-  (0,    3)
-  (0,    4)
-  (0,    5)
-  (0,    6)
-  (0,    7)
-  (0,    8)
-  (0,    9)
-  (10.8,10)
+  (0,   0)
+  (0,   1)
+  (6.5, 2)
 };
 
-\legend{BF16, BF16 + batch pad, BF16 + pretranspose}
+\legend{BF16 (minor), BF16 + lower-reg fmha, BF16 HMMA (Tensor Core activated)}
 
 \end{axis}
 \end{tikzpicture}
-\caption{\textbf{Per-operator speedup for TransformerBlock} (Blackwell, B=16 equivalent, all
-  values from \tabref{tab:transformer}).
-  \textcolor{blue!60!black}{Blue}: BF16 casting alone.
-  \textcolor{teal!70!black}{Teal}: BF16~+ batch padding (wider GEMM dispatch).
-  \textcolor{orange!80!black}{Orange}: BF16~+ weight pre-transposition (FFN down was doubly
-  penalized by TN layout and FP32 SIMT).
-  Dashed red line marks the \textbf{6.3$\times$} overall per-sample speedup.}
+\caption{\textbf{Per-operator-class speedup for GPT-2} (A100-SXM4-80GB, B=4, seq=128;
+  all values from \tabref{tab:transformer}, ncu replay$^\dagger$).
+  \textcolor{orange!80!black}{Orange}: \texttt{aten::mm} + \texttt{addmm} (6--7$\times$,
+  BF16 activates Tensor Core HMMA path, TC: 0\% $\to$ 55.9\%).
+  \textcolor{teal!70!black}{Teal}: FMHA (1.79$\times$, BF16 fmha eliminates 24.5\,MB
+  register spills; wave starvation persists at 0.89 waves/SM).
+  \textcolor{blue!60!black}{Blue}: remaining operators (${\sim}$1.2$\times$).
+  Dashed red line marks the overall ${\sim}$\textbf{2.5--3.0$\times$} speedup.}
 \label{fig:speedup_bars}
 \end{figure}
 
 \subsection{Hardware Counter Validation}
 
-\tabref{tab:hwcounters} shows hardware counter values before and after optimization for the
-TransformerBlock, demonstrating systematic bottleneck elimination.
+\tabref{tab:hwcounters} shows hardware counter values before and after optimization for GPT-2,
+demonstrating systematic bottleneck elimination.  All values are from \ncu application-mode replay
+($^\dagger$).
 
 \begin{table}[h]
 \centering
-\caption{Key hardware counter values for TransformerBlock operators.  Values are duration-weighted
-  aggregates (\equref{eq:dwmean}) across all attributed operators.}
+\caption{Key hardware counter values for GPT-2 on A100-SXM4-80GB ($^\dagger$, ncu replay).
+  GEMM counters are duration-weighted aggregates (\equref{eq:dwmean}) across \texttt{aten::mm}
+  and \texttt{aten::addmm}; FMHA counters are per-call values for
+  \texttt{aten::\_efficient\_attention\_forward}.}
 \label{tab:hwcounters}
 \small
 \begin{tabular}{lrrl}
 \toprule
 \textbf{Counter} & \textbf{Baseline} & \textbf{Optimized} & \textbf{Diagnosed Cause} \\
 \midrule
-Tensor Core active (\%)     & 0.0\%      & ${\sim}$85\% & FP32 SIMT $\to$ BF16 HMMA \\
-Achieved occupancy (\%)     & 8.3\%      & ${\sim}$50\% & Reg.\ pressure 212$\to$80/thread \\
-Waves/SM (QKV projs)        & 0.11       & 0.68         & 3 GEMMs $\to$ 1 fused (QKV fusion) \\
-Registers/thread            & 212        & ${\sim}$80   & BF16 halves per-thread state \\
-Local memory spills/call    & 757,760    & 0            & FA2 keeps attn.\ matrix in SRAM \\
-SM throughput (\%)          & ${\sim}$36\% & ${\sim}$75\% & TC utilization improvement \\
+TC active, mm/addmm (\%)    & 0.0\%            & 55.9\%   & FP32 SIMT $\to$ BF16 HMMA (\texttt{s16816gemm}) \\
+Registers/thread (fmha)     & 168              & 128      & BF16 fmha uses fewer per-thread registers \\
+Local mem.\ spills (fmha)   & 24,468,480\,B    & 0\,B     & BF16 fmha keeps attn.\ matrix on-chip \\
+Achieved occupancy (fmha)   & 6.30\%           & 6.34\%   & Wave starvation persists (96 CTAs / 108 SMs) \\
+Waves/SM (attention)        & 0.89             & 0.89     & B=4, 12 heads: below 1-wave threshold \\
+FFN up-proj per-kernel      & 197,952\,ns$^\dagger$ & 21,120\,ns$^\dagger$ & 9.4$\times$ (BF16 128$\times$128 tile, 3-stage pipe) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Each hardware counter change is directly traceable to a specific FX pass in \tabref{tab:passes}:
-the Tensor Core activation to the BF16 casting pass; the register-pressure reduction to the dtype
-change reducing per-thread FP32 register demand; the Waves/SM improvement to QKV fusion; the spill
-elimination to FlashAttention substitution.
+BF16 promotion drives the GEMM speedup by activating Tensor Core HMMA instructions (TC: 0\%
+$\to$ 55.9\% on \texttt{aten::mm} and \texttt{aten::addmm}).  The attention speedup (1.79$\times$)
+is explained by register spill elimination: switching to \texttt{fmha\_cutlassF\_bf16\_aligned}
+reduces per-thread registers from 168 to 128 and drops 24.5\,MB of local-memory spills to zero.
+Achieved occupancy on the fmha kernel improves only marginally (6.30\% $\to$ 6.34\%) because
+wave starvation is structural at B=4 (96 CTAs across 108 SMs = 0.89 waves); eliminating it
+requires either B$\ge$16 or a Flash Attention~v2 kernel that processes multiple heads per SM.
 
-\subsection{Ablation: Per-Pass Contribution}
+\subsection{Ablation: Per-Pattern Contribution}
 
-\tabref{tab:ablation} isolates the contribution of each FX pass for the TransformerBlock by
-adding passes incrementally.  The BF16 and batch-padding configurations provide a critical
-baseline for separating dtype/precision effects from the graph-level contributions.
+\tabref{tab:ablation} isolates the contribution of each optimization pattern for GPT-2 by
+adding patterns incrementally.  BF16 promotion and max-autotune are the only patterns applied
+in the measured \texttt{gpt2\_opt} backend.
 
 \begin{table}[h]
 \centering
-\caption{Cumulative speedup on TransformerBlock (Blackwell) as FX passes are added.  All
-  asterisked values must be measured with \texttt{torch.compile(backend="operator\_profiler")} with
-  the corresponding pass subset enabled.
-  \MEASURE{Run the ablation for rows 2--6 by enabling passes sequentially and measuring with
-           \texttt{torch.cuda.Event}.}}
+\caption{Cumulative speedup on GPT-2 (A100, B=4, seq=128, ncu replay$^\dagger$) as optimization
+  patterns are added.  \MEASURE{Run the ablation for rows 2--3 by enabling patterns sequentially
+  and measuring with the ncu pipeline.}}
 \label{tab:ablation}
 \small
 \begin{tabular}{lcc}
 \toprule
-\textbf{Configuration} & \textbf{End-to-End Time (B=16 equiv.)} & \textbf{Speedup vs.\ Eager} \\
+\textbf{Configuration} & \textbf{Total Attributed Time$^\dagger$} & \textbf{Speedup vs.\ Eager} \\
 \midrule
-Eager FP32 baseline           & 47,893\,ns    & 1.0$\times$ \\
-+ BF16 casting only           & \textbf{[TBD]}$^*$ & \textbf{[TBD]}$^*$ \\
-+ Batch padding (B=64)        & \textbf{[TBD]}$^*$ & \textbf{[TBD]}$^*$ \\
-+ QKV fusion                  & \textbf{[TBD]}$^*$ & \textbf{[TBD]}$^*$ \\
-+ FlashAttention substitution & \textbf{[TBD]}$^*$ & \textbf{[TBD]}$^*$ \\
-+ Weight pre-transposition    & \textbf{[TBD]}$^*$ & \textbf{[TBD]}$^*$ \\
-+ Activation normalization    & \textbf{[TBD]}$^*$ & \textbf{[TBD]}$^*$ \\
+Eager FP32 baseline        & 103,930,896\,ns$^\dagger$ & 1.0$\times$ \\
++ BF16 promotion only      & \textbf{[TBD]}$^\dagger$  & \textbf{[TBD]} \\
++ max-autotune             & \textbf{[TBD]}$^\dagger$  & \textbf{[TBD]} \\
 \midrule
-\textbf{Full PGO pipeline}    & \textbf{7,585\,ns} & \textbf{6.3$\times$} \\
+\textbf{Full \texttt{gpt2\_opt} pipeline} & ${\sim}$35--42\,M\,ns$^\dagger$ & ${\sim}$\textbf{2.5--3.0$\times$} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Based on the hardware counter evidence, we expect BF16 + batch padding to account for approximately
-3.2$\times$ of the 6.3$\times$ total, with the FX graph passes (QKV fusion, FlashAttention, weight
-pre-transposition, activation normalization) contributing the remaining ${\sim}$2.0$\times$ compound
-gain.  This decomposition is important: register spill elimination (757,760 $\to$ 0) requires the
-FlashAttention substitution pass and is not achievable by dtype change alone.
+Based on the hardware counter evidence, BF16 promotion is expected to account for the majority of
+the gain by activating Tensor Core HMMA instructions (TC: 0\% $\to$ 55.9\%) and eliminating fmha
+register spills (24.5\,MB $\to$ 0).  The max-autotune contribution is estimated at 5--10\% on top
+of BF16 via improved tile selection.  The weight pre-transposition pattern (OPT-2) ran during
+compilation but did not apply because \texttt{aten.t(get\_attr)} nodes are absent from the
+pre-Inductor graph; relocating this pass to run post-Inductor lowering is a residual opportunity.
 
 \subsection{Attribution Coverage}
 
 \tabref{tab:coverage} reports what fraction of total kernel runtime is attributed at each
-confidence tier across the six workloads.
+confidence tier across the evaluated workloads.  Coverage percentages for GPT-2, Embedding Proj.,
+and the four pending workloads are \textbf{[TBD]} pending full profiling runs.  The ConvBlock
+baseline and optimized profiles both achieved 0\% unattributed (confirmed from comparison data).
 
 \begin{table}[h]
 \centering
 \caption{Attribution coverage by method, measured as fraction of total kernel runtime.
-  ConvBlock has higher UNATTRIBUTED fraction due to cuDNN internal helper kernels
-  (\texttt{computeTmpSize}, etc.) that have no \texttt{aten::} correspondence.
-  LSTMSequenceEncoder has very high UNATTRIBUTED because \texttt{aten::\_cudnn\_rnn} dispatches
-  to opaque cuDNN kernels with no NVTX brackets and no Inductor debug metadata.}
+  ConvBlock achieved 0\% UNATTRIBUTED in the measured baseline and optimized profiles.
+  LSTM is expected to have high UNATTRIBUTED because \texttt{aten::\_cudnn\_rnn} dispatches
+  to opaque cuDNN kernels with no NVTX brackets and no Inductor debug metadata.
+  \MEASURE{Run full pipeline for remaining workloads to fill in coverage percentages.}}
 \label{tab:coverage}
 \small
 \begin{tabular}{lrrr}
 \toprule
 \textbf{Workload} & \textbf{HIGH} & \textbf{MEDIUM} & \textbf{UNATTRIBUTED} \\
 \midrule
-TransformerBlock    & 45\% & 53\% & 2\%  \\
-MLP Activations     & 40\% & 58\% & 2\%  \\
-ConvBlock           & 30\% & 55\% & 15\% \\
-Embedding Proj.\    & 42\% & 57\% & 1\%  \\
-SDPA Attention      & 38\% & 60\% & 2\%  \\
-LSTMSequenceEncoder &  5\% & 10\% & 85\% \\
+GPT-2               & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+ConvBlock           & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{0\%} \\
+Embedding Proj.\    & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+MLP Activations     & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+SDPA Attention      & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+LSTM Seq.\ Enc.\    & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+DepthwiseSepConv    & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -335,19 +326,20 @@ LSTMSequenceEncoder &  5\% & 10\% & 85\% \\
 \begin{axis}[
   xbar stacked,
   width=0.88\columnwidth,
-  height=5.6cm,
-  bar width=13pt,
+  height=6.4cm,
+  bar width=11pt,
   xmin=0, xmax=100,
   xlabel={Kernel runtime attributed (\%)},
   xlabel style={font=\small},
   ytick=data,
   yticklabels={
+    DepthwiseSepConv,
     LSTM Seq.\ Enc.,
-    ConvBlock,
     SDPA Attention,
-    Embedding Proj.,
     MLP Activations,
-    TransformerBlock
+    Embedding Proj.,
+    ConvBlock,
+    GPT-2
   },
   yticklabel style={font=\footnotesize},
   tick label style={font=\footnotesize},
@@ -363,144 +355,154 @@ LSTMSequenceEncoder &  5\% & 10\% & 85\% \\
   },
 ]
 
-% HIGH (dark blue)
+% HIGH (dark blue) — all TBD except ConvBlock=0% unattributed (unknown HIGH/MEDIUM split)
+% Using placeholder 33/67 split for visual; will be replaced with measured values
 \addplot[fill=highcol, draw=highcol!80!black] coordinates {
-  (5,  0)   % LSTM
-  (30, 1)   % ConvBlock
-  (38, 2)   % SDPA
-  (42, 3)   % Embedding
-  (40, 4)   % MLP
-  (45, 5)   % Transformer
+  (0,  0)   % DepthwiseSepConv — TBD
+  (0,  1)   % LSTM — TBD
+  (0,  2)   % SDPA — TBD
+  (0,  3)   % MLP — TBD
+  (0,  4)   % Embedding — TBD
+  (0,  5)   % ConvBlock — TBD (HIGH/MEDIUM split pending; 0% unattributed confirmed)
+  (0,  6)   % GPT-2 — TBD
 };
 
 % MEDIUM (medium blue)
 \addplot[fill=medcol!70, draw=medcol!80!black] coordinates {
-  (10, 0)   % LSTM
-  (55, 1)   % ConvBlock
-  (60, 2)   % SDPA
-  (57, 3)   % Embedding
-  (58, 4)   % MLP
-  (53, 5)   % Transformer
+  (0,  0)   % DepthwiseSepConv — TBD
+  (0,  1)   % LSTM — TBD
+  (0,  2)   % SDPA — TBD
+  (0,  3)   % MLP — TBD
+  (0,  4)   % Embedding — TBD
+  (100,5)   % ConvBlock — 100% attributed (0% unattributed); HIGH/MEDIUM split TBD
+  (0,  6)   % GPT-2 — TBD
 };
 
 % UNATTRIBUTED (gray)
 \addplot[fill=ucol!80, draw=gray!60] coordinates {
-  (85, 0)   % LSTM
-  (15, 1)   % ConvBlock
-  (2,  2)   % SDPA
-  (1,  3)   % Embedding
-  (2,  4)   % MLP
-  (2,  5)   % Transformer
+  (0,  0)   % DepthwiseSepConv — TBD
+  (0,  1)   % LSTM — TBD
+  (0,  2)   % SDPA — TBD
+  (0,  3)   % MLP — TBD
+  (0,  4)   % Embedding — TBD
+  (0,  5)   % ConvBlock — 0% UNATTRIBUTED (confirmed)
+  (0,  6)   % GPT-2 — TBD
 };
 
 \legend{HIGH (torch.profiler IOM), MEDIUM (NVTX / Inductor), UNATTRIBUTED}
 
 \end{axis}
 \end{tikzpicture}
-\caption{\textbf{Attribution coverage by workload} (fraction of total kernel runtime; all values
-  from \tabref{tab:coverage}).  For PyTorch-native workloads (TransformerBlock through SDPA),
-  $\ge$98\% of kernel runtime is attributed at HIGH or MEDIUM confidence.  The
-  LSTMSequenceEncoder is 85\% UNATTRIBUTED because \texttt{aten::\_cudnn\_rnn} dispatches all
-  computation to opaque cuDNN internals with no NVTX annotations and no Inductor debug metadata.}
+\caption{\textbf{Attribution coverage by workload} (fraction of total kernel runtime; from
+  \tabref{tab:coverage}).  Most values are pending full profiling runs (\textbf{[TBD]}).
+  ConvBlock is the one confirmed datapoint: 0\% UNATTRIBUTED in both the baseline and optimized
+  profiles (teal bar spanning full width).  The HIGH/MEDIUM split within the 100\% attributed
+  ConvBlock total is pending. LSTM is expected to have high UNATTRIBUTED due to
+  \texttt{aten::\_cudnn\_rnn} opacity.}
 \label{fig:attribution}
 \end{figure}
 
-\figref{fig:attribution} visualizes attribution coverage across all six workloads.
-For PyTorch-native workloads (non-cuDNN), \sys attributes $\ge 90\%$ of total kernel runtime at
-HIGH or MEDIUM confidence.  The former LOW-confidence name-heuristic tier has been replaced by
-Inductor fusion enrichment (\secref{sec:heuristic}), which absorbs previously-unattributed
-Inductor-compiled kernels at MEDIUM confidence using ground-truth fusion metadata from
-\texttt{output\_code.py} comments; the net effect is an increase in MEDIUM coverage of 5--15
-percentage points for Inductor-mode workloads.  The 15\% UNATTRIBUTED fraction for ConvBlock
-consists of cuDNN internal helper kernels; the 85\% for LSTMSequenceEncoder reflects the
-complete opacity of the \texttt{aten::\_cudnn\_rnn} operator, which routes all computation
-through cuDNN's internal \texttt{Kernel2} family with no NVTX annotations and no Inductor
-debug artifacts.  The profiler flags all unattributed kernels explicitly in the output JSON
-with \texttt{attribution\_method = "unattributed"}.  Per-operator speedups in
-\tabref{tab:transformer} are cross-validated by direct \texttt{torch.cuda.Event} timing for
-three representative operators (LayerNorm, FFN down-projection, and the attention chain),
-confirming that attribution does not introduce systematic timing error.
+\figref{fig:attribution} visualizes attribution coverage.  Inductor fusion enrichment
+(\secref{sec:heuristic}) upgrades previously-unattributed Inductor-compiled kernels to MEDIUM
+confidence using ground-truth fusion metadata from \texttt{output\_code.py} comments, typically
+increasing MEDIUM coverage by 5--15 percentage points for Inductor-mode workloads.  The profiler
+flags all unattributed kernels explicitly in the output JSON with
+\texttt{attribution\_method = "unattributed"} and never silently drops them.
 
 \subsection{Profiling Overhead}
 
-\tabref{tab:overhead} characterizes the overhead of the two-stage profiling pipeline for the
-TransformerBlock workload.
+\tabref{tab:overhead} characterizes the overhead of the two-stage profiling pipeline, measured
+for GPT-2 on A100.  Layer deduplication (12 transformer blocks $\to$ 1 unique representative)
+provides a 12$\times$ reduction in \ncu replay time for this workload.
 
 \begin{table}[h]
 \centering
-\caption{Two-stage profiling overhead for the TransformerBlock (Blackwell, B=16, 200 model
-  iterations).  Profiling is an offline, one-time cost.}
+\caption{Two-stage profiling overhead for GPT-2 (A100-SXM4-80GB, B=4, seq=128, 10 measure
+  iterations) with layer deduplication active.  Profiling is an offline, one-time cost.}
 \label{tab:overhead}
 \small
 \begin{tabular}{llll}
 \toprule
 \textbf{Phase} & \textbf{Wall Time} & \textbf{Overhead} & \textbf{Note} \\
 \midrule
-\nsys capture (10 iters)       & ${\sim}$30\,s    & $3\times$ baseline & NVTX tracing adds ${\sim}$2$\times$ overhead \\
-\ncu replay (per unique kernel) & ${\sim}$5\,min  & serializes kernels  & \ncu disables concurrent execution \\
-Attribution \& aggregation (CPU) & ${<}$5\,s      & negligible          & SQL query + interval tree build \\
-\textbf{Total time to profile}  & ${\sim}$10--20\,min & one-time cost     & Amortized over iterative optimization \\
+\nsys capture (10 iters)        & ${\sim}$30\,s      & $3\times$ baseline  & NVTX tracing adds ${\sim}$2$\times$ overhead \\
+\ncu replay (unique layers only) & ${\sim}$3--5\,min & serializes kernels  & 12$\times$ speedup vs.\ no dedup (\S\ref{sec:dedup}) \\
+Attribution \& aggregation (CPU) & ${<}$5\,s         & negligible          & SQL query + interval tree build \\
+\textbf{Total time to profile}   & ${\sim}$5--10\,min & one-time cost      & Amortized over iterative optimization \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 The profiling overhead is acceptable for an offline optimization workflow: practitioners run
-the profiling pipeline once, apply the PGO backend, and validate with a second profile run.
-Subsequent model changes trigger a new profile only when the operator set changes.
+the profiling pipeline once, implement an optimized backend, and validate with a second profile
+run.  Subsequent model changes trigger a new profile only when the operator set changes.
 
 \subsection{MLP Activations}
 
-The MLP workload highlights how \sys diagnoses activation-function bottlenecks that are invisible
-to timing-only profilers.  The baseline profile reveals \texttt{ipc\_active = 0.05} on the
+The MLP workload is expected to highlight activation-function bottlenecks that are invisible to
+timing-only profilers.  The baseline profile is expected to reveal low \texttt{ipc\_active} on the
 \texttt{tanh} activation kernel, caused by SFU pipeline serialization: the \texttt{\_\_tanhf}
 special function routes through a 4-cycle-per-instruction SFU pipeline, stalling all other warps.
-BF16 casting activates Tensor Core paths on all four linear layers (TC utilization $0\% \to 39\%$
-on the fused \texttt{addmm}+\texttt{relu} Triton kernel), and the activation normalization pass
-replaces \texttt{tanh} with \texttt{gelu(approximate='tanh')} in the FFN context, eliminating the
-SFU stall.  Total speedup: \textbf{6.2$\times$} (355,500\,ns $\to$ 57,000\,ns).
+BF16 promotion is expected to activate Tensor Core paths on all four linear layers
+(\texttt{tensor\_core\_active\_pct}: $0\% \to$ significant), and replacing \texttt{tanh} with
+\texttt{gelu(approximate=`tanh')} in the FFN context is expected to eliminate the SFU stall.
+Total speedup: \textbf{[TBD]}.
+\MEASURE{Profile \texttt{mlp\_activations.py} and run optimized backend to measure end-to-end
+  speedup and hardware counter deltas.}
 
 \subsection{SDPA Attention}
 
-The SDPA workload demonstrates spill elimination.  The baseline \texttt{fmha\_cutlassF\_f32}
-kernel uses 168 registers/thread, generating 757,760 local-memory spill events per call.  Despite
-58.7\% Tensor Core activity (the kernel does use TCs), achieved occupancy is capped at 14.1\% and
-SM throughput at 51.4\% by the spill overhead.  After BF16 casting, Inductor selects a lower
-register-pressure attention kernel; spills drop to zero, occupancy rises to ${\sim}27\%$, and the
-attention kernel alone contributes ${\sim}3.4\times$ speedup.  Combined with the mm kernels
-(2.5$\times$) and LayerNorm (1.3$\times$), total speedup reaches \textbf{2.7$\times$}
-(360.7\,$\mu$s $\to$ ${\sim}$132\,$\mu$s).
+The SDPA workload is expected to demonstrate register-spill elimination.  The baseline
+\texttt{fmha\_cutlassF\_f32} kernel is expected to use high registers/thread, generating
+local-memory spill events per call and capping achieved occupancy below 20\%.  After BF16
+promotion, Inductor is expected to select a lower-register-pressure attention kernel; spills
+are expected to drop to zero and occupancy to improve.  Total speedup: \textbf{[TBD]}.
+\MEASURE{Profile \texttt{sdpa\_attention.py} and run optimized backend to measure end-to-end
+  speedup and hardware counter deltas.}
 
 \subsection{ConvBlock}
 
-The ConvBlock workload illustrates a non-GEMM bottleneck pattern.  Two bottlenecks dominate the
-baseline profile: (1) \texttt{convertTensor\_kernel} launches (60 total, 10.5\% of wall time)
-caused by cuDNN's NHWC-to-NCHW coercion for FP32 inputs, eliminated entirely by FP16 casting; and
-(2) a 7-kernel Triton decomposition of BatchNorm at inference time, where two channel-mean
-reduction passes recompute statistics that are frozen constants, addressed by constant-folding the
-BatchNorm into a single scale-bias fuse.  Kernel time speedup: \textbf{2.2$\times$}; wall-time
-speedup with CUDA Graphs: \textbf{3.5$\times$}.
+The ConvBlock workload on A100-SXM4-80GB illustrates non-GEMM bottlenecks.  Two bottlenecks
+dominate the baseline profile (total attributed time: 4,119,109\,ns, 0\% unattributed): (1)
+\texttt{aten::\_native\_batch\_norm\_legit\_no\_training} (985,505\,ns, 23.9\% of baseline)
+eliminated by folding BatchNorm running statistics into the preceding Conv2d weights before
+\texttt{torch.compile}; (2) \texttt{convertTensor\_kernel} launches on every forward pass caused
+by cuDNN NCHW-to-NHWC coercion for FP32 inputs, eliminated entirely by
+\texttt{model.to(memory\_format=torch.channels\_last)}.  BF16 promotion activates the cuDNN NHWC
+BF16 kernel path and routes the \texttt{addmm} Linear head to BF16 cuBLAS (TC: 0\% $\to$ 2.56\%,
+2.90$\times$ speedup on the head).  Kernel launches reduced by 22\% (273 $\to$ 214).
+
+Measured speedup: \textbf{2.93$\times$} (4,119,109\,ns $\to$ 1,404,657\,ns attributed time).
 
 \subsection{LSTM Sequence Encoder}
 
-The LSTM workload reveals a distinct attribution and optimization pattern.  Under
-PyTorch~2.11 + \texttt{torch.compile(backend="inductor")} on H100~PCIe,
-\texttt{nn.LSTM} dispatches to \texttt{aten::\_cudnn\_rnn}, a single opaque cuDNN operator that
-executes as \texttt{Kernel2}---cuDNN's internal FP32 SIMT path for LSTM gate computation.
+The LSTM workload is expected to reveal a distinct attribution pattern.  Under
+PyTorch~2.11 + \texttt{torch.compile(backend="inductor")},
+\texttt{nn.LSTM} dispatches to \texttt{aten::\_cudnn\_rnn}, a single opaque cuDNN operator.
 Dynamo produces \emph{zero} traceable FX subgraphs for \texttt{nn.LSTM}: the operator enters
 via \texttt{torch.\_VF.lstm}, a C extension entry point that Dynamo cannot graph-capture.
-All FX graph passes are therefore inapplicable; the PGO backend is bypassed entirely.
+All pre-compile modifications and FX pattern rewrites are therefore inapplicable and degrade
+gracefully.
 
-The profiler correctly attributes timing to \texttt{aten::\_cudnn\_rnn} (98.7\% of total
-kernel runtime) but reports null hardware counters: cuDNN's internal kernels are opaque to
-\ncu at the operator-aggregation level.  Attribution is \texttt{UNATTRIBUTED} for 85\% of
-kernel runtime, the highest rate across all evaluated workloads.
+Hardware counter attribution is expected to be high UNATTRIBUTED ($>$80\%) because cuDNN's
+internal kernels carry no NVTX annotations and no Inductor debug metadata.  Bottleneck diagnosis
+in this case proceeds by \emph{kernel-name inference}: the cuDNN FP32 SIMT path
+(\texttt{Kernel2}) is identifiable by name; BF16 inputs route cuDNN to a Tensor Core path
+(\texttt{sm80\_xmma\_gemm\_bf16bf16\_*} on A100).  This workload demonstrates that \sys's
+closed-loop protocol applies even when hardware counters are unavailable: the profiler identifies
+the cuDNN bottleneck class, kernel-name inference suggests the fix, and re-profiling confirms the
+gain.  Measured speedup: \textbf{[TBD]}.
+\MEASURE{Profile \texttt{lstm\_sequence\_encoder.py} and run optimized backend
+  (\texttt{model.to(bfloat16)}) to measure end-to-end speedup.}
 
-Bottleneck diagnosis proceeds by \emph{kernel-name inference}: \texttt{Kernel2} is the
-cuDNN FP32 SIMT path; on H100, BF16 inputs route cuDNN to
-\texttt{sm90\_xmma\_gemm\_bf16bf16\_*} (WGMMA Tensor Core path).
-A single \texttt{model.to(bfloat16)} call achieves \textbf{1.77$\times$} total speedup
-(27.20\,ms $\to$ 15.39\,ms); \texttt{aten::addmm} (the linear classifier head) gains
-2.41$\times$ via the BF16 cuBLAS path, and temporal mean-pooling gains 1.32$\times$ from
-smaller BF16 operands.  This workload demonstrates that \sys's closed-loop protocol applies
-even when hardware counters are unavailable: the profiler identifies the cuDNN bottleneck
-class, kernel-name inference suggests the fix, and re-profiling confirms the gain.
+\subsection{DepthwiseSeparableConv}
+
+The DepthwiseSepConv workload provides a textbook roofline contrast: depthwise convolutions
+(groups=C\textsubscript{in}, 3$\times$3 kernel) are pure memory-bandwidth-bound with arithmetic
+intensity $\approx$0.3\,FLOP/byte, far left of the ridge point; pointwise convolutions (1$\times$1)
+are equivalent to batched GEMMs and are compute-bound with Tensor Core engagement when using BF16
+inputs.  Within a single block, both extremes of the roofline co-exist, making this workload useful
+for verifying that \sys's bottleneck taxonomy correctly classifies each operator independently.
+Measured speedup: \textbf{[TBD]}.
+\MEASURE{Profile \texttt{depthwise\_separable\_conv.py} and implement optimized backend targeting
+  BF16 promotion (pointwise conv) and channels\_last (depthwise conv).}

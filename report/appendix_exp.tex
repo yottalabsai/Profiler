@@ -4,32 +4,47 @@
 \subsection{Workload Reproduction}
 \label{sec:appendix:repro}
 
-All six workloads are reproduced using the commands below.
-Each workload requires an NVIDIA GPU (Ampere, Hopper, or Blackwell),
-\nsys $\ge$ 2025.1, \ncu $\ge$ 2025.4.1, PyTorch 2.11, and CUDA 12.x.
+All seven workloads are reproduced using the commands below.
+Each workload requires an NVIDIA GPU (Ampere architecture minimum; all experiments in this paper
+use an A100-SXM4-80GB), \nsys $\ge$ 2025.1, \ncu $\ge$ 2025.4.1, PyTorch 2.5+, and CUDA 12.x.
 
 \begin{lstlisting}[style=pystyle]
 # Install
 pip install -e .
 
-# Capture baseline profile for one workload
-operator-profiler profile scripts/workloads/transformer_block.py \
-    --output runs/transformer_block/baseline \
-    --warmup-iters 2
+# Phase 1: correlation pass (no nsys, builds torch.profiler attribution map)
+python nvidia/scripts/run_workload.py \
+    --workload examples/gpt2/workload.py \
+    --output-prefix runs/gpt2/baseline \
+    --inductor-debug-dir runs/gpt2/inductor_debug \
+    --correlation-pass
 
-# Collect hardware counters
-operator-profiler map runs/transformer_block/baseline.manifest.json \
-    --script scripts/workloads/transformer_block.py \
-    --ncu-sudo --output runs/transformer_block/profile.json
+# Phase 2: NVTX capture under nsys
+nsys profile --trace=cuda,nvtx --output=runs/gpt2/baseline \
+    python nvidia/scripts/run_workload.py \
+        --workload examples/gpt2/workload.py \
+        --output-prefix runs/gpt2/baseline \
+        --inductor-debug-dir runs/gpt2/inductor_debug
 
-# Run all six workloads in batch
-python scripts/run_all_profiles.py
+# Build manifest and collect hardware counters (requires sudo for ncu)
+python -m nvidia.operator_profiler.cli manifest \
+    --prefix runs/gpt2/baseline \
+    --output runs/gpt2/baseline.manifest.json
+
+python -m nvidia.operator_profiler.cli map \
+    --manifest runs/gpt2/baseline.manifest.json \
+    --workload examples/gpt2/workload.py \
+    --ncu-sudo --output runs/gpt2/profile.json
 \end{lstlisting}
 
 Profiling results, optimized workload scripts, and \texttt{profile.json} /
-\texttt{profile\_optimized.json} pairs for all six examples are in
+\texttt{profile\_optimized.json} pairs for measured examples are in
 \texttt{examples/} in the repository.  Each subdirectory contains
-\texttt{report.md} with the measured before-and-after hardware counter values.
+\texttt{OPTIMIZED\_WORKLOAD.md} with the measured before-and-after hardware counter values.
+Layer deduplication is activated automatically by \texttt{run\_workload.py} when structurally
+repeated partitions are detected; the partition equivalence map is written to
+\texttt{<prefix>.part.json} and passed to the ncu orchestrator to skip duplicate-partition
+kernel replays.
 
 \subsection{Hardware Counter Reference}
 \label{sec:appendix:counters}

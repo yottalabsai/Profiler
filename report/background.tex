@@ -76,7 +76,7 @@ taxonomy at the per-operator level using hardware counters:
     \secref{sec:passes}).
 \end{itemize}
 
-These five patterns cover the bottlenecks observed across all six workloads evaluated in
+These five patterns cover the bottlenecks observed across the evaluated workloads in
 \secref{sec:experiments}.  \figref{fig:roofline} maps them onto the roofline model.
 
 \begin{figure}[t]
@@ -103,7 +103,7 @@ These five patterns cover the bottlenecks observed across all six workloads eval
   clip=false,
 ]
 
-%% ---- Memory bandwidth ceiling (slope = HBM BW * AI, Blackwell HBM3e ~1457 GB/s) ----
+%% ---- Memory bandwidth ceiling (slope = HBM BW * AI, A100 HBM2e ~2 TB/s) ----
 %% Represented schematically: slope line y = BW * x, ridge at ~x=2 (arbitrary schematic units)
 \addplot[thick, blue!60!black, domain=0.05:2.5] {500 * x};
 
@@ -112,10 +112,10 @@ These five patterns cover the bottlenecks observed across all six workloads eval
 \node[font=\scriptsize, text=orange!80!black, anchor=west] at (axis cs:3,1450)
   {FP32 SIMT ceiling};
 
-%% ---- BF16 Tensor Core ceiling (8x higher) ----
+%% ---- BF16 Tensor Core ceiling (16x higher on A100: 312 vs 19.5 TFLOPS) ----
 \addplot[thick, green!60!black, domain=0.3:150] coordinates {(0.3,2400) (150,2400)};
 \node[font=\scriptsize, text=green!60!black, anchor=west] at (axis cs:3,2700)
-  {BF16 Tensor Core ceiling ($8\times$)};
+  {BF16 Tensor Core ceiling ($16\times$ on A100)};
 
 %% ---- Ridge point markers ----
 \addplot[gray!50, dotted, thin] coordinates {(2.5,1) (2.5,1250)};  % FP32 ridge
@@ -165,13 +165,14 @@ These five patterns cover the bottlenecks observed across all six workloads eval
 
 \end{loglogaxis}
 \end{tikzpicture}
-\caption{\textbf{Roofline bottleneck taxonomy operationalized by \sys} (schematic, log-log scale).
+\caption{\textbf{Roofline bottleneck taxonomy operationalized by \sys} (schematic, log-log scale,
+  A100-SXM4-80GB reference: FP32 SIMT ceiling 19.5\,TFLOPS, BF16 TC ceiling 312\,TFLOPS).
   Each labeled region corresponds to one hardware counter pattern: \textcolor{red!70!black}{wave starvation}
   (Waves/SM~$<$~1), \textcolor{orange!80!black}{Tensor Core idle} (\texttt{tensor\_core\_active\_pct}~$\approx$~0),
   \textcolor{purple!70!black}{register/spill pressure} (\texttt{registers\_per\_thread}~$>$~128 or
   \texttt{local\_memory\_spills}~$>$~0), and \textcolor{brown!70!black}{cache miss pressure}
-  (\texttt{l2\_hit\_rate}~$<$~30\%).  Dashed arrows show the direction each \sys FX pass moves
-  the operator.  Ceiling values and operator positions are schematic; see
+  (\texttt{l2\_hit\_rate}~$<$~30\%).  Dashed arrows show the direction each optimization pattern
+  moves the operator.  Ceiling values and operator positions are schematic; see
   \tabref{tab:hwcounters} for measured values.}
 \label{fig:roofline}
 \end{figure}
