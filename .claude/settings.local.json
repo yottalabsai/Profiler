@@ -11,7 +11,13 @@
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\examples\" -Recurse -Force | Select-Object FullName | ForEach-Object { $_.FullName -replace [regex]::Escape\\(\"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\\"\\), \"\" })",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\nvidia\" -Recurse -Force | Select-Object FullName | ForEach-Object { $_.FullName -replace [regex]::Escape\\(\"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\\"\\), \"\" })",
       "PowerShell(Get-ChildItem \"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\examples\" | Where-Object { -not $_.PSIsContainer } | Select-Object Name)",
-      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\plugins\" -Recurse | Select-Object FullName | ForEach-Object { $_.FullName -replace [regex]::Escape\\(\"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\\"\\), \"\" })"
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\plugins\" -Recurse | Select-Object FullName | ForEach-Object { $_.FullName -replace [regex]::Escape\\(\"C:\\\\Users\\\\s-lch\\\\OneDrive - Duke University\\\\Yotta Labs\\\\Profiler\\\\\"\\), \"\" })",
+      "Skill(profiler-plugin:preflight)",
+      "Skill(profiler-plugin:capture)",
+      "Skill(profiler-plugin:propose)",
+      "Skill(profiler-plugin:validate)",
+      "Skill(profiler-plugin:backend)",
+      "Skill(profiler-plugin:report)"
     ]
   }
 }

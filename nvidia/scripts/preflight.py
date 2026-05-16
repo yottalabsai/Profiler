@@ -154,7 +154,11 @@ def _find_executable(name: str, glob_patterns: list[str]) -> str:
 
 
 def _check_nsys() -> str:
-    path = _find_executable("nsys", ["/opt/nvidia/nsight-systems/*/bin/nsys"])
+    path = _find_executable("nsys", [
+        "/opt/nvidia/nsight-systems/*/bin/nsys",
+        "/opt/nvidia/nsight-systems-cli/*/bin/nsys",
+        "/usr/local/bin/nsys",
+    ])
     result = subprocess.run(
         [path, "--version"], capture_output=True, text=True, timeout=10
     )
