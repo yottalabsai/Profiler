@@ -10,7 +10,7 @@ End-to-end GPU kernel optimization for PyTorch models, driven entirely from your
 /optimize examples/conv_block/conv_block.py
 ```
 
-That single command runs all 8 pipeline stages — nsys+ncu capture, bottleneck analysis, FX optimization proposals, backend code generation, 5-step validation, re-profiling, comparison, and a final report — and writes all artifacts to the working directory.
+That single command runs all 6 pipeline stages — nsys+ncu capture, FX optimization proposals, backend code generation, 5-step validation, re-profiling, and a final report — and writes all artifacts to the working directory.
 
 ---
 
@@ -65,7 +65,7 @@ Seven ready-to-run example workloads are in `examples/`: `conv_block`, `mlp_acti
 
 ### `/optimize` — End-to-End Pipeline
 
-The primary entry point. Orchestrates all 8 stages and writes every artifact.
+The primary entry point. Orchestrates all 6 stages and writes every artifact.
 
 ```
 /optimize workload.py
@@ -75,26 +75,24 @@ The primary entry point. Orchestrates all 8 stages and writes every artifact.
 /optimize workload_a.py workload_b.py            # batch multiple workloads
 ```
 
-**The 8 stages:**
+**The 6 stages:**
 
 | Stage | Agent | Output | Skip condition |
 |---|---|---|---|
 | 0. Capture baseline | capture-agent | `profile.json` | exists + `--resume` |
-| 1. Analyze bottlenecks | profile-analyzer | `triage.json` | exists + `--resume` |
-| 2. Propose optimizations | optimization-strategist | `optimizations.json` | exists + `--resume` |
-| 3. Generate backend | backend-engineer | `{workload}_optimized.py`, `test_*.py`, `OPTIMIZED_WORKLOAD.md` | exists + `--resume` |
-| 4. Validate backend | validation-agent | `validation_report.json` | — (always runs; blocks Stage 5 if fails) |
-| 5. Re-capture optimized | capture-agent | `profile_optimized.json` | exists + `--resume` |
-| 6. Compare results | comparison-agent | `comparison.md` | — |
-| 7. Report | — | `report.md` | — |
+| 1. Propose optimizations | optimization-strategist | `optimizations.json` | exists + `--resume` |
+| 2. Generate backend | backend-engineer | `{workload}_optimized.py`, `test_*.py`, `OPTIMIZED_WORKLOAD.md` | exists + `--resume` |
+| 3. Validate backend | validation-agent | `validation_report.json` | — (always runs; blocks Stage 4 if fails) |
+| 4. Re-capture optimized | capture-agent | `profile_optimized.json` | exists + `--resume` |
+| 5. Report | — | `report.md` | — |
 
 **Configuration options:**
 
 | Option | Default | Description |
 |---|---|---|
 | `--compile-backend` | *(none)* | Named `@register_backend` backend for optimized workloads. Omit for baseline profiling (uses built-in dedup+inductor). Pass at Stage 5 for optimized workloads with complex FX passes. |
-| `--warmup-iters` | `2` | Must match between Stage 0 and Stage 5 |
-| `--measure-iters` | `2` | Must match between Stage 0 and Stage 5 |
+| `--warmup-iters` | `2` | Must match between Stage 0 and Stage 4 |
+| `--measure-iters` | `2` | Must match between Stage 0 and Stage 4 |
 | `--ncu-sudo` | `auto` | `auto` detects, `true` forces, `false` skips |
 | `--ncu-path` / `--nsys-path` | `auto` | Explicit path to profiler executables |
 | `--confidence-threshold` | `medium` | Only implement optimizations at or above this level |
@@ -107,9 +105,9 @@ The primary entry point. Orchestrates all 8 stages and writes every artifact.
 
 | Condition | Action |
 |---|---|
-| `unattributed_kernels > 10%` | Warn at Stage 1; lower confidence on all Stage 2 proposals |
+| `unattributed_kernels > 10%` | Warn at Stage 1; lower confidence on all proposals |
 | `compile_mode == "eager"` | Skip FX pass generation; propose `torch.compile` migration instead |
-| Stage 4 fails | Block Stage 5 — do not waste ncu time on broken code |
+| Stage 3 fails | Block Stage 4 — do not waste ncu time on broken code |
 | `ERR_NVGPUCTRPERM` | Halt and print exact fix: `--ncu-sudo=true` |
 
 ---
@@ -161,43 +159,12 @@ The capture agent detects your system configuration automatically — nsys/ncu e
 
 ---
 
-### `/analyze` — Bottleneck Triage
-
-Classifies every operator by its primary performance bottleneck and outputs `triage.json`.
-
-```
-/analyze profile.json
-/analyze profile.json --verbose    # include raw metric values in output
-```
-
-**Bottleneck classification** (applied in priority order, first match wins):
-
-| Class | Condition | Meaning | Fix |
-|---|---|---|---|
-| `tensor_core_idle` | `tensor_core_active_pct == 0.0` on a GEMM op | Tensor Cores idle — FP32 SIMT path | Cast to BF16/FP16 (2–16× gain) |
-| `compute_bound` | `sm_throughput > 70%` and `memory_throughput < 40%` | SM compute saturated | Tile size, `max-autotune`, algorithm selection |
-| `memory_bound` | `dram_throughput > 60%` and `sm_throughput < 30%` | HBM bandwidth is bottleneck | Operator fusion, layout optimization |
-| `wave_starvation` | `achieved_occupancy < 20%` | Not enough work to keep all SMs busy | Increase batch size, batch padding, QKV fusion |
-| `latency_bound` | `warp_cycles_per_instruction > 20` | Warps stalling on memory latency | Increase occupancy, reduce register pressure |
-| `register_pressure` | `registers_per_thread > 128` or `local_memory_spills > 0` | Register file pressure limits occupancy | `reduce-overhead` mode, kernel rewrite |
-| `layout_overhead` | `convertTensor_kernel` present | cuDNN coercing NCHW↔NHWC per call | `model.to(memory_format=torch.channels_last)` |
-
-> **Note on `tensor_core_active_pct == null`:** This is NOT a bottleneck. It means the counter is unavailable for this kernel type (elementwise ops) or was removed on Blackwell. Only `== 0.0` on a GEMM kernel is a problem.
-
-**Architecture notes:**
-- **Blackwell:** `warp_cycles_per_instruction` was removed — use `eligible_cycles_pct < 20` as the latency-bound indicator instead
-- **Hopper:** `sm90_xmma_gemm_bf16bf16_*` in kernel name = Tensor Cores active; `gemmSN_TN_*` = FP32 SIMT
-- **Ampere:** `allow_tf32 = True` enables Tensor Cores at lower precision cost than full BF16
-
----
-
 ### `/propose` — Optimization Proposals
 
-Generates ranked, evidence-backed FX transformation proposals and writes `optimizations.json`.
+Reads `profile.json` directly, derives time budget, edge case flags, and architecture context, then writes `optimizations.json` with ranked, evidence-backed FX transformation proposals.
 
 ```
 /propose profile.json
-/propose triage.json                        # from /analyze output
 /propose profile.json --max-opts=5
 /propose profile.json --min-confidence=high
 ```
@@ -300,18 +267,6 @@ If any step fails, the agent reports `BLOCKED — Fix step N before profiling` a
 
 ---
 
-### `/compare` — Performance Comparison
-
-Compares baseline and optimized profiles, attributes speedups to specific transformations, and identifies residual opportunities.
-
-```
-/compare profile.json profile_optimized.json
-```
-
-Normalizes for batch-size differences before computing speedups. Matches operators across profiles by name. Attributes measured gains to specific hardware counter changes (e.g., "tensor_core_active_pct: 0% → 87% — confirms BF16 cast took effect").
-
----
-
 ### `/report` — Human-Readable Summary
 
 Generates `report.md` summarizing the complete optimization lifecycle.
@@ -328,7 +283,7 @@ Covers: hardware context, bottleneck classification with evidence, transformatio
 
 ## Agents
 
-The plugin ships 6 specialized agents. The `/optimize` skill orchestrates them in sequence; individual skills invoke their corresponding agent directly.
+The plugin ships 4 specialized agents. The `/optimize` skill orchestrates them in sequence; individual skills invoke their corresponding agent directly.
 
 ### `capture-agent`
 
@@ -336,17 +291,11 @@ Orchestrates the full nsys + ncu profiling pipeline (Stages 0a-pre through 0d). 
 
 **Tools:** `Bash`, `Read`, `Glob`
 
-### `profile-analyzer`
-
-Parses `profile.json`, applies the bottleneck decision tree, computes per-operator wall-time percentages, looks up GPU hardware limits (SM count, ridge point, peak bandwidth), and flags the 8 attribution edge cases.
-
-**Tools:** `Read`, `Bash`
-
 ### `optimization-strategist`
 
-Maps bottleneck classifications to concrete FX graph transformations. Produces `optimizations.json` (Schema B) with ranked proposals, exact metric citations, `fx_steps[]`, dependency ordering, and confidence ratings. Fetches live PyTorch API docs via `context7` and uses `sequential-thinking` for multi-operator dependency analysis.
+Reads `profile.json` directly. Derives time budget, edge case flags, and architecture context, then reasons open-endedly from raw hardware counters to produce `optimizations.json` (Schema B) with ranked proposals, exact metric citations, `fx_steps[]`, and dependency ordering. Fetches live PyTorch API docs via `context7` and uses `sequential-thinking` for multi-operator dependency analysis.
 
-**Tools:** `Read`, `mcp__sequential_thinking`, `mcp__context7`, `mcp__exa__search`, `mcp__memory`
+**Tools:** `Read`, `Write`, `mcp__sequential_thinking`, `mcp__context7`, `mcp__exa__search`, `mcp__memory`
 
 ### `backend-engineer`
 
@@ -360,12 +309,6 @@ Runs the fixed 5-step validation sequence in order, interprets logger `INFO`/`WA
 
 **Tools:** `Bash`, `Read`
 
-### `comparison-agent`
-
-Normalizes baseline and optimized profiles for batch-size differences. Matches operators by name across profiles. Attributes speedups to specific transformations by cross-referencing hardware counter changes with the transformations listed in `optimizations.json`. Identifies residual opportunities.
-
-**Tools:** `Read`, `mcp__memory`
-
 ---
 
 ## Hooks
@@ -377,13 +320,13 @@ The plugin registers four automatic hooks that fire during your Claude Code sess
 **Trigger:** Session opens  
 **Action:** Prints available commands to the terminal:
 ```
-[profiler-plugin] Commands: /capture /analyze /propose /backend /validate /compare /report /optimize
+[profiler-plugin] Commands: /preflight /capture /propose /backend /validate /report /optimize
 ```
 
-### Post-write: profile.json → suggest `/analyze`
+### Post-write: profile.json → suggest `/propose`
 
 **Trigger:** A `Write` tool call produces a file named `profile.json`  
-**Action:** Prompts the next step — running `/analyze profile.json`
+**Action:** Prompts the next step — running `/propose profile.json`
 
 This fires when `/capture` completes, keeping you in the flow without needing to remember what comes next.
 
@@ -418,11 +361,11 @@ operator-profiler map manifest.json \
 
 ## Knowledge Base
 
-The plugin bundles a reference knowledge base used by the analyzer, strategist, and backend agents during reasoning.
+The plugin bundles a reference knowledge base used by the optimization-strategist and backend-engineer agents during reasoning.
 
 ### `knowledge/hardware-limits.md`
 
-GPU database covering 12 architectures (A100, H100, H200, B100, B200, RTX 4090, A10G, and more). Per-GPU data includes: SM count, peak TFLOPS for BF16/FP16/FP32, HBM bandwidth, ridge point (FLOP/byte), and Tensor Core tile requirements. Used by `/analyze` for Waves/SM calculation and bottleneck calibration.
+GPU database covering 12 architectures (A100, H100, H200, B100, B200, RTX 4090, A10G, and more). Per-GPU data includes: SM count, peak TFLOPS for BF16/FP16/FP32, HBM bandwidth, ridge point (FLOP/byte), and Tensor Core tile requirements. Used by `/propose` for Waves/SM calculation and bottleneck calibration.
 
 ### `knowledge/fx-patterns.md`
 
@@ -449,7 +392,7 @@ The 8 attribution and metric edge cases that affect how `profile.json` data shou
 
 ### `rules/gpu-optimization.md`
 
-Bottleneck classification rules, fix strategies, and architecture-specific notes used as a reasoning reference by the profile-analyzer and optimization-strategist agents.
+Bottleneck classification rules, fix strategies, and architecture-specific notes used as a reasoning reference by the optimization-strategist agent.
 
 ---
 
@@ -458,15 +401,13 @@ Bottleneck classification rules, fix strategies, and architecture-specific notes
 | File | Produced by | Contents |
 |---|---|---|
 | `profile.json` | `/capture` | Per-operator hardware metrics (20 counters per kernel) |
-| `triage.json` | `/analyze` | Bottleneck classifications, time budget, edge case flags |
-| `optimizations.json` | `/propose` | Ranked FX transformation proposals with evidence and `fx_steps[]` |
+| `optimizations.json` | `/propose` | Ranked FX transformation proposals with evidence, time budget, edge case flags, and `fx_steps[]` |
 | `{workload}_optimized.py` | `/backend` | Custom `torch.compile()` backend + `get_model_and_input()` wrapper |
 | `test_{workload}_optimized.py` | `/backend` | Pytest suite for the generated backend |
 | `OPTIMIZED_WORKLOAD.md` | `/backend` | Per-optimization before/after kernel analysis |
 | `validation_report.json` | `/validate` | 5-step pass/fail results + FX pass application summary |
 | `profile_optimized.json` | `/capture --profile-name=optimized` | Hardware metrics for the optimized backend |
-| `comparison.md` | `/compare` | Per-operator speedup table with hardware counter evidence |
-| `report.md` | `/report` | Human-readable optimization lifecycle summary |
+| `report.md` | `/report` | Human-readable optimization lifecycle summary including per-operator speedup table |
 
 ---
 

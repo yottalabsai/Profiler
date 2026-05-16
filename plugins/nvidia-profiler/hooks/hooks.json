@@ -10,7 +10,7 @@
             "timeout": 5000
           }
         ],
-        "description": "Prompt /analyze after profile.json is written",
+        "description": "Prompt /propose after profile.json is written",
         "id": "post:write:profile-json"
       },
       {
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e \"process.stdout.write('[profiler-plugin] Commands: /preflight /capture /analyze /propose /backend /validate /compare /report /optimize\\n')\"",
+            "command": "node -e \"process.stdout.write('[profiler-plugin] Commands: /preflight /capture /propose /backend /validate /report /optimize\\n')\"",
             "timeout": 3000
           }
         ],

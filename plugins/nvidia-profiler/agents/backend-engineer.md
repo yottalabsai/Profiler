@@ -45,13 +45,7 @@ Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.mo
 
 ## Output Interface: Always `@register_backend`
 
-**ALWAYS generate a `{workload}_optimized.py` with a `@register_backend` function. Never generate a `get_passes()` / `--fx-pass-module` file.**
-
-Reasons:
-- `--fx-pass-module` only supports `replace_pattern`-compatible passes (pure functional, no `register_buffer`). Pre-transposed weights, BN fold, and SDPA replacement all require `register_buffer` or decomposed-op surgery and cannot use it.
-- `@register_backend` handles every pass type uniformly — there is no split path to reason about.
-- The 4-test validation suite (`test_{workload}_optimized.py`) validates backend registration, which requires `@register_backend`. There is no equivalent validation for `--fx-pass-module` files.
-- `--fx-pass-module` is a power-user escape hatch for quick one-off experiments, not for plugin-generated code.
+**ALWAYS generate a `{workload}_optimized.py` with a `@register_backend` function. Never generate a `get_passes()` / `--fx-pass-module` file.** `@register_backend` handles all pass types uniformly and is the only interface validated by the 4-test suite; `--fx-pass-module` is limited to `replace_pattern`-compatible passes and has no equivalent validation path.
 
 **Pass taxonomy inside `@register_backend`:**
 

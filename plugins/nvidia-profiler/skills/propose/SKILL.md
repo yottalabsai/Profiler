@@ -1,6 +1,6 @@
 ---
 name: propose
-description: Generate a structured optimizations.json from profile.json or triage.json. Produces ranked, evidence-backed FX graph transformation proposals with confidence ratings, exact metric citations, actionable fx_steps[], and prerequisite ordering. Uses the existing optimization_proposal_prompt.md as its core reasoning template.
+description: Generate a structured optimizations.json from profile.json. Derives time budget, edge case flags, and architecture context directly, then produces ranked, evidence-backed FX graph transformation proposals with confidence ratings, exact metric citations, actionable fx_steps[], and prerequisite ordering.
 ---
 
 # /propose — Optimization Proposal Generation
@@ -10,8 +10,7 @@ Analyzes the profiling data and generates `optimizations.json` with ranked, conc
 ## Usage
 
 ```
-/propose profile.json                    # from profile directly
-/propose triage.json                     # from /analyze output
+/propose profile.json
 /propose profile.json --max-opts=5       # limit number of proposals
 /propose profile.json --min-confidence=high  # only high-confidence proposals
 ```

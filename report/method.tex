@@ -522,9 +522,9 @@ The full optimization cycle consists of four steps:
 \begin{enumerate}
   \item \textbf{Profile}: capture baseline \texttt{profile.json} via \nsys + \ncu pipeline.
   \item \textbf{Diagnose}: \texttt{profile.json} is examined per-operator; the Claude Code
-    plugin's \textbf{profile-analyzer} agent maps each operator's counter values to bottleneck
-    classes from the taxonomy in \secref{sec:roofline} and produces \texttt{triage.json} with
-    ranked bottleneck diagnoses and recommended optimization patterns.
+    plugin's \textbf{optimization-strategist} agent derives a time budget and edge case flags
+    directly from \texttt{profile.json}, then reasons open-endedly from raw hardware counters
+    to produce \texttt{optimizations.json} with ranked proposals and recommended patterns.
   \item \textbf{Transform}: implement a workload-specific optimized backend (or use the
     plugin's \textbf{backend-engineer} agent to generate one); run
     \texttt{torch.compile(model, backend="<workload>\_opt")} to apply the patterns and compile.
@@ -541,7 +541,7 @@ eliminated rather than merely shifted to a different operator.
 
 The closed-loop protocol above requires coordinating five distinct tools: \nsys, \ncu, the
 attribution engine, the Torch Dynamo backend, and a second profiling pass.  \sys ships a
-Claude Code plugin that automates all eight stages---baseline capture, bottleneck analysis, FX
+Claude Code plugin that automates all seven stages---baseline capture, FX
 optimization proposals, backend code generation, 5-step validation, re-profiling,
 cross-profile comparison, and human-readable reporting---in a single command:
 
@@ -549,19 +549,19 @@ cross-profile comparison, and human-readable reporting---in a single command:
 /optimize workload.py
 \end{lstlisting}
 
-The plugin orchestrates six specialized LLM agents.  \textbf{capture-agent} handles the \nsys
+The plugin orchestrates five specialized LLM agents.  \textbf{capture-agent} handles the \nsys
 + \ncu pipeline including executable auto-detection and \texttt{sudo} permission propagation;
-\textbf{profile-analyzer} applies the bottleneck decision tree and computes per-operator
-time-budget percentages; \textbf{optimization-strategist} produces \texttt{optimizations.json}
+\textbf{optimization-strategist} reads \texttt{profile.json} directly, derives a time budget
+and edge case flags, and produces \texttt{optimizations.json}
 with ranked FX proposals, exact metric-evidence citations, and dependency ordering;
 \textbf{backend-engineer} generates \texttt{workload\_optimized.py} with workload-specific
 optimization patterns (pre-compile modifications and/or FX graph rewrites) and a pytest suite; \textbf{validation-agent} runs the 5-step pass/fail validation sequence
 and classifies which FX passes applied vs.\ fell through gracefully; and
-\textbf{comparison-agent} normalizes for batch-size differences and attributes measured counter
-deltas to specific transformations.
+\textbf{/report} normalizes for batch-size differences, attributes measured counter
+deltas to specific transformations, and writes \texttt{report.md}.
 
 Four Claude Code hooks maintain workflow continuity: write of \texttt{profile.json} prompts
-\texttt{/analyze}; write of \texttt{optimizations.json} prompts \texttt{/backend}; write of
+\texttt{/propose}; write of \texttt{optimizations.json} prompts \texttt{/backend}; write of
 \texttt{*\_optimized.py} prompts \texttt{/validate}; and a pre-Bash hook enforces
 \texttt{--script-args} ordering in all \texttt{operator-profiler map} invocations.  A bundled
 knowledge base provides GPU roofline reference data for 12 GPU architectures, canonical FX

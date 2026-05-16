@@ -1,6 +1,6 @@
 # GPU Hardware Limits Reference
 
-This table is used by `/analyze` and `/propose` to compute Waves/SM, ridge points, and architecture-specific bottleneck thresholds. Look up `capture_metadata.device_name` against `device_name_pattern` (case-insensitive substring match).
+This table is used by `/propose` to compute Waves/SM, ridge points, and architecture-specific bottleneck thresholds. Look up `capture_metadata.device_name` against `device_name_pattern` (case-insensitive substring match).
 
 ## Roofline Table
 

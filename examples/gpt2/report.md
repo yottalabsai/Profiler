@@ -125,10 +125,7 @@ PYTHONPATH=/root/Profiler python nvidia/scripts/run_workload.py \
     --inductor-debug-dir examples/gpt2/profiler_output/gpt2_inductor_debug \
     --layer-deduplicate
 
-# 2. Analyze bottlenecks
-# Output: examples/gpt2/triage.json
-
-# 3. Run optimized workload (smoke test)
+# 2. Run optimized workload (smoke test)
 PYTHONPATH=/root/Profiler python nvidia/scripts/run_workload.py \
     --workload examples/gpt2/gpt2_optimized.py \
     --compile-backend gpt2_opt \
@@ -155,9 +152,7 @@ PYTHONPATH=/root/Profiler python nvidia/scripts/run_workload.py \
 | `examples/gpt2/gpt2_optimized.py` | Optimized workload (`gpt2_opt` backend, BF16, max-autotune) |
 | `examples/gpt2/profile.json` | Baseline ncu profile (103.9 ms attributed, 259 operators) |
 | `examples/gpt2/profile_optimized.json` | Optimized ncu profile (174 operators) |
-| `examples/gpt2/triage.json` | Bottleneck classification (top: tensor_core_idle on aten::mm) |
-| `examples/gpt2/optimizations.json` | Ranked optimization proposals with hardware evidence |
+| `examples/gpt2/optimizations.json` | Ranked optimization proposals with hardware evidence and bottleneck analysis |
 | `examples/gpt2/validation_report.json` | 5-step validation results (all pass) |
-| `examples/gpt2/comparison.md` | Detailed before/after hardware counter comparison |
 | `examples/gpt2/profiler_output/ncu_reps/all_kernels.ncu-rep` | Baseline ncu report (224 MB) |
 | `examples/gpt2/profiler_output/ncu_reps_optimized/all_kernels.ncu-rep` | Optimized ncu report (257 MB) |

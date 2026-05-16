@@ -323,4 +323,4 @@ Report to the user:
 4. The exact commands run (print them before executing)
 5. Pass/fail for each stage with the key output file paths
 6. Location of `.ncu-rep` files (`profiler_output/ncu_reps/`) for debugging
-7. For `/compare` readiness: note that `profile_optimized.json` must be captured with the same `--warmup-iters`/`--measure-iters` as `profile.json`
+7. For `/report` readiness: note that `profile_optimized.json` must be captured with the same `--warmup-iters`/`--measure-iters` as `profile.json`

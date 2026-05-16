@@ -16,7 +16,7 @@ Three complete examples are in `examples/`, each with a baseline profile, optimi
 | [`examples/gpt2/`](examples/gpt2/) | GPT-2 small (117M) | A100 SXM4-80GB | **~2.5–3.0×** estimated |
 | [`examples/embedding_projection/`](examples/embedding_projection/) | Embedding + FFN + logit projection | A100 SXM4-80GB | **~2–5×** estimated |
 
-Each directory contains `profile.json`, `*_optimized.py`, `comparison.md`, `OPTIMIZED_WORKLOAD.md`, `test_*.py`, and `validation_report.json`. Four additional baseline workloads (`mlp_activations`, `sdpa_attention`, `depthwise_separable_conv`, `lstm_sequence_encoder`) are included and will have results in the future.
+Each directory contains `profile.json`, `*_optimized.py`, `report.md`, `OPTIMIZED_WORKLOAD.md`, `test_*.py`, and `validation_report.json`. Four additional baseline workloads (`mlp_activations`, `sdpa_attention`, `depthwise_separable_conv`, `lstm_sequence_encoder`) are included and will have results in the future.
 
 ---
 
@@ -310,7 +310,7 @@ Pass the optimization recommendations and your workload to this prompt. It gener
 - A test script to verify the optimized workload
 - Before/after documentation
 
-See **[`examples/conv_block/`](examples/conv_block/)** for a complete walkthrough — `report.md` for the summary, `comparison.md` for before/after hardware counter evidence, and `OPTIMIZED_WORKLOAD.md` for implementation details.
+See **[`examples/conv_block/`](examples/conv_block/)** for a complete walkthrough — `report.md` for the summary including before/after hardware counter evidence, and `OPTIMIZED_WORKLOAD.md` for implementation details.
 
 ---
 

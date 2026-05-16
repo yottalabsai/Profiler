@@ -20,8 +20,7 @@ Generates `report.md` documenting the full optimization lifecycle. The report is
 
 - `profile.json` — baseline hardware metrics
 - `profile_optimized.json` — optimized hardware metrics (if available)
-- `triage.json` — bottleneck classification from `/analyze`
-- `optimizations.json` — proposed optimizations with evidence
+- `optimizations.json` — proposed optimizations with evidence (includes time budget and bottleneck analysis)
 - `validation_report.json` — which passes applied (from `/validate`)
 
 Missing files are noted as "not yet available" and those sections are skipped.
@@ -98,7 +97,44 @@ Only include optimizations confirmed as APPLIED in the validation log. Mark othe
 
 ### 5. Before/After Results
 
-The normalized comparison table from `/compare`. If `profile_optimized.json` is not available, this section reads "Profiling in progress — run `/capture workload_optimized.py --profile-name=optimized` and then `/compare`."
+If `profile_optimized.json` is not available, this section reads "Profiling in progress — run `/capture workload_optimized.py --profile-name=optimized` to generate it."
+
+When both profiles are present, compute the comparison directly:
+
+**Step A — Batch size normalization**
+
+Extract batch size from `capture_metadata.model_name` (convention: `ModelName-B{N}`, e.g. `ConvBlock-B16`). If absent, infer from GEMM kernel `grid_dim` (grid scales proportionally with batch). Apply:
+
+```
+normalized_optimized_ns = raw_optimized_ns × (baseline_batch / optimized_batch)
+```
+
+If batch sizes cannot be determined, compare raw durations and add a caveat.
+
+**Step B — Operator matching**
+
+Match operators across profiles by `operator_name` (NOT `operator_id` — it changes between captures). When operator counts differ due to fusion:
+
+| What you see in optimized profile | Transformation confirmed |
+|---|---|
+| 3 × `aten::linear` → 1 merged entry | QKV weight fusion |
+| `aten::mm` + `aten::softmax` → single `flash_fwd*` or SDPA kernel | FlashAttention replacement |
+| `gemmSN_NN_kernel` / `gemmSN_TN_kernel` → `sm90_xmma_gemm_bf16bf16_*` | BF16 dtype promotion → Tensor Cores active |
+| `convertTensor_kernel` absent | channels_last applied |
+| `BatchNorm` kernel absent | BN folded into Conv2d |
+
+**Step C — Speedup attribution**
+
+A speedup is attributed to a transformation ONLY when all three hold:
+1. Validation log shows the pass was APPLIED (INFO log, not `WARNING: Pattern not found`)
+2. The corresponding hardware metric changed in the expected direction
+3. The operator containing those kernels shows speedup
+
+If the validation log shows `WARNING: Pattern not found` for a pass, that pass did NOT contribute to any speedup — even if the operator shows improvement (Inductor's own optimization may be responsible).
+
+**Step D — Residual opportunity detection**
+
+After measuring the optimized profile, re-rank operators by `total_duration_ns` and classify their new bottlenecks (the optimization typically exposes second-order bottlenecks). Cross-reference with unapplied proposals in `optimizations.json` (medium/low confidence that degraded gracefully) and estimate residual gain using their `estimated_impact` discounted by confidence.
 
 ```markdown
 ## Results: Before vs. After (Normalized to B=16)
@@ -147,23 +183,17 @@ Estimated additional gain if OPT-3 is applied: ~15% total throughput improvement
 # 1. Capture baseline profile
 /capture examples/conv_block/conv_block.py
 
-# 2. Analyze bottlenecks
-/analyze profile.json
-
-# 3. Generate optimization proposals
+# 2. Generate optimization proposals
 /propose profile.json
 
-# 4. Generate optimized backend
+# 3. Generate optimized backend
 /backend conv_block.py optimizations.json
 
-# 5. Validate backend
+# 4. Validate backend
 /validate conv_block_optimized.py
 
-# 6. Profile optimized workload
+# 5. Profile optimized workload
 /capture conv_block_optimized.py --profile-name=optimized --compile-backend=conv_block_opt
-
-# 7. Compare results
-/compare profile.json profile_optimized.json
 ```
 ```
 

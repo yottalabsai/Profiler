@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Hook: fires after Write tool completes.
- * If profile.json was written, prompt the user to run /analyze.
+ * If profile.json was written, prompt the user to run /propose.
  */
 
 let input = '';
@@ -16,7 +16,7 @@ process.stdin.on('end', () => {
     if (isProfile) {
       process.stdout.write(
         '\n[profiler-plugin] profile.json written.\n' +
-        '  → Run /analyze to triage bottlenecks\n' +
+        '  → Run /propose to generate optimization proposals\n' +
         '  → Or run /optimize workload.py for the full end-to-end workflow\n'
       );
     }

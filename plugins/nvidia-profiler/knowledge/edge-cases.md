@@ -14,7 +14,7 @@ The 8 edge cases handled by `attribution_engine.py`, written for users reading `
 
 **Impact:** Absolute timestamps are unreliable. The profiler already avoids this by matching kernels via `(kernel_name, invocation_index)` rather than absolute timestamps.
 
-**Action:** Use `duration_ns` for all timing comparisons. Never compute time deltas using `start_ns - start_ns` across different kernel records. The `/compare` skill normalizes on `duration_ns` only.
+**Action:** Use `duration_ns` for all timing comparisons. Never compute time deltas using `start_ns - start_ns` across different kernel records. The `/report` skill normalizes on `duration_ns` only.
 
 ---
 
@@ -75,7 +75,7 @@ The 8 edge cases handled by `attribution_engine.py`, written for users reading `
 
 **Impact:** None for `profile.json` analysis. GPU-side CUPTI timestamps in `duration_ns` are authoritative. Host-side timing (e.g., from `torch.cuda.Event`) is subject to CPU overhead.
 
-**Action:** Always use `duration_ns` from `profile.json`. Ignore any host-side timing from outside the profiler. The `/analyze` skill and `/compare` skill are built on `duration_ns` exclusively.
+**Action:** Always use `duration_ns` from `profile.json`. Ignore any host-side timing from outside the profiler. The `/propose` skill and `/report` skill are built on `duration_ns` exclusively.
 
 ---
 
@@ -129,7 +129,7 @@ The 8 edge cases handled by `attribution_engine.py`, written for users reading `
 - Use `duration_ns` for RELATIVE comparisons only (between operators, or before/after optimization)
 - A 2× speedup in ncu-replayed durations corresponds to a real 2× speedup (within ~10% measurement noise)
 - For absolute wall-clock latency, use `torch.utils.benchmark` or nsys timeline view (not `profile.json`)
-- The `/compare` skill and `/report` skill always include this caveat
+- The `/report` skill always includes this caveat
 
 ---
 

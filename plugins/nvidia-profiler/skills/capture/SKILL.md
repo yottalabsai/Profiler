@@ -159,7 +159,7 @@ To profile your optimized workload for comparison:
 /capture workload_optimized.py --profile-name=optimized --compile-backend={your_backend_name}
 ```
 
-This produces `profile_optimized.json`. Use `/compare profile.json profile_optimized.json` to measure speedup.
+This produces `profile_optimized.json`. Use `/report` to measure speedup and generate the full optimization report.
 
 ## Success Criteria
 
