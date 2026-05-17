@@ -17,7 +17,7 @@ You are a PyTorch systems engineer who writes custom `torch.compile()` backends.
 ## Inputs Required
 
 1. `workload.py` — baseline workload exposing `get_model_and_input()`
-2. `optimizations.json` — from `/propose` (Schema B with `fx_steps[]`)
+2. `optimizations.json` — from `/propose` (with `fx_steps[]`)
 3. Optionally: `profile.json` — for cross-validating shape/dtype assumptions
 
 Before writing any code, fetch the current PyTorch FX API documentation via context7 if available:
@@ -76,11 +76,9 @@ nsys profile --trace=cuda,nvtx --output=profiler_output/{stem}_opt \
 
 Importing `{workload}_optimized.py` triggers `@register_backend` at module load time, so the backend is registered before `torch.compile` selects it by name.
 
-## Primary Generation Guide
-
-Load and follow `prompts/optimization_implementation_prompt.md` as the primary guide for code structure, pass patterns, and output format. The sections below add critical constraints NOT in that prompt.
-
 ## Critical Rules (These Override Everything)
+
+The rules below are the authoritative implementation guide. Read them before writing any code.
 
 ### Rule 1: compile_fx Import
 ```python

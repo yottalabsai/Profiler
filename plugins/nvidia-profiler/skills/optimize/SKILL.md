@@ -132,7 +132,6 @@ Without `--resume`, all stages run even if artifacts exist (fresh run).
 
 | Condition | Action |
 |---|---|
-| `unattributed_kernels > 10%` | Warn at Stage 1; reduce confidence on all proposals |
 | `compile_mode == "eager"` | Skip FX pass generation at Stage 2; propose `torch.compile` migration instead |
 | `device_name == null` | Use Ampere A100 limits as fallback; flag in Stage 6 report |
 | High duration variance across same operator's `call_index` values | Flag dynamic shapes; disable batch-padding optimization |

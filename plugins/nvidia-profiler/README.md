@@ -293,7 +293,7 @@ Orchestrates the full nsys + ncu profiling pipeline (Stages 0a-pre through 0d). 
 
 ### `optimization-strategist`
 
-Reads `profile.json` directly. Derives time budget, edge case flags, and architecture context, then reasons open-endedly from raw hardware counters to produce `optimizations.json` (Schema B) with ranked proposals, exact metric citations, `fx_steps[]`, and dependency ordering. Fetches live PyTorch API docs via `context7` and uses `sequential-thinking` for multi-operator dependency analysis.
+Reads `profile.json` directly. Derives time budget, edge case flags, and architecture context, then reasons open-endedly from raw hardware counters to produce `optimizations.json` with ranked proposals, exact metric citations, `fx_steps[]`, and dependency ordering. Fetches live PyTorch API docs via `context7` and uses `sequential-thinking` for multi-operator dependency analysis.
 
 **Tools:** `Read`, `Write`, `mcp__sequential_thinking`, `mcp__context7`, `mcp__exa__search`, `mcp__memory`
 
