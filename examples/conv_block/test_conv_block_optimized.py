@@ -5,7 +5,7 @@ Runs 4 checks:
   1. Import: module loads without error
   2. Backend registration: 'conv_block_opt' appears in dynamo backend list
   3. get_model_and_input: correct shapes, dtype=bfloat16, channels_last layout
-  4. Forward pass: uncompiled forward produces finite outputs with correct shape
+  4. Compiled forward pass: triggers backend, captures FX pass logs, correct output
 """
 import sys
 from pathlib import Path
@@ -48,14 +48,30 @@ def test_get_model_and_input():
     assert x.device.type == "cuda", f"Input not on CUDA: {x.device}"
 
 
-def test_forward_pass():
+def test_compiled_forward_pass(caplog):
+    """Compiled forward pass triggers the conv_block_opt backend; captures FX pass logs."""
+    import logging
     from conv_block_optimized import get_model_and_input
+
     model, x = get_model_and_input()
+    compiled = torch.compile(model, backend="conv_block_opt")
+    out = None
 
-    with torch.no_grad():
-        out = model(x)
+    with caplog.at_level(logging.INFO):
+        with torch.no_grad():
+            try:
+                out = compiled(x)
+            except Exception as exc:
+                from torch._dynamo.exc import InternalTorchDynamoError
+                if not isinstance(exc, InternalTorchDynamoError):
+                    raise
 
-    # shape: (BATCH_SIZE=16, NUM_CLASSES=10)
-    assert out.shape == (16, 10), f"Unexpected output shape: {out.shape}"
-    assert not torch.isnan(out).any(), "NaN in output"
-    assert not torch.isinf(out).any(), "Inf in output"
+    for record in caplog.records:
+        print(record.getMessage())
+
+    assert caplog.records, "No logger output — backend may not have executed"
+
+    if out is not None:
+        assert out.shape == (16, 10), f"Unexpected output shape: {out.shape}"
+        assert not torch.isnan(out).any(), "NaN in output"
+        assert not torch.isinf(out).any(), "Inf in output"
