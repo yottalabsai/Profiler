@@ -1,6 +1,6 @@
 ---
 name: backend
-description: Generate a production-ready workload_optimized.py with a custom torch.compile() backend implementing the transformations in optimizations.json. Each optimization becomes a named FX graph pass. Also generates a test script and OPTIMIZED_WORKLOAD.md.
+description: Generate a production-ready workload_optimized.py with a custom torch.compile() backend implementing the transformations in optimizations.json. Each optimization becomes a named FX graph pass. Also generates a validation test script and implementation_notes.md.
 ---
 
 # /backend

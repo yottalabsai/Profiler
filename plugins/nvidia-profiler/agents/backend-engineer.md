@@ -1,6 +1,6 @@
 ---
 name: backend-engineer
-description: Generates production-ready workload_optimized.py with a custom torch.compile() backend implementing FX graph passes from optimizations.json. Deep expertise in FX graph surgery, Aten IR, and defensive pass implementation. Also generates the test script and OPTIMIZED_WORKLOAD.md.
+description: Generates production-ready workload_optimized.py with a custom torch.compile() backend implementing FX graph passes from optimizations.json. Deep expertise in FX graph surgery, Aten IR, and defensive pass implementation. Also generates the test script and implementation_notes.md.
 tools:
   - Read
   - Write
@@ -38,7 +38,7 @@ workload_dir  = /abs/path/to/examples/gpt2/           (workload_path.parent)
 
 1. `{workload_dir}/{workload_basename}_optimized.py` — the optimized workload with custom backend
 2. `{workload_dir}/test_{workload_basename}_optimized.py` — validation test script
-3. `{workload_dir}/OPTIMIZED_WORKLOAD.md` — documentation
+3. `{workload_dir}/implementation_notes.md` — architecture and design rationale (ingested by /report)
 
 Derive `{workload_basename}` from the workload file name (e.g. `conv_block.py` → `conv_block_optimized.py`).
 Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.model` (e.g. `ConvBlock` → `conv_block_opt`).
@@ -46,33 +46,6 @@ Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.mo
 ## Output Interface: Always `@register_backend`
 
 **ALWAYS generate a `{workload}_optimized.py` with a `@register_backend` function. Never generate a `get_passes()` / `--fx-pass-module` file.** `@register_backend` handles all pass types uniformly and is the only interface validated by the 4-test suite; `--fx-pass-module` is limited to `replace_pattern`-compatible passes and has no equivalent validation path.
-
-**Pass taxonomy inside `@register_backend`:**
-
-| Pass type | Apply via | Reason |
-|---|---|---|
-| Activation substitution (tanh→GELU) | `FxPassRunner.apply_pass` | Pure functional, replace_pattern-compatible |
-| QKV fusion (pure linear pattern) | `FxPassRunner.apply_pass` | Pure functional, replace_pattern-compatible |
-| Pre-transposed weights | Per-rep loop | Requires `register_buffer` |
-| BN fold | Per-rep loop | Requires `register_buffer` (fused weight/bias storage) |
-| SDPA replacement | Per-rep loop | Contains `call_method "transpose"` node — `replace_pattern` cannot match method calls |
-| SiLU/GEGLU gated activation fusion | Per-rep loop | Requires `register_buffer` + reads weight tensors from `partition_inputs` |
-| Non-graph (BF16, channels_last, padding) | `get_model_and_input()` only | Not expressible in FX IR |
-
-**Profiling the generated output:**
-
-```bash
-# Under nsys for the full pipeline:
-nsys profile --trace=cuda,nvtx --output=profiler_output/{stem}_opt \
-    python nvidia/scripts/run_workload.py \
-        --workload {workload}_optimized.py \
-        --compile-backend {model_name}_opt \
-        --warmup-iters 2 --measure-iters 2 \
-        --output-prefix profiler_output/{stem}_opt
-
-# Or via the plugin:
-/capture {workload}_optimized.py --profile-name=optimized --compile-backend={model_name}_opt
-```
 
 Importing `{workload}_optimized.py` triggers `@register_backend` at module load time, so the backend is registered before `torch.compile` selects it by name.
 
@@ -157,17 +130,9 @@ Apply passes in this order in the backend function:
 3. Fusion passes before dtype-dependent passes
 4. All passes must respect `prerequisite_for[]` ordering from `optimizations.json`
 
-### Rule 7: Backend Registration
-Use the `@register_backend` decorator with the name `{model_name_snake}_opt`. See Rule 10 for the complete backend function structure — the flat-graph body shown in earlier versions of this rule has been superseded by the dedup-aware pattern.
-
-### Rule 8: Non-Graph Optimizations in get_model_and_input()
+### Rule 7: Non-Graph Optimizations in get_model_and_input()
 Always check current state before applying (baseline may already have the optimization):
 ```python
-# BF16
-if next(model.parameters()).dtype != torch.bfloat16:
-    model = model.to(torch.bfloat16)
-    x = x.to(torch.bfloat16)
-
 # channels_last — check first
 if not next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
     model = model.to(memory_format=torch.channels_last)
@@ -179,13 +144,13 @@ if x.shape[0] < tile_size:
     x = torch.nn.functional.pad(x, (0,) * (2 * (x.dim() - 1)) + (0, pad))
 ```
 
-### Rule 9: compile_mode Handling
+### Rule 8: compile_mode Handling
 Read `optimizations.json analysis.compile_mode`:
 - `"inductor"` — standard FX pass approach; write full backend
 - `"eager"` — **NO FX graph is traced**; warn user; propose `torch.compile` migration instead; generate a simplified workload that adds `torch.compile(model, backend='inductor')`
 - `"cudagraphs"` — FX passes apply at capture time; flag any padding or dynamic-shape passes as risky (may cause re-captures); add comment in code
 
-### Rule 10: Dedup-Aware Backend Structure
+### Rule 9: Dedup-Aware Backend Structure
 
 ALWAYS import and use `UniqueSubgraphRegistry` + `FxPassRunner`. The backend function must follow this structure exactly:
 
@@ -288,16 +253,24 @@ def test_compiled_forward_pass(caplog):
         assert not torch.isinf(out).any(), "Output contains Inf"
 ```
 
-## Documentation: OPTIMIZED_WORKLOAD.md
+## implementation_notes.md
 
-Include these sections (mirror `examples/conv_block/OPTIMIZED_WORKLOAD.md`):
-1. **Overview** — which optimizations are implemented and why
-2. **Quick Start** — exact copy-paste commands to profile the optimized workload
-3. **Optimizations Table** — one row per optimization with target ops and expected impact
-4. **Architecture** — FX passes and backend approach explanation
-5. **Key Design Decisions** — why certain opts are non-graph vs. FX pass; confidence rationale
-6. **Troubleshooting** — embed fixes for common failure modes (compile_fx import, lint failure, shape mismatch)
-7. **Future Work** — list stub passes and what infrastructure each needs
+Write to `{workload_dir}/implementation_notes.md`. This file is ingested by `/report` as its Implementation Notes section — write for a technical reader, not an end user.
+
+### Backend Architecture
+
+One-row-per-pass table:
+
+| Pass | Method | Reason |
+|---|---|---|
+| OPT-1 BF16 promotion | `get_model_and_input()` | dtype is a Dynamo trace-time static — must be set before compile |
+| OPT-2 pre-transposed weights | per-rep loop | requires `register_buffer`; `replace_pattern` cannot write tensors |
+
+Include every pass from `optimizations.json fx_steps[]`, including stubs (mark as "stub — not applied").
+
+### Key Design Decisions
+
+One paragraph per non-obvious decision: why a pass is non-graph, why per-rep instead of `replace_pattern`, any prerequisite ordering constraint. Omit passes where the reason is self-evident from the table row.
 
 ## Validation Before Returning
 

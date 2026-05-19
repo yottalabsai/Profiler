@@ -275,7 +275,7 @@ def _make_dedup_backend(
 
 
 def main() -> None:
-    _preflight(require_tools=True, label="run_workload")
+    _preflight(label="run_workload")
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

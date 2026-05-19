@@ -41,6 +41,14 @@ Before starting any stage, run `/preflight` to validate the full environment. If
 /preflight
 ```
 
+## Pre-Capture: torch.compile Check
+
+Before Stage 0, read `workload.py` and scan for `torch.compile`. If not found, halt immediately:
+
+> "workload.py does not appear to use `torch.compile`. FX graph passes require compiled execution. Add `model = torch.compile(model, ...)` to `get_model_and_input()`, then re-run `/optimize`."
+
+Do not proceed to capture — an eager-mode profile cannot feed FX pass generation, and the nsys+ncu capture (~30 min) would be wasted.
+
 ## The 7-Stage Pipeline
 
 ### Stage 0: Capture (→ profile.json)
@@ -72,7 +80,7 @@ Generates a production-ready custom `torch.compile()` backend implementing the p
 
 ```
 Delegates to: backend-engineer
-Output: {workload}_optimized.py, test_{workload}_optimized.py, OPTIMIZED_WORKLOAD.md
+Output: {workload}_optimized.py, test_{workload}_optimized.py, implementation_notes.md
 Skip if: {workload}_optimized.py exists and --resume is set
 ```
 
@@ -132,20 +140,10 @@ Without `--resume`, all stages run even if artifacts exist (fresh run).
 
 | Condition | Action |
 |---|---|
-| `compile_mode == "eager"` | Skip FX pass generation at Stage 2; propose `torch.compile` migration instead |
-| `device_name == null` | Use Ampere A100 limits as fallback; flag in Stage 6 report |
+| `compile_mode == "eager"` in `profile.json` | Skip FX pass generation at Stage 2; warn user (pre-capture check should have caught this) |
 | High duration variance across same operator's `call_index` values | Flag dynamic shapes; disable batch-padding optimization |
 | Stage 3 validation fails | Block Stage 4 (do not waste ncu replay time on broken code) |
 | `ERR_NVGPUCTRPERM` in Stage 0 or 4 | Halt and provide exact remediation: `--ncu-sudo=true` or elevated prompt |
-
-## MCP Tool Usage by Stage
-
-| Stage | MCP Tool | Purpose |
-|---|---|---|
-| Stage 1 | `context7` | Fetch PyTorch FX API docs before writing `fx_steps[]` |
-| Stage 1 | `exa-search` | Find similar optimization patterns for medium/low confidence transforms |
-| Stage 1 | `sequential-thinking` | Multi-operator dependency analysis when > 5 operators above 5% threshold |
-| Stage 1 | `memory` | Cache profile analysis; retrieve for similar models seen before |
 
 ## Configuration Options
 

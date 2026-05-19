@@ -15,7 +15,7 @@ from nvidia.scripts.preflight import check_all as _preflight  # noqa: E402
 
 
 def main() -> None:
-    _preflight(require_tools=True, label="operator-profiler")
+    _preflight(label="operator-profiler")
 
     logging.basicConfig(
         level=logging.INFO,

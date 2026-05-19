@@ -81,7 +81,7 @@ The primary entry point. Orchestrates all 6 stages and writes every artifact.
 |---|---|---|---|
 | 0. Capture baseline | capture-agent | `profile.json` | exists + `--resume` |
 | 1. Propose optimizations | optimization-strategist | `optimizations.json` | exists + `--resume` |
-| 2. Generate backend | backend-engineer | `{workload}_optimized.py`, `test_*.py`, `OPTIMIZED_WORKLOAD.md` | exists + `--resume` |
+| 2. Generate backend | backend-engineer | `{workload}_optimized.py`, `test_*.py`, `implementation_notes.md` | exists + `--resume` |
 | 3. Validate backend | validation-agent | `validation_report.json` | — (always runs; blocks Stage 4 if fails) |
 | 4. Re-capture optimized | capture-agent | `profile_optimized.json` | exists + `--resume` |
 | 5. Report | — | `report.md` | — |
@@ -209,7 +209,7 @@ Generates a production-ready `workload_optimized.py` implementing the proposed o
 **Outputs:**
 - `{workload}_optimized.py` — custom backend with FX graph passes; imports baseline `get_model_and_input()` and wraps it
 - `test_{workload}_optimized.py` — pytest suite with 4 required tests
-- `OPTIMIZED_WORKLOAD.md` — per-optimization documentation with before/after kernel analysis
+- `implementation_notes.md` — backend architecture and design rationale (ingested by `/report`)
 
 **Generated backend structure:**
 
@@ -299,7 +299,7 @@ Reads `profile.json` directly. Derives time budget, edge case flags, and archite
 
 ### `backend-engineer`
 
-Generates `{workload}_optimized.py` from `optimizations.json`. Implements each FX graph pass defensively (pattern detection before mutation, `gm.graph.lint()` after each mutation, graceful fallback on pattern miss). Also generates the test script and `OPTIMIZED_WORKLOAD.md`.
+Generates `{workload}_optimized.py` from `optimizations.json`. Implements each FX graph pass defensively (pattern detection before mutation, `gm.graph.lint()` after each mutation, graceful fallback on pattern miss). Also generates the test script and `implementation_notes.md`.
 
 **Tools:** `Read`, `Write`, `Edit`, `Bash`, `mcp__context7`
 
@@ -404,7 +404,7 @@ Bottleneck classification rules, fix strategies, and architecture-specific notes
 | `optimizations.json` | `/propose` | Ranked FX transformation proposals with evidence, time budget, edge case flags, and `fx_steps[]` |
 | `{workload}_optimized.py` | `/backend` | Custom `torch.compile()` backend + `get_model_and_input()` wrapper |
 | `test_{workload}_optimized.py` | `/backend` | Pytest suite for the generated backend |
-| `OPTIMIZED_WORKLOAD.md` | `/backend` | Per-optimization before/after kernel analysis |
+| `implementation_notes.md` | `/backend` | Backend architecture and design rationale (ingested by `/report`) |
 | `validation_report.json` | `/validate` | 5-step pass/fail results + FX pass application summary |
 | `profile_optimized.json` | `/capture --profile-name=optimized` | Hardware metrics for the optimized backend |
 | `report.md` | `/report` | Human-readable optimization lifecycle summary including per-operator speedup table |

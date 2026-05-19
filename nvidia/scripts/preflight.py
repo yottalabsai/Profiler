@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import glob
 import importlib
+import json
 import shutil
 import subprocess
 import sys
@@ -178,15 +179,21 @@ def _check_ncu() -> str:
     return f"{path} — {version_line}"
 
 
-def _check_rich() -> str:
-    import importlib.metadata
-    version = importlib.metadata.version("rich")
-    return f"rich {version}"
+def _detect_sudo_required() -> bool:
+    """Return True if the NVIDIA kernel module requires root for performance counters."""
+    try:
+        content = Path("/proc/driver/nvidia/params").read_text()
+        for line in content.splitlines():
+            if line.startswith("RmProfilingAdminOnly:"):
+                return line.split(":", 1)[1].strip() == "1"
+    except OSError:
+        pass
+    return False  # Windows or driver not loaded → assume no sudo needed
 
 
 # ── check registry ────────────────────────────────────────────────────────────
 
-def _build_checks(require_tools: bool) -> list[_Check]:
+def _build_checks() -> list[_Check]:
     return [
         _Check(
             "Python ≥ 3.10",
@@ -247,19 +254,12 @@ def _build_checks(require_tools: bool) -> list[_Check]:
             fix="pip install -e .  (from repo root)",
         ),
         _Check(
-            "rich (optional)",
-            _check_rich,
-            fix="pip install 'rich>=13.0'  # optional — used for formatted output",
-            required=False,
-        ),
-        _Check(
             "nsys",
             _check_nsys,
             fix=(
                 "Install NVIDIA Nsight Systems:\n"
                 "    sudo apt install nsight-systems   # or download from developer.nvidia.com"
             ),
-            required=require_tools,
         ),
         _Check(
             "ncu",
@@ -268,45 +268,34 @@ def _build_checks(require_tools: bool) -> list[_Check]:
                 "Install NVIDIA Nsight Compute:\n"
                 "    sudo apt install nsight-compute   # or download from developer.nvidia.com"
             ),
-            required=require_tools,
         ),
     ]
 
 
 # ── runner ────────────────────────────────────────────────────────────────────
 
-def check_all(require_tools: bool = True, label: str = "preflight") -> None:
+def check_all(label: str = "preflight") -> dict:
     """
     Run all environment checks.
 
     Args:
-        require_tools: If True, nsys/ncu failures are fatal (exit 1).
-                       Set False for stages that don't invoke profiling tools.
-        label:         Prefix for log lines (e.g. 'run_workload').
+        label: Prefix for log lines (e.g. 'run_workload').
 
+    Returns a dict of detected environment facts on success.
     Exits with code 1 if any required check fails.
     """
-    checks = _build_checks(require_tools=require_tools)
+    checks = _build_checks()
     print(f"[{label}] Environment check ({len(checks)} checks)...", flush=True)
 
     failures: list[_Check] = []
-    warnings: list[_Check] = []
 
     for chk in checks:
         chk.run()
         if chk.passed:
             print(f"[{label}]   {_green('OK')}  {chk.name}: {chk.detail}", flush=True)
-        elif chk.required:
+        else:
             print(f"[{label}]   {_red('FAIL')} {chk.name}: {chk.detail}", flush=True)
             failures.append(chk)
-        else:
-            print(f"[{label}]   {_yellow('WARN')} {chk.name}: {chk.detail}", flush=True)
-            warnings.append(chk)
-
-    if warnings:
-        print(f"[{label}] {len(warnings)} optional check(s) missing:", flush=True)
-        for chk in warnings:
-            print(f"[{label}]   {_bold(chk.name)}: {chk.fix}", flush=True)
 
     if failures:
         print(f"\n[{label}] {_red(_bold(f'{len(failures)} required check(s) failed:'))}", flush=True)
@@ -319,6 +308,16 @@ def check_all(require_tools: bool = True, label: str = "preflight") -> None:
 
     print(f"[{label}] All required checks passed.", flush=True)
 
+    nsys_chk = next(c for c in checks if c.name == "nsys")
+    ncu_chk = next(c for c in checks if c.name == "ncu")
+    return {
+        "project_root": str(Path(__file__).resolve().parent.parent.parent),
+        "nsys_path": nsys_chk.detail.split(" — ")[0] if nsys_chk.detail else "",
+        "ncu_path": ncu_chk.detail.split(" — ")[0] if ncu_chk.detail else "",
+        "sudo_required": _detect_sudo_required(),
+        "pythonpath": ":".join(p for p in sys.path if p),
+    }
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -330,9 +329,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Validate the profiler environment.")
     parser.add_argument(
-        "--no-tools", action="store_true",
-        help="Skip nsys/ncu checks (useful on machines without GPU tooling).",
+        "--json", metavar="PATH",
+        help="Write detected environment facts as JSON to PATH after all checks pass.",
     )
     args = parser.parse_args()
 
-    check_all(require_tools=not args.no_tools, label="preflight")
+    env = check_all(label="preflight")
+
+    if args.json:
+        out = Path(args.json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(env, indent=2))

@@ -27,60 +27,29 @@ for parent in [w.parent] + list(w.parents):
 "
 ```
 
-### 2. Detect nsys executable
-```bash
-nsys --version 2>/dev/null && echo "found:nsys" || echo "not_found"
-```
-If not found, try common paths:
-- Linux: `/opt/nvidia/nsight-systems/*/bin/nsys` (glob, take newest)
-- Windows: `C:/Program Files/NVIDIA Corporation/Nsight Systems */target-windows-x64/nsys.exe`
+### 2. MANDATORY: Run preflight and read environment facts
 
-### 3. Detect ncu executable
-```bash
-ncu --version 2>/dev/null && echo "found:ncu" || echo "not_found"
-```
-If not found, try: `/opt/nvidia/nsight-compute/*/ncu` (Linux, glob newest)
-
-From CLAUDE.md, the known ncu path on this system is: `/opt/nvidia/nsight-compute/2025.4.1/ncu`
-
-### 4. Detect if ncu needs sudo
-On Linux, read the NVIDIA kernel module parameter directly:
-```bash
-cat /proc/driver/nvidia/params 2>/dev/null | grep -q "RmProfilingAdminOnly: 1" && echo "needs_sudo" || echo "no_sudo"
-```
-This reads the actual kernel setting that controls whether non-root profiling is permitted.
-`RmProfilingAdminOnly: 1` → sudo required. `RmProfilingAdminOnly: 0` → any user can profile.
-If the file is absent (NVIDIA driver not loaded, or Windows), the command returns `no_sudo`.
-
-On Windows: always `ncu_sudo=False`. An elevated terminal is needed if counters are restricted.
-
-### 5. Build PYTHONPATH
-```bash
-python3 -c "import sys; print(':'.join(p for p in sys.path if p))"
-```
-Prepend the project root to this output. This is the value for `--ncu-env PYTHONPATH=`.
-
-**CRITICAL — must include user-local site-packages.** When ncu runs with `sudo -E`, `sudo` drops user-local paths (`~/.local/lib/python3.x/site-packages/`) from the effective environment. Torch and other user-installed packages live there. If `--ncu-env PYTHONPATH=` does not include this path, the ncu subprocess will fail with `ModuleNotFoundError: No module named 'torch'`. Always use the full `sys.path` output (which includes user-local paths) as the PYTHONPATH value, not just the project root.
-
-### 6. MANDATORY: Run preflight before proceeding
-
-**Do not skip this step.** Run the preflight script with the exact PYTHONPATH you will use for all subsequent commands. It checks every dependency in one shot and prints each failure with the exact fix command. A broken environment will silently fail inside nsys/ncu subprocesses with no useful error output.
+**Do not skip this step.** Run preflight with `--json` so it validates every dependency and writes all detected environment facts to a file in one shot. A broken environment will silently fail inside nsys/ncu subprocesses with no useful error output.
 
 ```bash
-PYTHONPATH={project_root}:{pythonpath} python3 {project_root}/nvidia/scripts/preflight.py
+PYTHONPATH={project_root}:$(python3 -c "import sys; print(':'.join(p for p in sys.path if p))") \
+  python3 {project_root}/nvidia/scripts/preflight.py --json /tmp/preflight_env.json
 ```
 
-Parse the output:
-- All lines `OK` → environment is ready, proceed
-- Any line `FAIL` → report the check name, error, and fix to the user; **do not proceed** until fixed
+If exit code != 0: report all `FAIL` lines (with their fix commands) to the user. **Do not proceed until every required check passes.**
 
-Common failures and fixes:
-- `nvidia.operator_profiler importable FAIL` → project root wrong or package not installed: `pip install -e .` from project root
-- `torch importable FAIL` → user-local site-packages missing from PYTHONPATH; add `~/.local/lib/python3.x/site-packages` to PYTHONPATH
-- `CUDA available FAIL` → GPU driver issue, not a PYTHONPATH issue; check `nvidia-smi`
-- `nsys FAIL` / `ncu FAIL` → tools not installed or not on PATH; see fix commands in preflight output
+If exit code == 0: parse `/tmp/preflight_env.json` and bind these values for all subsequent stages:
 
-**Do not proceed past this step if any required check fails.**
+| JSON field | Used as |
+|---|---|
+| `nsys_path` | `{nsys_executable}` in Stage 0a |
+| `ncu_path` | `--ncu-executable {ncu_path}` in Stage 0d |
+| `sudo_required` | add `--ncu-sudo` to Stage 0d command if `true` |
+| `pythonpath` | `PYTHONPATH=` env var for every subprocess call |
+
+**`pythonpath` is pre-validated.** It is the `sys.path` that preflight used when it confirmed torch, pydantic, and `nvidia.operator_profiler` are all importable — including user-local site-packages that `sudo` would otherwise drop. Use it verbatim for `--ncu-env PYTHONPATH=`.
+
+**`sudo_required`** reflects the live kernel setting (`/proc/driver/nvidia/params RmProfilingAdminOnly`). On Windows this is always `false`; an elevated terminal is needed if counters are restricted.
 
 ## Output Path Convention
 
@@ -245,18 +214,7 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
 
 ### Error Handling
 
-| Error in stderr | Meaning | Action |
-|---|---|---|
-| `ERR_NVGPUCTRPERM` | GPU counter access denied | Re-run with `--ncu-sudo`; on Windows, restart terminal with admin privileges |
-| `ModuleNotFoundError: nvidia` | PYTHONPATH missing in nsys subprocess | Fix PYTHONPATH — run Step 6 import validation before retrying |
-| `ModuleNotFoundError: torch` | User-local site-packages missing from ncu env | Add `~/.local/lib/python3.x/site-packages` to `--ncu-env PYTHONPATH=` |
-| `no such table: NVTX_EVENTS` | nsys was run on raw workload (not run_workload.py) | Re-run Stage 0a with `run_workload.py`, not the raw workload file |
-| `Kernel count mismatch` | warmup/measure-iters differ between Stage 0a and Stage 0d | Re-run both stages with matching `--warmup-iters` and `--measure-iters` |
-| `metrics.raw is empty` | `--script-args` was not last flag | Rebuild command with `--script-args` strictly at the end |
-| Many `metrics.raw` dicts empty despite matching kernel names | `TORCHINDUCTOR_CACHE_DIR` not forwarded to ncu (pre-fix) — ncu recompiled to different cache, kernel names shifted | Should not occur with current orchestrator; if seen, verify `_ncu_env()` is being called in both `_profile_one` and `_profile_all` |
-| `ncu: command not found` | ncu not in PATH | Use full path: `/opt/nvidia/nsight-compute/*/ncu` |
-| `operator-profiler: command not found` | Package not installed | Run `pip install .` from project root (requires `pyproject.toml` with `where = ["nvidia"]`) |
-| Duplicate partition metrics identical to zero | `--partition-map` not passed but `.part.json` exists | Pass `--partition-map {output_dir}/{workload_stem}.part.json` to `operator-profiler map` |
+On any error in stderr, read `knowledge/capture-errors.md` for the error → cause → action lookup table.
 
 ## Success Verification
 

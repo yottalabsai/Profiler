@@ -22,8 +22,9 @@ Generates `report.md` documenting the full optimization lifecycle. The report is
 - `profile_optimized.json` — optimized hardware metrics (if available)
 - `optimizations.json` — proposed optimizations with evidence (includes time budget and bottleneck analysis)
 - `validation_report.json` — which passes applied (from `/validate`)
+- `implementation_notes.md` — backend architecture and design rationale (written by `/backend`; required)
 
-Missing files are noted as "not yet available" and those sections are skipped.
+Missing files other than `implementation_notes.md` are noted as "not yet available" and those sections are skipped. If `implementation_notes.md` is missing, stop and tell the user to run `/backend` first.
 
 ## Report Structure
 
@@ -95,7 +96,11 @@ and for Blackwell GPUs where this counter was removed. Not a problem.
 
 Only include optimizations confirmed as APPLIED in the validation log. Mark others as NOT APPLIED with the reason.
 
-### 5. Before/After Results
+### 5. Implementation Notes
+
+Include the content of `implementation_notes.md` verbatim under this heading. Do not rewrite or summarize it — the backend engineer authored it with full implementation context.
+
+### 6. Before/After Results
 
 If `profile_optimized.json` is not available, this section reads "Profiling in progress — run `/capture workload_optimized.py --profile-name=optimized` to generate it."
 
@@ -146,7 +151,7 @@ After measuring the optimized profile, re-rank operators by `total_duration_ns` 
 | **Total** | **2,122,456** | **1,232,000** | **1.72x** |
 ```
 
-### 6. What Drove Each Speedup
+### 7. What Drove Each Speedup
 
 Causal attribution section — one paragraph per applied optimization:
 
@@ -160,7 +165,7 @@ convolution call; with NHWC-native tensors, no coercion is needed. Evidence: the
 `convertTensor_kernel` entries are entirely absent from the optimized profile.
 ```
 
-### 7. Remaining Opportunities
+### 8. Remaining Opportunities
 
 ```markdown
 ## Remaining Opportunities
@@ -174,7 +179,7 @@ These optimizations from the proposal were not applied in this iteration:
 Estimated additional gain if OPT-3 is applied: ~15% total throughput improvement.
 ```
 
-### 8. Reproduction Commands
+### 9. Reproduction Commands
 
 ```markdown
 ## Reproducing This Analysis
