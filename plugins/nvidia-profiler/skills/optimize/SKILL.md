@@ -10,27 +10,11 @@ The single command that drives the complete GPU optimization pipeline. Pass your
 ## Usage
 
 ```bash
-# Full pipeline from scratch (most common)
+# Full pipeline
 /optimize workload.py
 
-# Full pipeline with explicit options
-/optimize workload.py --ncu-sudo=true
-
-# Resume from a specific stage (skips completed stages)
-/optimize workload.py --resume --from=propose
-/optimize workload.py --resume --from=backend
-/optimize workload.py --resume --from=validate
-
-# Single stage only
-/optimize --stage=capture workload.py
-/optimize --stage=propose profile.json
-/optimize --stage=report
-
-# Batch: multiple workloads
-/optimize workload_a.py workload_b.py
-
-# Eager mode (no torch.compile)
-/optimize workload.py --compile-backend=none
+# Start from a specific stage
+/optimize workload.py --from=validate
 ```
 
 ## Pre-Flight Check
@@ -63,7 +47,7 @@ Layer deduplication is unconditional when using the built-in backend: the FX gra
 ```
 Delegates to: capture-agent
 Output: profile.json, profiler_output/{stem}.part.json (when built-in backend used)
-Skip if: profile.json exists and --resume is set
+Skip if: --from is set to a later stage
 ```
 
 ### Stage 1: Propose (→ optimizations.json)
@@ -72,7 +56,7 @@ Reads `profile.json` directly. Derives time budget, edge case flags, and archite
 ```
 Delegates to: optimization-strategist
 Output: optimizations.json
-Skip if: optimizations.json exists and --resume is set
+Skip if: --from is set to a later stage
 ```
 
 ### Stage 2: Backend (→ workload_optimized.py)
@@ -81,60 +65,39 @@ Generates a production-ready custom `torch.compile()` backend implementing the p
 ```
 Delegates to: backend-engineer
 Output: {workload}_optimized.py, test_{workload}_optimized.py, implementation_notes.md
-Skip if: {workload}_optimized.py exists and --resume is set
+Skip if: --from is set to a later stage
 ```
 
-### Stage 3: Validate (→ validation_report.json)
-Runs the 5-step validation sequence (syntax, import, registration, pytest, smoke test). Reports which FX passes applied vs. degraded gracefully.
+### Stage 3: Validate
+Runs the 4-step validation sequence (syntax, import, registration, pytest). The test suite includes a compiled smoke test. Reports which FX passes applied vs. degraded gracefully.
 
 ```
 Delegates to: validation-agent
-Output: validation_report.json
 Blocks: Stage 4 if any validation step fails
 ```
 
 ### Stage 4: Re-Capture (→ profile_optimized.json)
-Runs the same nsys+ncu pipeline on `workload_optimized.py`. Uses the same `--warmup-iters` and `--measure-iters` as Stage 0 to ensure comparable kernel counts.
+Runs the same nsys+ncu pipeline on `workload_optimized.py`. Before invoking the capture-agent, scan `workload_optimized.py` for the `@register_backend` decorator to extract the backend name, then pass it as `--compile-backend` so the capture-agent uses the registered backend instead of the built-in dedup backend.
 
 ```
-Delegates to: capture-agent (with --profile-name=optimized)
+Delegates to: capture-agent (with --profile-name=optimized --compile-backend=<auto-detected name>)
 Output: profile_optimized.json
 ```
 
 ### Stage 4.5: Cleanup intermediary files
-After both `profile.json` and `profile_optimized.json` are verified, remove Inductor debug directories from `profiler_output/`. These directories (named `{stem}_inductor_debug/`) contain Triton-compiled artifacts used only for kernel attribution during the pipeline; they are not needed afterward and can be large.
-
-```bash
-rm -rf profiler_output/*_inductor_debug/
-```
-
-Do not remove other files in `profiler_output/` (`.nsys-rep`, `.ncu-rep`, `.corr.json`, `.part.json`) — they are useful for debugging and re-running individual stages without a full re-capture.
-
-```
-Output: (none — cleanup only)
-Skip if: neither inductor_debug directory exists
-```
+After both `profile.json` and `profile_optimized.json` are verified, remove Inductor debug directories from `profiler_output/`. These directories (named `{stem}_inductor_debug/`) contain Triton-compiled artifacts used only for kernel attribution during the pipeline; they are not needed afterward and can be large. Do not remove other files in `profiler_output/` — they are useful for re-running individual stages without a full re-capture.
 
 ### Stage 5: Report (→ report.md)
 Generates a human-readable summary of the full optimization lifecycle — hardware context, bottleneck classification, transformations applied, measured speedup with hardware counter evidence, residual opportunities, and reproduction commands.
 
 ```
+Delegates to: report skill
 Output: report.md
 ```
 
 ## Checkpoint Behavior
 
-Before each stage, the agent checks whether the output artifact from the previous stage exists:
-
-| Artifact | Triggers |
-|---|---|
-| `profile.json` | Skips Stage 0 when `--resume` is set |
-| `optimizations.json` | Skips Stage 1 |
-| `{workload}_optimized.py` | Skips Stage 2 |
-| `validation_report.json` | Skips Stage 3 |
-| `profile_optimized.json` | Skips Stage 4 (re-capture) |
-
-Without `--resume`, all stages run even if artifacts exist (fresh run).
+`--from=<stage>` skips all stages before the specified stage. All stages from `<stage>` onward run unconditionally.
 
 ## Edge Case Handling
 
@@ -142,50 +105,15 @@ Without `--resume`, all stages run even if artifacts exist (fresh run).
 |---|---|
 | `compile_mode == "eager"` in `profile.json` | Skip FX pass generation at Stage 2; warn user (pre-capture check should have caught this) |
 | High duration variance across same operator's `call_index` values | Flag dynamic shapes; disable batch-padding optimization |
-| Stage 3 validation fails | Block Stage 4 (do not waste ncu replay time on broken code) |
-| `ERR_NVGPUCTRPERM` in Stage 0 or 4 | Halt and provide exact remediation: `--ncu-sudo=true` or elevated prompt |
+| Stage 3 validation fails | Block Stage 4; tell user to fix the backend and re-run with `--from=validate` |
+| `ERR_NVGPUCTRPERM` in Stage 0 or 4 | Halt and provide exact remediation: run ncu with sudo or from an elevated terminal |
 
 ## Configuration Options
 
-| Option | Default | Applies To |
+| Option | Default | Description |
 |---|---|---|
-| `--compile-backend` | *(none)* | Stages 0, 4 — named `@register_backend` backend for optimized workloads. Omit for baseline (uses built-in dedup+inductor backend). Required at Stage 5 when the optimized workload has complex FX passes (SDPA, BN fold, pre-transposed weights). |
-| `--warmup-iters` | `2` | Stages 0, 4 (must match) |
-| `--measure-iters` | `2` | Stages 0, 4 (must match) |
-| `--ncu-sudo` | `auto` | Stages 0, 4 |
-| `--ncu-path` | `auto` | Stages 0, 4 |
-| `--nsys-path` | `auto` | Stages 0, 4 |
-| `--confidence-threshold` | `medium` | Stage 2 (only implement opts at or above this level) |
-| `--max-optimizations` | `10` | Stage 1 |
-| `--skip-validation` | `false` | Skips Stage 3 (not recommended) |
-| `--resume` | `false` | Skip stages with existing artifacts |
-| `--from` | `capture` | Which stage to resume from |
-| `--audience` | `team` | Report audience for Stage 5 |
+| `--from` | `capture` | Start pipeline from a specific stage (`capture`, `propose`, `backend`, `validate`, `report`) |
 
 ## Progress Output
 
-The agent prints progress at each stage boundary:
-
-```
-[optimize] Stage 0/5: Capturing baseline profile...
-[optimize]   → nsys: /opt/nvidia/.../nsys (v2025.3)
-[optimize]   → ncu:  /opt/nvidia/.../ncu (v2025.4.1, sudo=true)
-[optimize]   ✓ profile.json: 12 operators, 162 kernels
-
-[optimize] Stage 1/5: Generating optimization proposals...
-[optimize]   ✓ optimizations.json: 3 proposals (2 high, 1 medium)
-
-[optimize] Stage 2/5: Generating custom backend...
-[optimize]   ✓ conv_block_optimized.py: syntax OK
-
-[optimize] Stage 3/5: Validating backend...
-[optimize]   ✓ All 5 validation steps passed
-
-[optimize] Stage 4/5: Capturing optimized profile...
-[optimize]   ✓ profile_optimized.json: 10 operators, 102 kernels
-
-[optimize] Stage 5/5: Generating report...
-[optimize]   ✓ report.md written (overall speedup: 1.87x, 102 → 54 kernel launches)
-
-[optimize] Complete. See report.md for full results.
-```
+Print a short status line at each stage boundary (start and completion). Exact format is flexible — the key requirement is that the user can see which stage is running and what artifact was produced.
