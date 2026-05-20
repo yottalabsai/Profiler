@@ -11,7 +11,6 @@ description: Run the full nsys+ncu profiling pipeline on a workload.py file and 
 /capture workload.py
 /capture workload.py --ncu-sudo=true
 /capture workload.py --profile-name=optimized
-/capture workload.py --warmup-iters=5 --measure-iters=5
 /capture workload_optimized.py --compile-backend=my_model_opt
 ```
 
@@ -34,8 +33,6 @@ The model and input must be on CUDA. The pipeline reads no other function from y
 |---|---|---|
 | `--ncu-sudo=true/false` | auto | "Force sudo on/off for ncu; skip auto-detection." |
 | `--profile-name=NAME` | baseline | "Write output to profile_{NAME}.json instead of profile.json." |
-| `--warmup-iters=N` | 2 | "Use N warmup iterations in all pipeline stages." |
-| `--measure-iters=N` | 2 | "Use N measurement iterations in all pipeline stages." |
 | `--compile-backend=NAME` | none | "Use the named @register_backend instead of the built-in dedup backend. Required for optimized workloads with complex FX passes." |
 
 ## Execution
@@ -43,3 +40,7 @@ The model and input must be on CUDA. The pipeline reads no other function from y
 Delegates to: capture-agent
 
 Translate any flags present into their agent instructions above and include them in the human-turn prompt alongside the workload path.
+
+## Output
+
+Produces `profile.json` (or `profile_optimized.json`) at the workload's parent directory.

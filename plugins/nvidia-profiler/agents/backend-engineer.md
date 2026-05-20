@@ -45,7 +45,7 @@ Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.mo
 
 ## Output Interface: Always `@register_backend`
 
-**ALWAYS generate a `{workload}_optimized.py` with a `@register_backend` function. Never generate a `get_passes()` / `--fx-pass-module` file.** `@register_backend` handles all pass types uniformly and is the only interface validated by the 4-test suite; `--fx-pass-module` is limited to `replace_pattern`-compatible passes and has no equivalent validation path.
+**ALWAYS generate a `{workload}_optimized.py` with a `@register_backend` function.** `@register_backend` handles all pass types uniformly and is the only interface validated by the 4-test suite.
 
 Importing `{workload}_optimized.py` triggers `@register_backend` at module load time, so the backend is registered before `torch.compile` selects it by name.
 
@@ -152,10 +152,10 @@ Read `optimizations.json analysis.compile_mode`:
 
 ### Rule 9: Dedup-Aware Backend Structure
 
-ALWAYS import and use `UniqueSubgraphRegistry` + `FxPassRunner`. The backend function must follow this structure exactly:
+ALWAYS import and use `UniqueSubgraphRegistry`. The backend function must follow this structure exactly:
 
 ```python
-from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 @register_backend
 def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
@@ -171,12 +171,8 @@ def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
         return compile_fx(gm, example_inputs)
 
     logger.info(f"{model_name_snake}_opt: {len(equiv_map)} duplicate partitions, dedup path")
-    runner = FxPassRunner(registry)
 
-    # replace_pattern-compatible passes (FxPassRunner applies to unique reps + propagates)
-    runner.apply_pass(_qkv_pattern, _qkv_replacement)
-
-    # Manual passes (apply to each unique rep, then propagate to its duplicates)
+    # Apply passes to each unique rep, then propagate to its duplicates
     for rep_name, rep_mod in registry.unique_reps:
         _pass_replace_sdpa(rep_mod)
         for _, dup_mod in registry.duplicates_of(rep_name):
@@ -197,7 +193,6 @@ def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
 **Return value note:** `registry.split` is a `GraphModule` whose child partitions have their `.forward` patched with Inductor-compiled callables. `lambda *args: registry.split(*args)` routes each forward call through this assembled graph via `nn.Module.__call__`.
 
 **Classify each optimization before writing code:**
-- `replace_pattern`-compatible (pure functional, no tuple outputs, no `register_buffer`) → `runner.apply_pass()`
 - Manual per-rep (tuple outputs, decomposed ops, `register_buffer`) → per-rep loop
 - Non-graph (dtype, layout, batch shape) → `get_model_and_input()` only
 

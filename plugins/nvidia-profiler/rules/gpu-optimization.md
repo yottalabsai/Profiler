@@ -62,10 +62,10 @@ if (node.target == torch.ops.aten.t.default
 
 - Backend name MUST be lowercase snake_case: `{model_name_lower}_opt`  (e.g. `conv_block_opt`)
 - Log at `INFO` level: start of backend execution, end of each pass, delegation to Inductor
-- ALWAYS use the dedup-aware structure (UniqueSubgraphRegistry + FxPassRunner). The flat `compile_fx(gm, example_inputs)` pattern does not handle repeated-layer models correctly.
+- ALWAYS use the dedup-aware structure (`UniqueSubgraphRegistry`). The flat `compile_fx(gm, example_inputs)` pattern does not handle repeated-layer models correctly.
 
 ```python
-from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 @register_backend
 def my_model_opt(gm: fx.GraphModule, example_inputs) -> Callable:
@@ -80,12 +80,8 @@ def my_model_opt(gm: fx.GraphModule, example_inputs) -> Callable:
         return compile_fx(gm, example_inputs)
 
     logger.info(f"my_model_opt: {len(equiv_map)} duplicate partitions, dedup path")
-    runner = FxPassRunner(registry)
 
-    # replace_pattern-compatible passes (FxPassRunner applies to unique reps + propagates)
-    runner.apply_pass(_pattern_fn, _replacement_fn)
-
-    # Manual passes — apply to each unique rep, then propagate to its duplicates
+    # Apply passes to each unique rep, then propagate to its duplicates
     for rep_name, rep_mod in registry.unique_reps:
         _pass_manual(rep_mod)
         for _, dup_mod in registry.duplicates_of(rep_name):

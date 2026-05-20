@@ -46,7 +46,7 @@ from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx
 from torch.nn.utils.fusion import fuse_conv_bn_eval
 
-from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 

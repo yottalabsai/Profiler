@@ -83,7 +83,7 @@ import torch.nn.functional as F
 from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx  # function, not module
 
-from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 

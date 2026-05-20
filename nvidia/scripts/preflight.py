@@ -125,7 +125,7 @@ def _check_operator_profiler() -> str:
 
 
 def _check_operator_profiler_fx() -> str:
-    from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner  # noqa: F401
+    from nvidia.operator_profiler.fx import UniqueSubgraphRegistry  # noqa: F401
     return "fx sub-package OK"
 
 

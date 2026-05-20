@@ -72,7 +72,7 @@ import torch.nn.functional as F
 import torch.fx as fx
 from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx   # import the function, not the module
-from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 # Import baseline workload
 from scripts.workload import get_model_and_input as get_baseline_model_and_input
@@ -106,22 +106,7 @@ def _capture_partition_inputs(
     return partition_inputs
 
 # ============================================================================
-# replace_pattern-compatible passes (FxPassRunner applies these automatically)
-# ============================================================================
-# Use for: pure functional patterns — no tuple outputs, no register_buffer,
-# no control flow. FxPassRunner.apply_pass() handles unique-rep application
-# and propagation to all structural duplicates.
-
-def _[opt_pattern](x, ...):
-    """Pattern to match."""
-    ...
-
-def _[opt_replacement](x, ...):
-    """Replacement subgraph."""
-    ...
-
-# ============================================================================
-# Manual per-rep passes (applied in the per-rep loop below)
+# FX passes (applied per unique rep in the dedup loop below)
 # ============================================================================
 # Use for: tuple outputs (BN fold), decomposed ops (SDPA — softmax is
 # decomposed before passes run), or register_buffer needed.
@@ -170,12 +155,8 @@ def {model_name}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
         return compile_fx(gm, example_inputs)
 
     logger.info(f"{model_name}_opt: {len(equiv_map)} duplicate partitions, dedup path")
-    runner = FxPassRunner(registry)
 
-    # replace_pattern-compatible passes (FxPassRunner propagates to duplicates)
-    runner.apply_pass(_[opt_pattern], _[opt_replacement])
-
-    # Manual passes: apply to each unique rep, then propagate to duplicates
+    # Apply passes to each unique rep, then propagate to its duplicates
     for rep_name, rep_mod in registry.unique_reps:
         _pass_[opt1](rep_mod)
         for _, dup_mod in registry.duplicates_of(rep_name):
@@ -495,8 +476,8 @@ operator-profiler map manifest.json \
 
 ## Final Checklist
 
-- [ ] Passes classified as `replace_pattern`-compatible vs. manual-per-rep vs. non-graph
-- [ ] `UniqueSubgraphRegistry` and `FxPassRunner` imported and used in backend
+- [ ] Passes classified as manual-per-rep vs. non-graph
+- [ ] `UniqueSubgraphRegistry` imported and used in backend
 - [ ] `if not equiv_map:` flat fallback path present for models with no repeated layers
 - [ ] `_capture_partition_inputs` used when compiling per-partition (not original `example_inputs`)
 - [ ] All HIGH confidence optimizations implemented as full passes

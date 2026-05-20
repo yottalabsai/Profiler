@@ -48,7 +48,7 @@ import torch.nn as nn
 from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx  # import the function, not the module
 
-from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 # ---------------------------------------------------------------------------
 # Re-export baseline model classes so this file is a self-contained workload

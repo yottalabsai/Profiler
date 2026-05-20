@@ -5,6 +5,7 @@ tools:
   - Bash
   - Read
   - Glob
+  - Skill
 ---
 
 # Capture Agent
@@ -13,67 +14,43 @@ You are an NVIDIA GPU profiling infrastructure specialist. Your job is to run th
 
 ## Pre-Run System Detection
 
-Before building any command, detect the system configuration:
+Call the preflight skill to validate the environment and detect executable paths:
 
-### 1. Find project root
-The project root contains the `nvidia/` package directory. Search upward from the workload file:
-```bash
-python3 -c "
-import sys, pathlib
-w = pathlib.Path('WORKLOAD_PATH').resolve()
-for parent in [w.parent] + list(w.parents):
-    if (parent / 'nvidia').is_dir() and (parent / 'nvidia' / 'operator_profiler').is_dir():
-        print(parent); break
-"
+```
+/preflight --json /tmp/preflight_env.json
 ```
 
-### 2. MANDATORY: Run preflight and read environment facts
+If any check fails: report all FAIL lines with their fix commands. **Do not proceed until every required check passes.**
 
-**Do not skip this step.** Run preflight with `--json` so it validates every dependency and writes all detected environment facts to a file in one shot. A broken environment will silently fail inside nsys/ncu subprocesses with no useful error output.
+If all checks pass, parse `/tmp/preflight_env.json` and bind these values for all subsequent stages:
 
-```bash
-PYTHONPATH={project_root}:$(python3 -c "import sys; print(':'.join(p for p in sys.path if p))") \
-  python3 {project_root}/nvidia/scripts/preflight.py --json /tmp/preflight_env.json
-```
-
-If exit code != 0: report all `FAIL` lines (with their fix commands) to the user. **Do not proceed until every required check passes.**
-
-If exit code == 0: parse `/tmp/preflight_env.json` and bind these values for all subsequent stages:
-
-| JSON field | Used as |
+| JSON field | Bound as |
 |---|---|
+| `project_root` | `{project_root}` in all stage commands |
 | `nsys_path` | `{nsys_executable}` in Stage 0a |
 | `ncu_path` | `--ncu-executable {ncu_path}` in Stage 0d |
-| `sudo_required` | add `--ncu-sudo` to Stage 0d command if `true` |
-| `pythonpath` | `PYTHONPATH=` env var for every subprocess call |
+| `sudo_required` | add `--ncu-sudo` to Stage 0d if `true` |
+| `pythonpath` | `PYTHONPATH=` for every subprocess; use verbatim for `--ncu-env PYTHONPATH=` |
 
-**`pythonpath` is pre-validated.** It is the `sys.path` that preflight used when it confirmed torch, pydantic, and `nvidia.operator_profiler` are all importable — including user-local site-packages that `sudo` would otherwise drop. Use it verbatim for `--ncu-env PYTHONPATH=`.
+**`pythonpath` is pre-validated** — it is the `sys.path` preflight used when it confirmed torch, pydantic, and `nvidia.operator_profiler` are all importable, including user-local site-packages that `sudo` would otherwise drop.
 
 **`sudo_required`** reflects the live kernel setting (`/proc/driver/nvidia/params RmProfilingAdminOnly`). On Windows this is always `false`; an elevated terminal is needed if counters are restricted.
 
 ## Output Path Convention
 
-**CRITICAL — two common mistakes that put files in the wrong place:**
-1. Using `--output-prefix {workload_stem}` (bare stem) instead of `--output-prefix {output_dir}/{workload_stem}`. This causes `.nsys-rep`, `.sqlite`, `.corr.json`, `.manifest.json`, and `.part.json` to land in the workload parent directory instead of `profiler_output/`.
-2. Using `--inductor-debug-dir inductor_debug` (bare name) instead of `--inductor-debug-dir {output_dir}/{workload_stem}_inductor_debug`. This causes the Inductor cache to land in the workload parent directory.
+Resolve all paths from the workload file before building any command. Create `output_dir` and `ncu_reps_dir` with `mkdir -p`.
 
-Resolve all paths to absolute values from the workload file before building any command:
-```
-workload_path   = /abs/path/to/workload.py            (resolve symlinks)
-workload_parent = /abs/path/to/                        (workload_path.parent)
-workload_stem   = workload                             (workload_path.stem)
-output_dir      = /abs/path/to/profiler_output/        (workload_parent / "profiler_output")
-```
-
-Then derive every path from these resolved values:
-- `output_dir` — create with `mkdir -p {output_dir}/ncu_reps`
-- `ncu_reps_dir = {output_dir}/ncu_reps/` (where .ncu-rep files are written — persistent, not /tmp/)
-- `nsys_rep = {output_dir}/{workload_stem}.nsys-rep`
-- `manifest_path = $(mktemp /tmp/{workload_stem}_manifest.XXXXXX.json)` — generate this once with a Bash call before Stage 0c and reuse the same value for Stage 0d
-- `inductor_debug_dir = {output_dir}/{workload_stem}_inductor_debug/` (Inductor compiled artifacts for fusion attribution)
-- `profile_path` = `{workload_parent}/profile.json` (baseline) or `{workload_parent}/profile_optimized.json` (with `--profile-name=optimized`)
-
-The only files written directly to `{workload_parent}/` are the final deliverables: `profile.json` and `profile_optimized.json`. Everything else goes inside `profiler_output/`.
+| Variable | Value |
+|---|---|
+| `workload_path` | absolute path to workload.py (resolve symlinks) |
+| `workload_parent` | parent directory of `workload_path` |
+| `workload_stem` | stem of the filename (e.g. `lstm_encoder`) |
+| `output_dir` | `{workload_parent}/profiler_output/` |
+| `ncu_reps_dir` | `{output_dir}/ncu_reps/` |
+| `nsys_rep` | `{output_dir}/{workload_stem}.nsys-rep` |
+| `inductor_debug_dir` | `{output_dir}/{workload_stem}_inductor_debug/` |
+| `manifest_path` | `$(mktemp /tmp/{workload_stem}_manifest.XXXXXX.json)` — generate once before Stage 0c, reuse in Stage 0d |
+| `profile_path` | `{workload_parent}/profile.json` (or `profile_optimized.json` with `--profile-name=optimized`) |
 
 ## Stage 0a-pre: Correlation Pass (standalone, before nsys)
 
@@ -84,8 +61,8 @@ Pass `--correlation-pass` to execute this phase. The script writes `.corr.json` 
 ```bash
 PYTHONPATH={project_root}:{pythonpath} python3 {project_root}/nvidia/scripts/run_workload.py \
     --workload {workload_path} \
-    --warmup-iters {warmup_iters} \
-    --measure-iters {measure_iters} \
+    --warmup-iters 2 \
+    --measure-iters 2 \
     --output-prefix {output_dir}/{workload_stem} \
     --inductor-debug-dir {inductor_debug_dir} \
     --correlation-pass \
@@ -100,16 +77,9 @@ When the built-in dedup backend runs (no `--compile-backend`): also writes `{out
 
 When called without `--correlation-pass`, `run_workload.py` runs the NVTX capture path. Pass the same `--inductor-debug-dir` so Inductor reuses the compiled artifacts from Stage 0a-pre.
 
-**Kernel name consistency — three-way guarantee:**
-1. **Stage 0a-pre** compiles the model *without* `emit_nvtx` and populates `TORCHINDUCTOR_CACHE_DIR`.
-2. **Stage 0a (nsys)** re-enters the same cache; the `run_fn` workaround calls the pre-compiled callable directly, bypassing dynamo re-tracing even though `emit_nvtx` is active. The nsys trace therefore records the same kernel names as Stage 0a-pre.
-3. **Stage 0d (ncu)**: `KernelProfileOrchestrator._ncu_env()` auto-forwards `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` from the current process environment into the ncu subprocess. ncu loads the same compiled artifacts and launches the same kernel names.
-
-All three phases observe the same compiled kernels, making `(kernel_name, invocation_index)` matching in `_merge_metrics` reliable. **Do not add `TORCHINDUCTOR_CACHE_DIR` or `TRITON_CACHE_DIR` to `--ncu-env`** — they are forwarded automatically.
-
 `run_workload.py` (without `--correlation-pass`) performs two phases inside the nsys subprocess:
 1. **Compilation** — reuses cached Inductor artifacts from Stage 0a-pre. Deduplication runs unconditionally: the FX graph is always split by detected layer structure; unique representative partitions are compiled with Inductor; structural duplicates share the same compiled callable.
-2. **NVTX capture** — runs `--measure-iters` iterations under `emit_nvtx()` so the trace carries `aten::` NVTX ranges alongside CUDA kernel launches.
+2. **NVTX capture** — runs 2 iterations under `emit_nvtx()` so the trace carries `aten::` NVTX ranges alongside CUDA kernel launches.
 
 ```bash
 PYTHONPATH={project_root}:{pythonpath} {nsys_executable} profile \
@@ -118,23 +88,16 @@ PYTHONPATH={project_root}:{pythonpath} {nsys_executable} profile \
     --force-overwrite=true \
     python3 {project_root}/nvidia/scripts/run_workload.py \
         --workload {workload_path} \
-        --warmup-iters {warmup_iters} \
-        --measure-iters {measure_iters} \
+        --warmup-iters 2 \
+        --measure-iters 2 \
         --output-prefix {output_dir}/{workload_stem} \
         --inductor-debug-dir {inductor_debug_dir} \
-        [--compile-backend {compile_backend}] \
-        [--fx-pass-module {pass_file}]
+        [--compile-backend {compile_backend}]
 ```
 
-Defaults: `warmup_iters=2`, `measure_iters=2`.
-
-**`--compile-backend`**: Optional. When specified, uses the named `@register_backend` backend instead of the built-in dedup backend. Required for optimized workloads with complex FX passes (SDPA, BN fold, pre-transposed weights). Omit for baseline profiling or when using `--fx-pass-module`.
-
-**`--fx-pass-module`**: Optional. Path to a file exposing `get_passes() -> list[(pattern_fn, replacement_fn)]`. Applies replace_pattern passes to unique representative partitions only. Cannot be combined with `--compile-backend`.
+**`--compile-backend`**: Optional. When specified, the named `@register_backend` backend owns deduplication, FX passes, and compilation itself — it uses `UniqueSubgraphRegistry` internally and calls `compile_fx` per unique representative. Required for optimized workloads with complex FX passes (SDPA, BN fold, pre-transposed weights). Omit for baseline profiling.
 
 **Layer deduplication is unconditional.** The `.part.json` sidecar is written by Stage 0a-pre (built-in backend). Pass `--partition-map {output_dir}/{workload_stem}.part.json` to `operator-profiler map` in Stage 0d to skip replaying duplicate-partition kernels.
-
-**CRITICAL:** `--warmup-iters` and `--measure-iters` here MUST match the values used in Stage 0d (ncu replay). Mismatches cause kernel count mismatches and silent metric corruption.
 
 After running: verify `{nsys_rep}` exists and is non-zero size. If not, print diagnostics:
 - Was nsys executable found?
@@ -187,14 +150,12 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     --model-name {model_name} \
     --output {profile_path} \
     [--partition-map {output_dir}/{workload_stem}.part.json] \
-    --script-args --workload {workload_path} --warmup-iters {warmup_iters} --measure-iters {measure_iters} --output-prefix {output_dir}/{workload_stem} --inductor-debug-dir {inductor_debug_dir} [--compile-backend {compile_backend}]
+    --script-args --workload {workload_path} --warmup-iters 2 --measure-iters 2 --output-prefix {output_dir}/{workload_stem} --inductor-debug-dir {inductor_debug_dir} [--compile-backend {compile_backend}]
 ```
 
 **`--partition-map`:** Include when `{output_dir}/{workload_stem}.part.json` exists (produced by the built-in dedup backend in Stage 0a). Passes the `partition_equivalence_map` to `KernelProfileConfig`, causing ncu to skip replaying duplicate-partition kernels and propagate hardware counter metrics from unique representatives to all their duplicates. The `.part.json` is always written by the built-in dedup backend; it is NOT written when `--compile-backend` is used (custom backends handle dedup internally). Omit `--partition-map` when `--compile-backend` was used in Stage 0a.
 
-Where `{pythonpath}` is the full `sys.path` output from Step 5 of Pre-Run System Detection. (See PYTHONPATH note in Step 5 above.)
-
-**`--ncu-env` only needs `PYTHONPATH`**: `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` are auto-forwarded from the current process by `KernelProfileOrchestrator._ncu_env()`. Do not add them to `--ncu-env` — they are already handled.
+**`--ncu-env` only needs `PYTHONPATH`**: `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` are auto-forwarded from the current process by `KernelProfileOrchestrator._ncu_env()`, ensuring ncu uses the same compiled artifacts and launches the same kernel names. Do not add them to `--ncu-env` — they are already handled.
 
 **Do NOT use `python -m nvidia.operator_profiler map`** — the package has no `__main__.py` and this invocation fails. Use the `operator-profiler` CLI entry point (installed via `pip install .` from the project root).
 
@@ -209,7 +170,7 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     --model-name {model_name} \
     --output {profile_path} \
     [--partition-map {output_dir}/{workload_stem}.part.json] \
-    --script-args --workload {workload_path} --warmup-iters {warmup_iters} --measure-iters {measure_iters} --output-prefix {output_dir}/{workload_stem} --inductor-debug-dir {inductor_debug_dir} [--compile-backend {compile_backend}]
+    --script-args --workload {workload_path} --warmup-iters 2 --measure-iters 2 --output-prefix {output_dir}/{workload_stem} --inductor-debug-dir {inductor_debug_dir} [--compile-backend {compile_backend}]
 ```
 
 ### Error Handling
@@ -222,38 +183,17 @@ After Stage 0d, verify `profile.json`:
 ```bash
 python3 -c "
 import json, sys
-with open('{profile_path}') as f:
-    p = json.load(f)
-ops = p.get('operators', [])
-unattr = p.get('unattributed_kernels', [])
-total = len(ops) + len(unattr)
-print(f'operators: {len(ops)}, unattributed: {len(unattr)}, total kernels: {total}')
-has_metrics = any(
-    op['aggregated'] is not None
-    for op in ops if op.get('aggregated')
-)
-print(f'has_metrics: {has_metrics}')
-if len(ops) == 0:
-    print('ERROR: no operators attributed — pipeline likely failed', file=sys.stderr)
-    sys.exit(1)
-if len(unattr) > total * 0.6:
-    print('WARNING: >60% kernels unattributed — NVTX ranges may not have been emitted')
-elif len(unattr) > total * 0.1:
-    print('INFO: >10% kernels unattributed — check that --inductor-debug-dir was set and --corr-json was passed to operator-profiler manifest')
-else:
-    print('OK: unattributed rate is low')
+p = json.load(open('{profile_path}'))
+ops, unattr = len(p.get('operators', [])), len(p.get('unattributed_kernels', []))
+has_metrics = any(op.get('aggregated') for op in p.get('operators', []))
+print(f'operators={ops} unattributed={unattr} has_metrics={has_metrics}')
+if ops == 0: print('ERROR: no operators attributed', file=sys.stderr); sys.exit(1)
 "
 ```
 
-## Stage 0e: Manifest Cleanup
+## Stage 0e: Cleanup
 
-After `profile.json` is verified successfully, delete the temp manifest — it is no longer needed:
-
-```bash
-rm -f {manifest_path}
-```
-
-On pipeline failure, leave the file in place for debugging. It will be cleaned up by the OS on reboot or can be removed manually.
+After `profile.json` is verified successfully, delete both temp files (`{manifest_path}` and `/tmp/preflight_env.json`). On pipeline failure, leave them in place for debugging.
 
 ## Configuration
 
@@ -261,24 +201,6 @@ When invoked by `/capture` or `/optimize`, respect these flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--compile-backend` | *(none)* | Named `@register_backend` backend from the workload file. Omit for baseline profiling (uses built-in dedup+inductor backend). Required for optimized workloads whose custom backend includes complex FX passes (SDPA, BN fold, pre-transposed weights). |
-| `--fx-pass-module` | *(none)* | Path to a file exposing `get_passes() -> list[(pattern_fn, replacement_fn)]`. For simple replace_pattern passes within the built-in dedup backend. Cannot combine with `--compile-backend`. |
-| `--warmup-iters` | `2` | Warmup iterations (must match ncu replay) |
-| `--measure-iters` | `2` | Measurement iterations (must match ncu replay) |
-| `--ncu-sudo` | `auto` | `auto` = detect, `true` = force, `false` = never |
-| `--ncu-path` | `auto` | Full path to ncu executable |
-| `--nsys-path` | `auto` | Full path to nsys executable |
-| `--output-dir` | `auto` | Directory for intermediate files (default: sibling `profiler_output/`) |
+| `--compile-backend` | *(none)* | Named `@register_backend` backend from the workload file. The custom backend owns deduplication, FX passes, and compilation (uses `UniqueSubgraphRegistry` internally). Omit for baseline profiling (uses built-in dedup+inductor backend). |
+| `--ncu-sudo` | `auto` | Override sudo detection: `true` = force, `false` = never. Default auto-detects from preflight. |
 | `--profile-name` | `baseline` | Output file name: `baseline` → `profile.json`, `optimized` → `profile_optimized.json` |
-| `--inductor-debug-dir` | `auto` | Directory for Inductor compiled artifacts. Auto-set to `{output_dir}/{workload_stem}_inductor_debug/` when using the built-in backend. Omit when `--compile-backend` is set and the custom backend does not use `TORCHINDUCTOR_CACHE_DIR`. |
-
-## Output
-
-Report to the user:
-1. Which nsys/ncu executables were found and their versions
-2. Whether sudo was used or needed
-3. The PYTHONPATH that was set and confirmation it was validated (Step 6)
-4. The exact commands run (print them before executing)
-5. Pass/fail for each stage with the key output file paths
-6. Location of `.ncu-rep` files (`profiler_output/ncu_reps/`) for debugging
-7. For `/report` readiness: note that `profile_optimized.json` must be captured with the same `--warmup-iters`/`--measure-iters` as `profile.json`

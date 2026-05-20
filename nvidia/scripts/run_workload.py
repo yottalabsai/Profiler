@@ -44,15 +44,6 @@ The workload script must expose:
 The returned model should be a plain nn.Module on CUDA. Compilation and
 warmup are handled by this tool via --warmup-iters.
 
-Pass file interface (--fx-pass-module):
-    def get_passes() -> list[tuple[callable, callable]]:
-        # each tuple is (pattern_fn, replacement_fn) for replace_pattern
-        return [(pattern, replacement)]
-
-    Only replace_pattern-compatible passes (pure functional, no register_buffer)
-    can be expressed this way. Complex passes (BN fold, SDPA, pre-transposed
-    weights) require --compile-backend instead.
-
 Custom backend interface (--compile-backend):
     The workload file (--workload) must register a backend via @register_backend
     before get_model_and_input() is called. Importing the workload file triggers
@@ -67,10 +58,6 @@ Custom backend interface (--compile-backend):
 Example:
     nsys profile --trace=cuda,nvtx --output=profile \\
         python scripts/run_workload.py --workload scripts/workload.py
-
-    # with replace_pattern passes:
-        python scripts/run_workload.py --workload scripts/workload.py \\
-            --fx-pass-module my_passes.py
 
     # with a custom registered backend:
         python scripts/run_workload.py --workload scripts/workload_optimized.py \\
@@ -114,27 +101,6 @@ def _load_workload(script_path: str):
         sys.exit(1)
     return module
 
-
-def _load_fx_passes(script_path: str) -> list[tuple[Callable, Callable]]:
-    """Load (pattern, replacement) pairs from a pass file exposing get_passes()."""
-    path = Path(script_path).resolve()
-    if not path.exists():
-        print(f"[run_workload] ERROR: fx-pass-module not found: {path}", flush=True)
-        sys.exit(1)
-    spec = importlib.util.spec_from_file_location("_fx_passes", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, "get_passes"):
-        print(
-            f"[run_workload] ERROR: {path.name} does not expose get_passes(). Add:\n\n"
-            "    def get_passes():\n"
-            "        return [(pattern_fn, replacement_fn), ...]\n",
-            flush=True,
-        )
-        sys.exit(1)
-    passes = module.get_passes()
-    print(f"[run_workload] Loaded {len(passes)} FX pass(es) from {path.name}", flush=True)
-    return passes
 
 
 def _wrap_nvtx(submod: fx.GraphModule, nvtx_text: str) -> None:
@@ -184,10 +150,7 @@ def _capture_partition_inputs(registry, example_inputs: list) -> dict:
     return captured
 
 
-def _make_dedup_backend(
-    passes: list[tuple[Callable, Callable]],
-    output_prefix: str,
-) -> tuple[Callable, dict]:
+def _make_dedup_backend(output_prefix: str) -> tuple[Callable, dict]:
     """
     Return (backend, state) for layer-deduplicating inductor compilation.
 
@@ -200,7 +163,7 @@ def _make_dedup_backend(
     re-calling the compiled model, to avoid dynamo re-tracing under emit_nvtx.
     """
     from torch._inductor.compile_fx import compile_fx
-    from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner
+    from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
     _state: dict = {}
 
@@ -225,14 +188,7 @@ def _make_dedup_backend(
                 flush=True,
             )
 
-        # Step 2: Apply FX passes to unique reps (propagated to duplicates)
-        if passes:
-            runner = FxPassRunner(registry)
-            for i, (pattern, replacement) in enumerate(passes):
-                n = runner.apply_pass(pattern, replacement)
-                print(f"[run_workload] FX pass {i + 1}: {n} replacement(s)", flush=True)
-
-        # Step 3: Capture per-partition example inputs, then compile each unique
+        # Step 2: Capture per-partition example inputs, then compile each unique
         # representative with inductor. Duplicate partitions share the same
         # compiled callable as their representative.
         print("[run_workload] Capturing per-partition inputs...", flush=True)
@@ -305,21 +261,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--fx-pass-module", default=None,
-        help=(
-            "Path to a Python file exposing get_passes() -> list[(pattern, replacement)]. "
-            "Applies replace_pattern passes to unique subgraphs only and propagates "
-            "edits to all structural duplicates before nsys capture."
-        ),
-    )
-    parser.add_argument(
         "--compile-backend", default=None,
         help=(
             "Named torch.compile backend registered via @register_backend in the workload "
-            "file. When set, uses this backend instead of the built-in dedup+inductor "
-            "backend. The workload file is imported first (triggering @register_backend), "
-            "then torch.compile(model, backend=<name>) is called. Incompatible with "
-            "--fx-pass-module (which only applies within the built-in dedup backend)."
+            "file. The custom backend owns deduplication, FX passes, and compilation. "
+            "The workload file is imported first (triggering @register_backend), "
+            "then torch.compile(model, backend=<name>) is called."
         ),
     )
     parser.add_argument(
@@ -349,12 +296,6 @@ def main() -> None:
         print(f"[run_workload] Inductor debug artifacts → {debug_dir}", flush=True)
 
     if args.compile_backend:
-        if args.fx_pass_module:
-            print(
-                "[run_workload] WARNING: --fx-pass-module is ignored when --compile-backend "
-                "is set (FX passes are applied by the custom backend, not the dedup backend).",
-                flush=True,
-            )
         print(f"[run_workload] Compiling with custom backend '{args.compile_backend}'...", flush=True)
         # Wrap the registered backend to capture the compiled callable so we can
         # call it directly (bypassing Dynamo) for warmup and NVTX capture.
@@ -392,8 +333,7 @@ def main() -> None:
         else:
             run_fn = lambda: _compiled(x)
     else:
-        passes = _load_fx_passes(args.fx_pass_module) if args.fx_pass_module else []
-        dedup_backend, _state = _make_dedup_backend(passes, args.output_prefix)
+        dedup_backend, _state = _make_dedup_backend(args.output_prefix)
 
         # Trigger the backend: captures the FX graph, compiles unique partitions
         # with inductor, wraps NVTX ranges, writes .part.json.

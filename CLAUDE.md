@@ -29,7 +29,7 @@ nvidia/
     aggregator/           # metric aggregation, profile assembly
     capture/              # nsys runner, torch.profiler correlator, inductor extractor
     cli/                  # operator-profiler CLI (subcommands: profile, map, manifest)
-    fx/                   # UniqueSubgraphRegistry, FxPassRunner
+    fx/                   # UniqueSubgraphRegistry
     mapper/               # ManifestBuilder, AttributionEngine, KernelProfileOrchestrator
     schema/               # Pydantic models: manifest, metrics, profile
     utils/

@@ -29,9 +29,9 @@ Where `{workload_module_optimized}` is the dotted module path of the optimized w
 Expected: exit code 0, no traceback.
 If fails: report full traceback.
 
-Also verify the dedup imports are available (required for dedup-aware backends):
+Also verify the dedup import is available (required for dedup-aware backends):
 ```bash
-python -c "import sys; sys.path.insert(0, '{project_root}'); from nvidia.operator_profiler.fx import UniqueSubgraphRegistry, FxPassRunner; print('OK')"
+python -c "import sys; sys.path.insert(0, '{project_root}'); from nvidia.operator_profiler.fx import UniqueSubgraphRegistry; print('OK')"
 ```
 If this fails: `pip install -e .` from project root, or check PYTHONPATH includes project root.
 
