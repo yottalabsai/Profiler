@@ -1,0 +1,359 @@
+{
+  "analysis": {
+    "model": "conv_block",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "compile_mode": "inductor",
+    "dtype": "float32 (tf32 for cuDNN matmul)",
+    "total_profiled_wall_time_ms": 10.24,
+    "edge_case_flags": [
+      "fused_kernel_double_count"
+    ],
+    "time_budget": {
+      "layer::unique::prologue_0": {
+        "pct": 33.15,
+        "duration_ns": 359228,
+        "kernel_count": 39
+      },
+      "aten::cudnn_convolution_0": {
+        "pct": 26.55,
+        "duration_ns": 287644,
+        "kernel_count": 17,
+        "note": "double-counts kernels already attributed to layer::unique::prologue_0 via NVTX; same kernel_ids (k_00020-k_00051) appear in both"
+      },
+      "aten::cudnn_convolution op_id=33 [64->128ch, 16x64x64x64]": {
+        "pct": 8.00,
+        "duration_ns": 86655,
+        "kernel_count": 3
+      },
+      "aten::cudnn_convolution op_id=12 [64->128ch, 16x64x64x64]": {
+        "pct": 7.98,
+        "duration_ns": 86431,
+        "kernel_count": 3
+      },
+      "aten::cudnn_convolution op_id=39 [128->256ch, 16x128x32x32]": {
+        "pct": 7.04,
+        "duration_ns": 76287,
+        "kernel_count": 3
+      },
+      "aten::cudnn_convolution op_id=18 [128->256ch, 16x128x32x32]": {
+        "pct": 6.99,
+        "duration_ns": 75711,
+        "kernel_count": 3
+      },
+      "aten::_native_batch_norm_legit_no_training_0": {
+        "pct": 6.26,
+        "duration_ns": 67807,
+        "kernel_count": 14
+      },
+      "aten::cudnn_convolution op_id=7 [3->64ch, 16x3x64x64]": {
+        "pct": 1.36,
+        "duration_ns": 14752,
+        "kernel_count": 3
+      },
+      "aten::cudnn_convolution op_id=28 [3->64ch, 16x3x64x64]": {
+        "pct": 1.36,
+        "duration_ns": 14720,
+        "kernel_count": 3
+      }
+    }
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "priority": 1,
+      "operators": [
+        "layer::unique::prologue_0 (1 node)",
+        "aten::cudnn_convolution op_id=7 (1 node)",
+        "aten::cudnn_convolution op_id=12 (1 node)",
+        "aten::cudnn_convolution op_id=18 (1 node)",
+        "aten::cudnn_convolution op_id=28 (1 node)",
+        "aten::cudnn_convolution op_id=33 (1 node)",
+        "aten::cudnn_convolution op_id=39 (1 node)",
+        "aten::cudnn_convolution_0 (1 node)"
+      ],
+      "bottleneck": {
+        "description": "Every cuDNN convolution call pays two convertTensor_kernel format-conversion steps (NCHW->NHWC for input and weight) plus one NHWC->NCHW output re-layout kernel. The output re-layout 'Kernel' is the single largest consumer of GPU time in layer::unique::prologue_0 at 75,104 ns: it operates with 0% Tensor Core activity, 64-66% DRAM throughput, and eligible_cycles_pct=20% despite a grid of 1024x1x1. This maps to the nhwcToNchwKernel applied to the 16x64x64x64 feature map (16*64*64*64 / 4096 threads = 1024 blocks). All six cudnn_convolution operators use the sm80_xmma_fprop kernel which operates in NHWC format internally (nhwckrsc_nhwc suffix), confirming the round-trip NCHW->NHWC->NCHW is paid on every call. Within aten::cudnn_convolution_0, three such output-layout Kernel calls account for 223,805 ns (k_00027: 77,119 ns; k_00033: 70,559 ns; k_00046: 76,127 ns) — 77.8% of that operator's total measured time — while the actual GEMM kernels (k_00022, k_00041, sm80_xmma) account for only 17,920 ns combined.",
+        "evidence": {
+          "kernel": "Kernel (NHWC->NCHW output re-layout, k_00065)",
+          "total_launches": 3,
+          "total_duration_ns": 218747,
+          "fraction_of_op_time_pct": 60.9,
+          "counters": {
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 66.6,
+            "sm__warps_active.avg.pct_of_peak_sustained_active": 88.11,
+            "smsp__issue_active.avg.pct_of_peak_sustained_active": 20.41,
+            "launch__registers_per_thread": 20,
+            "grid_dim": "1024x1x1"
+          }
+        }
+      },
+      "transformation": {
+        "type": "memory_layout",
+        "description": "Convert all Conv2d weights to channels_last (NHWC) format and propagate channels_last through the activation tensor path. cuDNN then receives already-NHWC data and skips all convertTensor_kernel launches and the nhwcToNchwKernel output re-layout. This is an FX graph pass that rewrites placeholder nodes for conv weights to channels_last contiguous tensors and inserts a single torch.ops.aten.contiguous.memory_format node on the graph input when the first conv node's input is not already channels_last.",
+        "location": "All torch.ops.aten.convolution.default and torch.ops.aten.cudnn_convolution.default nodes in the FX graph.",
+        "fx_steps": [
+          "# Step 1: Pre-convert all Conv2d weight parameters to channels_last before tracing.",
+          "for name, module in model.named_modules():",
+          "    if isinstance(module, torch.nn.Conv2d):",
+          "        module.weight.data = module.weight.data.contiguous(memory_format=torch.channels_last)",
+          "",
+          "# Step 2: Apply channels_last to the full module so running stats and buffers are laid out correctly.",
+          "model = model.to(memory_format=torch.channels_last)",
+          "",
+          "# Step 3: FX pass — insert channels_last contiguous on graph input and tag conv nodes.",
+          "def apply_channels_last_pass(graph_module: torch.fx.GraphModule) -> torch.fx.GraphModule:",
+          "    graph = graph_module.graph",
+          "    # Find the first placeholder (model input)",
+          "    for node in graph.nodes:",
+          "        if node.op == 'placeholder':",
+          "            with graph.inserting_after(node):",
+          "                cl_node = graph.call_function(",
+          "                    torch.ops.aten.contiguous.memory_format,",
+          "                    args=(node,),",
+          "                    kwargs={'memory_format': torch.channels_last}",
+          "                )",
+          "            node.replace_all_uses_with(cl_node)",
+          "            cl_node.args = (node,)",
+          "            break",
+          "    graph.lint()",
+          "    graph_module.recompile()",
+          "    return graph_module",
+          "",
+          "# Step 4: Register as a Dynamo/Inductor custom pre-grad pass.",
+          "from torch._inductor import config as inductor_config",
+          "inductor_config.post_grad_custom_pre_pass = apply_channels_last_pass"
+        ],
+        "code_hint": "model = model.to(memory_format=torch.channels_last)\nx = x.contiguous(memory_format=torch.channels_last)\nmodel = torch.compile(model, mode='reduce-overhead')"
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 245000,
+        "duration_reduction_pct_of_total": 22.6,
+        "kernel_launches_eliminated": 18,
+        "memory_traffic_reduction": "Eliminates all convertTensor_kernel DRAM traffic (~36 KB per conv call x 6 calls = ~216 KB) and the NHWC->NCHW output re-layout DRAM traffic (~75 KB per conv call). Total format conversion overhead removed: ~97K ns from prologue_0 direct attribution + ~259K ns from the double-counted aten::cudnn_convolution_0."
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-2"],
+      "notes": "The dominant_kernel_id in prologue_0 is k_00065 (75,104 ns 'Kernel'), which matches grid 1024x1x1 and the expected block count for the 16x64x64x64 output tensor NHWC->NCHW pass. All six aten::cudnn_convolution operators with explicit size annotations confirm NHWC-format cuDNN GEMMs (nhwckrsc_nhwc in kernel name). The aten::convolution_0 operator, which is handled by Inductor/Triton, has ZERO convertTensor_kernel launches and runs in 4,928 ns for equivalent bias-addition work, confirming the Triton path avoids this overhead entirely. The double-count via fused_kernel_double_count edge case means the true unique GPU savings are measured from prologue_0 attribution, not the sum of all cudnn_convolution aggregates."
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": [
+        "aten::_native_batch_norm_legit_no_training_0 (1 node)",
+        "layer::unique::prologue_0 (1 node, fused BN-ReLU-Pool Triton kernels)"
+      ],
+      "bottleneck": {
+        "description": "All Triton BN-ReLU pointwise kernels are saturating DRAM bandwidth at FP32. The largest kernel triton_poi_fused__native_batch_norm_legit_no_training_relu_4 (k_00047) runs at 79-80% DRAM throughput on a 16384x1x1 grid reading and writing 16x256x64x64 FP32 tensors. The triton_poi_fused__native_batch_norm_legit_no_training_max_pool2d_with_indices_relu_5 (k_00048) runs at 83-84% DRAM throughput. These kernels have 0% Tensor Core activity (as expected for elementwise ops) and eligible_cycles_pct of 33-36%, indicating they are not latency-bound — they are purely DRAM-bandwidth-bound. Switching activations to BF16 halves the bytes-per-element from 4 to 2, halving DRAM traffic for these kernels and enabling proportional speedup up to the arithmetic throughput limit.",
+        "evidence": {
+          "kernel": "triton_poi_fused__native_batch_norm_legit_no_training_relu_4 (k_00047)",
+          "total_launches": 6,
+          "total_duration_ns": 75456,
+          "fraction_of_op_time_pct": 18.75,
+          "counters": {
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 80.27,
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
+            "sm__warps_active.avg.pct_of_peak_sustained_active": 82.01,
+            "smsp__issue_active.avg.pct_of_peak_sustained_active": 35.72,
+            "launch__registers_per_thread": 20,
+            "grid_dim": "16384x1x1"
+          }
+        }
+      },
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Promote activation tensors to torch.bfloat16 (preferred over float16 on Blackwell due to native BF16 hardware support and better numerical range). Conv weights and BN parameters also move to BF16. BN accumulation (running_mean, running_var) stays in FP32 via PyTorch's internal upcast path in _native_batch_norm_legit_no_training, which already accumulates in FP32 internally. The FX pass inserts a to(bfloat16) cast node after the graph input placeholder and ensures all Conv2d weight placeholder nodes are cast or replaced with BF16 parameters.",
+        "location": "Graph input placeholder node; all torch.ops.aten.convolution.default weight arguments; torch.ops.aten._native_batch_norm_legit_no_training.default nodes.",
+        "fx_steps": [
+          "# Step 1: Convert model parameters to BF16 before compilation.",
+          "model = model.bfloat16()",
+          "",
+          "# Step 2: FX pass — insert BF16 cast on graph input.",
+          "def apply_bf16_cast_pass(graph_module: torch.fx.GraphModule) -> torch.fx.GraphModule:",
+          "    graph = graph_module.graph",
+          "    for node in graph.nodes:",
+          "        if node.op == 'placeholder':",
+          "            with graph.inserting_after(node):",
+          "                cast_node = graph.call_method('to', args=(node,), kwargs={'dtype': torch.bfloat16})",
+          "            node.replace_all_uses_with(cast_node)",
+          "            cast_node.args = (node,)",
+          "            break",
+          "    graph.lint()",
+          "    graph_module.recompile()",
+          "    return graph_module",
+          "",
+          "# Alternatively, use torch.autocast at inference time:",
+          "# with torch.autocast(device_type='cuda', dtype=torch.bfloat16):",
+          "#     output = compiled_model(x)"
+        ],
+        "code_hint": "model = model.bfloat16().to(memory_format=torch.channels_last)\nwith torch.autocast(device_type='cuda', dtype=torch.bfloat16):\n    output = model(x.bfloat16())"
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 38000,
+        "duration_reduction_pct_of_total": 3.5,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "Halves activation DRAM traffic for all pointwise BN-ReLU-Pool kernels. The triton_poi_fused_bn_relu_4 kernel (16384x256 threads, 79% DRAM) would drop from ~12,600 ns to ~6,300 ns. The triton_poi_fused_bn_pool_relu_5 (83% DRAM) would drop from ~6,100 ns to ~3,100 ns. The three instances of these across prologue_0 and _native_batch_norm_0 save ~38K ns. Additionally, cuDNN GEMM tiles for BF16 are typically 2x wider than TF32, which may improve wave utilization for the 64->128 and 128->256 convolutions (see OPT-3)."
+      },
+      "confidence": "medium",
+      "prerequisite_for": ["OPT-3"],
+      "notes": "OPT-1 (channels_last) should be applied first so that BF16 activations are already in NHWC layout when entering cuDNN, maximizing alignment between dtype and format optimizations. BN running stats must remain float32 — torch.nn.BatchNorm2d keeps running_mean and running_var as float32 buffers regardless of input dtype when using _native_batch_norm_legit_no_training, so no numerical precision action needed for inference. Verify model output accuracy with BF16 before deploying."
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": [
+        "aten::cudnn_convolution op_id=12 [64->128ch] (1 node)",
+        "aten::cudnn_convolution op_id=18 [128->256ch] (1 node)",
+        "aten::cudnn_convolution op_id=33 [64->128ch] (1 node)",
+        "aten::cudnn_convolution op_id=39 [128->256ch] (1 node)"
+      ],
+      "bottleneck": {
+        "description": "The dominant cuDNN convolution kernels for the 64->128ch and 128->256ch layers (the unnamed 'Kernel' entries) exhibit severe wave starvation: sm_warps_active is consistently 8.32-8.34% despite achieving 60-73% Tensor Core activity and 58-64% SM throughput. For op_id=12 (k_00084, grid 1024x1x1): with ~120 SMs on Blackwell, ceil(1024/120)=9 waves, each wave occupying all SMs for roughly 8,500 ns, totalling ~76,768 ns. For op_id=18 and op_id=39 (grid 512x1x1): ceil(512/120)=5 waves at ~13,680 ns each, totalling ~68,415 ns. The per-warp Tensor Core utilization is high (SM throughput 58-64%) but the number of active warps per SM is minimal (8.3%), meaning SMs spend most cycles idle between CTA waves. The root cause is that the cuDNN tiling selects a large per-block tile (150 registers, 73KB shared memory) that maximises per-CTA arithmetic intensity but minimises the total CTA count, starving the SM array.",
+        "evidence": {
+          "kernel": "Kernel (cuDNN 64->128ch NHWC GEMM, k_00084)",
+          "total_launches": 4,
+          "total_duration_ns": 325873,
+          "fraction_of_op_time_pct": 96.3,
+          "counters": {
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 73.25,
+            "sm__throughput.avg.pct_of_peak_sustained_elapsed": 64.2,
+            "sm__warps_active.avg.pct_of_peak_sustained_active": 8.32,
+            "lts__t_sector_hit_rate.pct": 88.67,
+            "launch__registers_per_thread": 150,
+            "launch__shared_mem_per_block_dynamic": 73.73,
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 6.81,
+            "grid_dim": "1024x1x1"
+          }
+        }
+      },
+      "transformation": {
+        "type": "batch_padding",
+        "description": "Increase the effective batch dimension to force a larger CTA grid, eliminating wave starvation. Two approaches: (a) If multiple input samples are available, increase batch size from 16 to a multiple that produces grid sizes divisible into more waves — e.g., batch=32 doubles grid from 512 to 1024 for 128->256 conv, increasing from 5 to 9 waves and proportionally improving throughput. (b) Use torch.compile mode='max-autotune' to trigger Inductor's autotuner, which will search for conv algorithms with smaller per-block tiles (fewer registers, smaller smem) that yield more CTAs per SM and better occupancy on this specific Blackwell topology. The FX intervention is to emit torch._inductor.config directives that disable cuDNN and route these convolutions through Inductor's Triton conv backend, which autotunes tile sizes for the local SM count.",
+        "location": "torch.ops.aten.convolution.default nodes where input spatial is 64x64 (64->128ch) and 32x32 (128->256ch).",
+        "fx_steps": [
+          "# Option A: Increase batch size at the call site to amortise wave overhead.",
+          "# batch=32 for 128->256 conv doubles the grid from 512 to 1024 CTAs.",
+          "",
+          "# Option B: Disable cuDNN fallback in Inductor to force Triton conv autotuning.",
+          "import torch._inductor.config as inductor_config",
+          "inductor_config.max_autotune = True",
+          "inductor_config.max_autotune_conv = True  # enables Triton conv kernel search",
+          "inductor_config.coordinate_descent_tuning = True",
+          "",
+          "# Option C: FX pass to insert a reshape+expand to pad batch to nearest multiple of SM count.",
+          "def pad_batch_for_wave_alignment(graph_module: torch.fx.GraphModule, sm_count: int = 120) -> torch.fx.GraphModule:",
+          "    # For each conv node, if the expected grid < 2*sm_count, suggest batch padding.",
+          "    # Implementation: wrap the model call with a vmap over sub-batches padded to fill waves.",
+          "    # This is a profiling-guided transformation, not a static graph rewrite.",
+          "    pass",
+          "",
+          "model = torch.compile(model, mode='max-autotune')"
+        ],
+        "code_hint": "# Recommended: recompile with max-autotune after applying OPT-1 and OPT-2\nmodel = torch.compile(\n    model.bfloat16().to(memory_format=torch.channels_last),\n    mode='max-autotune'\n)"
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 60000,
+        "duration_reduction_pct_of_total": 5.5,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "No direct DRAM reduction. Wave utilisation improvement from 5-9 waves to 10-18 waves (via batch doubling or smaller tile autotuning) could reduce the 128->256 'Kernel' from 68,415 ns to ~45,000 ns and the 64->128 'Kernel' from 76,768 ns to ~52,000 ns, saving ~48K ns across the 4 affected ops. Additional BF16-enabled larger-tile cuDNN kernels (from OPT-2) may further improve SM throughput from 58-64% toward 75-80%."
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "This OPT is naturally applied after OPT-1 and OPT-2: channels_last removes format-conversion overhead (making wave starvation the next bottleneck), and BF16 enables cuDNN to select native Blackwell BF16 kernels with different tile geometries. The sm80_xmma kernel name (Ampere-generation) appearing on Blackwell hardware is anomalous — torch 2.11+cu128 may not yet have Blackwell-native cuDNN kernels registered, in which case mode='max-autotune' with Triton convolution is the more reliable path to improvement. SM count of 120 is assumed for RTX PRO 6000 Blackwell; verify via torch.cuda.get_device_properties(0).multi_processor_count and adjust batch-padding targets accordingly."
+    },
+    {
+      "id": "OPT-4",
+      "priority": 4,
+      "operators": [
+        "aten::cudnn_convolution op_id=7 [3->64ch] (1 node)",
+        "aten::cudnn_convolution op_id=28 [3->64ch] (1 node)"
+      ],
+      "bottleneck": {
+        "description": "The 3->64ch convolution (input [16,3,64,64], weight [64,3,3,3]) dispatches to the sm80_xmma_fprop_implicit_gemm_indexed_wo_smem_tf32f32_tf32f32_f32_nhwckrsc_nhwc_tilesize128x32x16_stage1_warpsize4x1x1 kernel, which is the least capable algorithm variant in the cuDNN library: 'indexed_wo_smem' means no shared-memory data staging (zero data reuse through smem), 'stage1' means a single-stage pipeline with no latency hiding, and 'warpsize4x1x1' means only 4 warps per block. This yields only 15.4-15.75% Tensor Core utilisation and 26.37-26.96% SM throughput. For comparison, the 64->128ch convolution's 'Kernel' achieves 73% TC and 64% SM throughput on the same hardware. The underlying reason is that with only 3 input channels, the K-dimension of the GEMM is 3*3*3=27 — far smaller than the 16-element aligned minimum for efficient TF32 WMMA tiles, forcing the indexed (gather-scatter) algorithm path without shared memory staging.",
+        "evidence": {
+          "kernel": "sm80_xmma_fprop_implicit_gemm_indexed_wo_smem_tf32f32_tf32f32_f32_nhwckrsc_nhwc_tilesize128x32x16_stage1_warpsize4x1x1_g1_tensor16x8x8_aligna4_alignc8_execute_kernel__5x_cudnn (k_00022)",
+          "total_launches": 6,
+          "total_duration_ns": 53824,
+          "fraction_of_op_time_pct": 30.1,
+          "counters": {
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 15.4,
+            "sm__throughput.avg.pct_of_peak_sustained_elapsed": 26.37,
+            "sm__warps_active.avg.pct_of_peak_sustained_active": 26.14,
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 3.86,
+            "lts__t_sector_hit_rate.pct": 76.54,
+            "launch__registers_per_thread": 128,
+            "grid_dim": "2x512x1"
+          }
+        }
+      },
+      "transformation": {
+        "type": "fusion",
+        "description": "Route the 3->64ch convolution through the Inductor Triton path rather than cuDNN. Inductor's Triton conv kernel uses im2col + matmul tiling that is not restricted by the cuDNN WMMA alignment constraint and can be autotuned for the specific K=27 dimension. Additionally, zero-padding the input channels from 3 to 4 (a minimal NHWC-alignment trick) allows cuDNN to use the non-indexed smem-staging GEMM path with aligned K dimension. The FX pass intercepts the aten.convolution.default node for the 3-channel input conv and either (a) inserts an F.pad on the input and adjusts the weight placeholder, or (b) tags the node with an annotation that routes Inductor's fallback to its own Triton mm-based conv rather than dispatching to aten::cudnn_convolution.",
+        "location": "torch.ops.aten.convolution.default node where args[0] (input) has shape [N, 3, H, W] — identifiable at compile time via node.meta['val'].shape[1] == 3.",
+        "fx_steps": [
+          "import torch",
+          "import torch.fx as fx",
+          "import torch.nn.functional as F",
+          "",
+          "def pad_shallow_conv_pass(graph_module: torch.fx.GraphModule) -> torch.fx.GraphModule:",
+          "    graph = graph_module.graph",
+          "    for node in list(graph.nodes):",
+          "        if node.op != 'call_function':",
+          "            continue",
+          "        if node.target not in (torch.ops.aten.convolution.default,",
+          "                               torch.ops.aten.cudnn_convolution.default):",
+          "            continue",
+          "        input_node = node.args[0]",
+          "        weight_node = node.args[1]",
+          "        # Only target 3-channel input convolutions",
+          "        try:",
+          "            in_channels = input_node.meta['val'].shape[1]",
+          "        except (AttributeError, KeyError, IndexError):",
+          "            continue",
+          "        if in_channels != 3:",
+          "            continue",
+          "        # Insert zero-pad on channel dim: [N,3,H,W] -> [N,4,H,W]",
+          "        with graph.inserting_before(node):",
+          "            padded_input = graph.call_function(",
+          "                torch.ops.aten.constant_pad_nd.default,",
+          "                args=(input_node, [0, 0, 0, 0, 0, 1], 0.0),",
+          "            )",
+          "            # Also pad weight on in_channel dim: [64,3,3,3] -> [64,4,3,3]",
+          "            padded_weight = graph.call_function(",
+          "                torch.ops.aten.constant_pad_nd.default,",
+          "                args=(weight_node, [0, 0, 0, 0, 0, 1], 0.0),",
+          "            )",
+          "        # Replace input and weight args",
+          "        new_args = (padded_input, padded_weight) + node.args[2:]",
+          "        node.args = new_args",
+          "    graph.lint()",
+          "    graph_module.recompile()",
+          "    return graph_module",
+          "",
+          "# Alternatively, force Triton dispatch by disabling cuDNN for this op:",
+          "# torch._inductor.config.conv_1x1_as_mm = True  # for 1x1; for 3x3 use max_autotune_conv",
+          "# torch._inductor.config.max_autotune_conv = True"
+        ],
+        "code_hint": "# The channel-padding approach is surgical and avoids touching the model architecture.\n# The padded channel contributes zero to the convolution output (zero-weight column).\n# Validate output numerically before deploying — the extra zero column must be matched\n# in the weight tensor (zero-padded rows), which this FX pass does correctly."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 20000,
+        "duration_reduction_pct_of_total": 1.85,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "The sm80_xmma_indexed_wo_smem algorithm reads weights and inputs with gather-scatter patterns (no reuse). Switching to the smem-staging GEMM or Triton mm path enables shared memory tiling of the weight matrix, reducing L2 pressure. Estimated TC utilisation improvement from 15% to 40-50%, reducing the 3->64ch GEMM from ~9,000 ns to ~4,000-5,000 ns per call. Combined with format conversion elimination (OPT-1), total savings for the two 3->64ch ops: ~20K ns."
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "The channel-padding trick (3->4 input channels) is a well-known workaround for cuDNN's alignment requirement on the K dimension of the implicit GEMM. The padded column of zeros in both input and weight does not alter the mathematical output. An alternative with lower implementation risk is to simply compile with mode='max-autotune', which triggers Inductor's Triton convolution autotuner and may select a better algorithm without any graph surgery. The sm80_xmma kernel name on Blackwell hardware suggests PyTorch 2.11+cu128 may be using Ampere-generation cuDNN heuristics; upgrading cuDNN or setting CUDNN_CONV_WGRAD_ALGO_B to a benchmark mode may resolve the algorithm selection issue without any code changes."
+    }
+  ],
+  "global_notes": [
+    "4 operators below 1% threshold omitted (combined 1.31% of attributed time): aten::convolution_0 (0.46%), aten::addmm_0 (0.29%), aten::addmm op_id=21 (0.28%), aten::addmm op_id=42 (0.29%).",
+    "fused_kernel_double_count: The aten::cudnn_convolution_0 operator (26.55% of attributed time) shares kernel_ids k_00020 through k_00051 with layer::unique::prologue_0. These kernels execute once on the GPU but are attributed to both operators — one via torch_profiler CUPTI correlation (high confidence) and once via NVTX range enclosure (medium confidence). The true unique GPU time per forward pass is best estimated from layer::unique::prologue_0 alone (359,228 ns kernel-sum). All percentage impact estimates for OPT-1 through OPT-4 are computed against total_attributed_ns=1,083,443 to preserve comparability with the time_budget table, but real-world improvements should be benchmarked against wall-clock time for a single forward pass.",
+    "Architecture assumption: NVIDIA RTX PRO 6000 Blackwell Server Edition SM count assumed to be ~120 based on published specifications. Verify with torch.cuda.get_device_properties(0).multi_processor_count before applying OPT-3 batch-padding targets. The device uses Blackwell microarchitecture (warp_cycles_per_instruction counter removed; eligible_cycles_pct < 20% used as latency-bound indicator throughout).",
+    "The sm80_xmma_fprop kernel name prefix (Ampere generation sm80) appearing on a Blackwell device is anomalous. This may indicate that cuDNN in torch 2.11+cu128 is falling back to Ampere-generation heuristics for this GPU model, which would explain the suboptimal algorithm selection (indexed_wo_smem, stage1 pipeline). Upgrading to a PyTorch build with native Blackwell/sm100 cuDNN support may resolve OPT-3 and OPT-4 bottlenecks without any code changes.",
+    "All duration_ns values are inflated 2-5x by ncu counter-collection overhead and are used only for relative comparison within this profile, not as absolute latency estimates.",
+    "The aten::_native_batch_norm_legit_no_training_0 BN-ReLU kernels are already well-optimized by Inductor (fused BN+ReLU+MaxPool in a single Triton kernel). The 79-84% DRAM throughput indicates these are within 15-20% of the hardware DRAM bandwidth ceiling at FP32. The primary remaining lever is dtype reduction (OPT-2).",
+    "prologue_0 kernel_count=39: with an estimated 13-16 unique kernels per forward pass, this suggests approximately 2-3 iterations were captured under the prologue NVTX range, consistent with warmup iterations being included in the NVTX attribution window. The warm_up_inflation flag was not set because measure_iters is absent from capture_metadata, making this indeterminate."
+  ]
+}
