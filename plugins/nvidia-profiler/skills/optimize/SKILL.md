@@ -19,7 +19,7 @@ The single command that drives the complete GPU optimization pipeline. Pass your
 
 ## Pre-Flight Check
 
-Before starting any stage, run `/preflight` to validate the full environment. If any required check fails, report the failure and fix to the user before proceeding. The preflight output is authoritative — do not attempt to work around failures by adjusting commands.
+Before starting any stage, run `/preflight` to validate the full environment. If any required check fails, report the failure to the user and fix it before proceeding. The preflight output is authoritative — do not attempt to work around failures by adjusting commands.
 
 ```
 /preflight
