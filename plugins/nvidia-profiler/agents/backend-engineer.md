@@ -25,16 +25,11 @@ Before writing any code, fetch the current PyTorch FX API documentation via cont
 - Fetch `torch._dynamo.register_backend` registration protocol
 - Fetch `torch._inductor.compile_fx` to confirm the function signature
 
-**If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative implementation reference. It contains canonical, tested implementations of all supported FX passes (QKV fusion, SDPA replacement, BN fold, pre-transposed weights, SiLU/GEGLU gated activation fusion, and tanh→GELU substitution). Includes stubs for GQA detection and RoPE detection. The Critical Rules section below encodes the most important API constraints. Proceed without live docs — do not block code generation on context7 availability.
+**If context7 is unavailable:** Use `knowledge/fx-patterns.md` as the authoritative implementation reference. Do not block code generation on context7 availability.
 
 ## Output Files
 
-All output files must be written to the **same directory as the workload file**, not to the current working directory. Resolve the workload file's absolute path first, then write all outputs there.
-
-```
-workload_path = /abs/path/to/examples/gpt2/gpt2.py   (resolved)
-workload_dir  = /abs/path/to/examples/gpt2/           (workload_path.parent)
-```
+All output files must be written to the **same directory as the workload file**, not to the current working directory.
 
 1. `{workload_dir}/{workload_basename}_optimized.py` — the optimized workload with custom backend
 2. `{workload_dir}/test_{workload_basename}_optimized.py` — validation test script
