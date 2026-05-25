@@ -1,6 +1,6 @@
 # Attribution Edge Cases
 
-The 8 edge cases handled by `attribution_engine.py`, written for users reading `profile.json` directly. Each entry describes the data signature, impact on metric validity, and recommended action.
+The 11 edge cases handled by `attribution_engine.py`, written for users reading `profile.json` directly. Each entry describes the data signature, impact on metric validity, and recommended action.
 
 ---
 

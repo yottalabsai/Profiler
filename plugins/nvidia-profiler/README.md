@@ -75,31 +75,27 @@ The primary entry point. Orchestrates all 6 stages and writes every artifact.
 /optimize workload_a.py workload_b.py            # batch multiple workloads
 ```
 
-**The 6 stages:**
+**The 7 stages:**
 
 | Stage | Agent | Output | Skip condition |
 |---|---|---|---|
-| 0. Capture baseline | capture-agent | `profile.json` | exists + `--resume` |
-| 1. Propose optimizations | optimization-strategist | `optimizations.json` | exists + `--resume` |
-| 2. Generate backend | backend-engineer | `{workload}_optimized.py`, `test_*.py`, `implementation_notes.md` | exists + `--resume` |
-| 3. Validate backend | validation-agent | `validation_report.json` | — (always runs; blocks Stage 4 if fails) |
-| 4. Re-capture optimized | capture-agent | `profile_optimized.json` | exists + `--resume` |
+| 0. Capture baseline | capture-agent | `profile.json` | `--from` set to later stage |
+| 1. Propose optimizations | optimization-strategist | `optimizations.json` | `--from` set to later stage |
+| 2. Generate backend | backend-engineer | `{workload}_optimized.py`, `test_*.py`, `profiler_output/implementation_notes.md` | `--from` set to later stage |
+| 3. Validate backend | validation-agent | `profiler_output/validation_report.json` | — (always runs; blocks Stage 4 if fails) |
+| 4. Re-capture optimized | capture-agent | `profile_optimized.json` | `--from` set to later stage |
+| 4.5. Cleanup | — | *(removes `profiler_output/*_inductor_debug/`)* | — |
 | 5. Report | — | `report.md` | — |
 
 **Configuration options:**
 
 | Option | Default | Description |
 |---|---|---|
-| `--compile-backend` | *(none)* | Named `@register_backend` backend for optimized workloads. Omit for baseline profiling (uses built-in dedup+inductor). Pass at Stage 5 for optimized workloads with complex FX passes. |
-| `--warmup-iters` | `2` | Must match between Stage 0 and Stage 4 |
-| `--measure-iters` | `2` | Must match between Stage 0 and Stage 4 |
-| `--ncu-sudo` | `auto` | `auto` detects, `true` forces, `false` skips |
-| `--ncu-path` / `--nsys-path` | `auto` | Explicit path to profiler executables |
-| `--confidence-threshold` | `medium` | Only implement optimizations at or above this level |
-| `--max-optimizations` | `10` | Cap number of proposals from Stage 2 |
-| `--resume` | `false` | Skip stages whose output artifact already exists |
-| `--from` | `capture` | Stage to resume from (with `--resume`) |
-| `--audience` | `team` | Report audience: `team` or `executive` |
+| `--from` | `capture` | Start pipeline from this stage; all earlier stages are skipped (`capture`, `propose`, `backend`, `validate`, `report`) |
+| `--compile-backend` | *(none)* | Named `@register_backend` backend for optimized workloads. Required for Stage 4 when the optimized workload uses complex FX passes. |
+| `--ncu-sudo` | `auto` | `auto` detects, `true` forces, `false` skips sudo for ncu |
+| `--min-confidence` | *(none)* | Only include proposals at or above this confidence level (`high`, `medium`, `low`) |
+| `--max-opts` | *(unlimited)* | Cap number of proposals from Stage 1 |
 
 **Edge case handling:**
 
@@ -120,7 +116,6 @@ Runs the complete nsys + ncu pipeline on a workload and produces `profile.json` 
 /capture workload.py
 /capture workload.py --ncu-sudo=true                               # force sudo for ncu
 /capture workload.py --profile-name=optimized                      # → profile_optimized.json
-/capture workload.py --warmup-iters=5 --measure-iters=5            # more iterations for lower variance
 /capture workload_optimized.py --compile-backend=my_model_opt      # profile optimized workload
 ```
 
@@ -209,7 +204,7 @@ Generates a production-ready `workload_optimized.py` implementing the proposed o
 **Outputs:**
 - `{workload}_optimized.py` — custom backend with FX graph passes; imports baseline `get_model_and_input()` and wraps it
 - `test_{workload}_optimized.py` — pytest suite with 4 required tests
-- `implementation_notes.md` — backend architecture and design rationale (ingested by `/report`)
+- `profiler_output/implementation_notes.md` — backend architecture and design rationale (ingested by `/report`)
 
 **Generated backend structure:**
 
@@ -273,8 +268,6 @@ Generates `report.md` summarizing the complete optimization lifecycle.
 
 ```
 /report
-/report --audience=executive    # executive summary without raw metrics
-/report --output=my_report.md
 ```
 
 Covers: hardware context, bottleneck classification with evidence, transformations applied and which patterns matched, measured speedup with kernel count before/after, reproduction commands, and known caveats (ncu replay timing, unattributed kernels).
@@ -289,7 +282,7 @@ The plugin ships 4 specialized agents. The `/optimize` skill orchestrates them i
 
 Orchestrates the full nsys + ncu profiling pipeline (Stages 0a-pre through 0d). Handles executable auto-detection, sudo permission detection, PYTHONPATH propagation under `sudo env KEY=VAL`, and `--script-args` ordering enforcement.
 
-**Tools:** `Bash`, `Read`, `Glob`
+**Tools:** `Bash`, `Read`, `Glob`, `Skill`
 
 ### `optimization-strategist`
 
@@ -299,7 +292,7 @@ Reads `profile.json` directly. Derives time budget, edge case flags, and archite
 
 ### `backend-engineer`
 
-Generates `{workload}_optimized.py` from `optimizations.json`. Implements each FX graph pass defensively (pattern detection before mutation, `gm.graph.lint()` after each mutation, graceful fallback on pattern miss). Also generates the test script and `implementation_notes.md`.
+Generates `{workload}_optimized.py` from `optimizations.json`. Implements each FX graph pass defensively (pattern detection before mutation, `gm.graph.lint()` after each mutation, graceful fallback on pattern miss). Also generates the test script and `profiler_output/implementation_notes.md`.
 
 **Tools:** `Read`, `Write`, `Edit`, `Bash`, `mcp__context7`
 
@@ -322,6 +315,11 @@ The plugin registers four automatic hooks that fire during your Claude Code sess
 ```
 [profiler-plugin] Commands: /preflight /capture /propose /backend /validate /report /optimize
 ```
+
+### Session start preflight
+
+**Trigger:** Session opens  
+**Action:** Runs `nvidia/scripts/preflight.py` automatically and prints the result. Validates packages, CUDA, nsys, and ncu before any work begins. If any check fails, the output tells you what to fix before capturing.
 
 ### Post-write: profile.json → suggest `/propose`
 
@@ -365,7 +363,7 @@ The plugin bundles a reference knowledge base used by the optimization-strategis
 
 ### `knowledge/hardware-limits.md`
 
-GPU database covering 12 architectures (A100, H100, H200, B100, B200, RTX 4090, A10G, and more). Per-GPU data includes: SM count, peak TFLOPS for BF16/FP16/FP32, HBM bandwidth, ridge point (FLOP/byte), and Tensor Core tile requirements. Used by `/propose` for Waves/SM calculation and bottleneck calibration.
+GPU database covering 11 architectures (A100, H100, H200, B100, B200, RTX 4090, A10G, and more). Per-GPU data includes: SM count, peak TFLOPS for BF16/FP16/FP32, HBM bandwidth, ridge point (FLOP/byte), and Tensor Core tile requirements. Used by `/propose` for Waves/SM calculation and bottleneck calibration.
 
 ### `knowledge/fx-patterns.md`
 
@@ -373,7 +371,7 @@ Canonical FX graph pass implementations for every supported transformation type:
 
 ### `knowledge/edge-cases.md`
 
-The 8 attribution and metric edge cases that affect how `profile.json` data should be interpreted:
+The 11 attribution and metric edge cases that affect how `profile.json` data should be interpreted:
 
 | Edge case | Summary |
 |---|---|
@@ -385,10 +383,21 @@ The 8 attribution and metric edge cases that affect how `profile.json` data shou
 | Dynamic shapes | Wide variance across same operator's `call_index`; avoid batch padding |
 | Fused kernel multi-NVTX | `is_fused` kernels are shared; `aggregated` fields already account for this |
 | ncu replay timing | All `duration_ns` values are 2–5× real execution time — use for relative comparison only |
+| torch.compile graph breaks | Eager-mode kernels appear unattributed; FX passes have no effect on broken subgraphs |
+| Host-device synchronization stalls | `.item()`/`.cpu()` calls hide GPU idle time from `profile.json` |
+| SM occupancy misreporting | High shared-memory kernels show low occupancy as a hardware constraint, not wave starvation |
 
 ### `knowledge/schema-versions.md`
 
 `profile.json` schema versioning and backward compatibility notes. Documents the `schema_version` field, deprecated pre-v1.0 fields, and migration guidance.
+
+### `knowledge/capture-errors.md`
+
+Error lookup table for the nsys+ncu pipeline. Maps stderr patterns to their cause and exact remediation command. Referenced by the `capture-agent` when any pipeline stage produces unexpected output or exits non-zero.
+
+### `knowledge/validation-failures.md`
+
+Diagnosis guide for non-obvious validation failures in the 5-step validation sequence. Covers `TypeError: 'module' object is not callable`, dynamo cache hits masking backend execution, NaN outputs from BF16 overflow, and common FX graph mutation errors. Referenced by the `validation-agent`.
 
 ### `rules/gpu-optimization.md`
 
@@ -400,12 +409,14 @@ Bottleneck classification rules, fix strategies, and architecture-specific notes
 
 | File | Produced by | Contents |
 |---|---|---|
+| `profiler_output/{stem}.corr.json` | `/capture` | HIGH-confidence kernel→operator attribution map (from torch.profiler correlation pass) |
+| `profiler_output/{stem}.part.json` | `/capture` | Layer partition equivalence map for deduplication (built-in backend only) |
 | `profile.json` | `/capture` | Per-operator hardware metrics (20 counters per kernel) |
 | `optimizations.json` | `/propose` | Ranked FX transformation proposals with evidence, time budget, edge case flags, and `fx_steps[]` |
 | `{workload}_optimized.py` | `/backend` | Custom `torch.compile()` backend + `get_model_and_input()` wrapper |
 | `test_{workload}_optimized.py` | `/backend` | Pytest suite for the generated backend |
-| `implementation_notes.md` | `/backend` | Backend architecture and design rationale (ingested by `/report`) |
-| `validation_report.json` | `/validate` | 5-step pass/fail results + FX pass application summary |
+| `profiler_output/implementation_notes.md` | `/backend` | Backend architecture and design rationale (ingested by `/report`) |
+| `profiler_output/validation_report.json` | `/validate` | 5-step pass/fail results + FX pass application summary |
 | `profile_optimized.json` | `/capture --profile-name=optimized` | Hardware metrics for the optimized backend |
 | `report.md` | `/report` | Human-readable optimization lifecycle summary including per-operator speedup table |
 

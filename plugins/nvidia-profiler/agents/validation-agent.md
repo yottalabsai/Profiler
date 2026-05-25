@@ -107,3 +107,30 @@ Overall: READY FOR PROFILING
 ```
 
 If any step fails: `BLOCKED — Fix step N before profiling`. Do not proceed to profiling with a failing validation.
+
+## Writing validation_report.json
+
+After producing the summary above, write `validation_report.json` to `{workload_dir}/profiler_output/validation_report.json` (the same `profiler_output/` directory used by the capture pipeline). Write this file even if steps fail — record the failing step and set remaining steps to `null`.
+
+Schema:
+```json
+{
+  "file": "conv_block_optimized.py",
+  "steps": {
+    "syntax": "pass",
+    "import": "pass",
+    "registration": "pass",
+    "test_suite": "pass"
+  },
+  "passes": [
+    { "name": "pass_channels_last_layout", "status": "APPLIED", "detail": "" },
+    { "name": "pass_bf16_dtype", "status": "APPLIED", "detail": "" },
+    { "name": "pass_fuse_qkv", "status": "NOT_APPLIED", "detail": "pattern not found" }
+  ],
+  "overall": "READY_FOR_PROFILING"
+}
+```
+
+`steps` values: `"pass"`, `"fail"`, or `null` (step not reached due to earlier failure).
+`passes[].status` values: `"APPLIED"`, `"NOT_APPLIED"`, `"FAILED"`.
+`overall` values: `"READY_FOR_PROFILING"`, `"BLOCKED"`.
