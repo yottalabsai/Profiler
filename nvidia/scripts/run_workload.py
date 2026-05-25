@@ -125,11 +125,18 @@ def _capture_partition_inputs(registry, example_inputs: list) -> dict:
     These per-partition inputs are passed to compile_fx so inductor can compile
     each unique subgraph with concrete example shapes.
     """
+    from torch.fx._lazy_graph_module import _LazyGraphModule
+
     captured: dict = {}
     saved: dict = {}
 
     for name, submod in registry.split.named_children():
         if isinstance(submod, fx.GraphModule):
+            # Force _LazyGraphModule to recompile so submod.forward is the real
+            # generated function, not _lazy_forward (which calls self() creating
+            # infinite recursion when we monkey-patch submod.forward).
+            if isinstance(submod, _LazyGraphModule):
+                submod.real_recompile()
             saved[name] = submod.forward
 
             def _make_capturing(n: str, orig: Callable) -> Callable:

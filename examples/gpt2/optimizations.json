@@ -1,0 +1,269 @@
+{
+  "analysis": {
+    "model": "gpt2",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "compile_mode": "inductor",
+    "dtype": "float32",
+    "total_profiled_wall_time_ms": 44.1,
+    "edge_case_flags": [
+      "fused_kernel_double_count"
+    ],
+    "time_budget": {
+      "aten::mm": {
+        "pct": 66.4,
+        "duration_ns": 16700000,
+        "kernel_count": 324
+      },
+      "aten::addmm": {
+        "pct": 24.7,
+        "duration_ns": 6200000,
+        "kernel_count": 468
+      },
+      "aten::_efficient_attention_forward": {
+        "pct": 6.8,
+        "duration_ns": 1700000,
+        "kernel_count": 108
+      }
+    }
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "priority": 1,
+      "operators": [
+        "aten::mm (324 nodes)",
+        "aten::addmm (468 nodes)"
+      ],
+      "bottleneck": {
+        "description": "All GEMM kernels execute on the FP32 SIMT path with zero Tensor Core utilization. cuBLAS dispatches to 'Kernel2' (legacy SGEMM) when the input dtype is float32 and allow_tf32 is not set. On Blackwell, the FP32 SIMT path is 3-8x slower than the BF16 or TF32 Tensor Core path for the M=512, K=768/3072, N=768/2304/3072 shapes present here. The high eligible_cycles_pct (42-62%) confirms the SMs are issuing instructions, but through the CUDA core pipeline only — smsp__pipe_tensor_cycles_active is 0.0% for every single GEMM across both operator types. The L2 hit rate of 89-92% means weight reuse is strong, so DRAM bandwidth is not the limiter; compute throughput is.",
+        "evidence": {
+          "kernel": "Kernel2",
+          "total_launches": 792,
+          "total_duration_ns": 22900000,
+          "fraction_of_op_time_pct": 91.1,
+          "counters": {
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
+            "eligible_cycles_pct_range": "42.81 – 61.50",
+            "sm_throughput_pct_range": "38.39 – 52.68",
+            "dram_throughput_pct_range": "7.05 – 10.56",
+            "l2_hit_rate_range": "89.41 – 91.81",
+            "achieved_occupancy_range": "17.43 – 22.16",
+            "registers_per_thread_range": "80 – 128",
+            "tensor_core_active_pct": 0.0
+          }
+        }
+      },
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Two-level approach. Level A (immediate, no FX surgery): set torch.backends.cuda.matmul.allow_tf32 = True and torch.backends.cudnn.allow_tf32 = True before torch.compile. This routes FP32 GEMMs through the TF32 Tensor Core path (cuBLAS picks sm100-optimized kernels instead of Kernel2) while retaining FP32 accumulation. Level B (maximum performance, requires FX surgery): insert explicit BF16 casts around every torch.ops.aten.mm.default and torch.ops.aten.addmm.default node. Inputs are cast to BF16 before the GEMM; the output is cast back to FP32. This engages the highest-throughput Blackwell GEMM path. Level A is safer and requires no graph modification; Level B yields ~1.5-2x additional gain over Level A for these shapes.",
+        "location": "Every torch.ops.aten.mm.default and torch.ops.aten.addmm.default node in the compiled FX graph. Representative shape groups: [512,768]x[768,768] (attention output projection, 12 nodes), [512,768]x[768,3072] (FFN up-projection, 12 nodes), [512,3072]x[3072,768] (FFN down-projection, 12 nodes), [512,768]x[768,2304] (fused QKV projection via addmm, 12 nodes).",
+        "fx_steps": [
+          "# Level A — no FX surgery needed, run before torch.compile call:",
+          "torch.backends.cuda.matmul.allow_tf32 = True",
+          "torch.backends.cudnn.allow_tf32 = True",
+          "",
+          "# Level B — FX pass inserting BF16 casts around every GEMM:",
+          "def insert_gemm_bf16_casts(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:",
+          "    graph = gm.graph",
+          "    gemm_targets = {torch.ops.aten.mm.default, torch.ops.aten.addmm.default}",
+          "    for node in list(graph.nodes):",
+          "        if node.target not in gemm_targets:",
+          "            continue",
+          "        args = list(node.args)",
+          "        cast_args = []",
+          "        with graph.inserting_before(node):",
+          "            for arg in args:",
+          "                cast_node = graph.call_function(",
+          "                    torch.ops.aten.to.dtype, (arg, torch.bfloat16))",
+          "                cast_args.append(cast_node)",
+          "        node.args = tuple(cast_args)",
+          "        with graph.inserting_after(node):",
+          "            out_cast = graph.call_function(",
+          "                torch.ops.aten.to.dtype, (node, torch.float32))",
+          "        node.replace_all_uses_with(out_cast)",
+          "        out_cast.args = (node, torch.float32)",
+          "    graph.lint()",
+          "    gm.recompile()",
+          "    return gm"
+        ],
+        "code_hint": "For Level B, register the pass with Inductor via torch._inductor.compile_fx.compile_fx by wrapping the fx_graph argument, or apply it as a torch._dynamo backend that post-processes the graph before passing to inductor. Alternatively, use model.to(torch.bfloat16) before compilation to avoid the cast overhead entirely — Inductor will then natively emit BF16 GEMMs."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 13700000,
+        "duration_reduction_pct_of_total": 54.6,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "BF16 weight tensors halve the L2 working set per weight matrix; the existing 89-92% L2 hit rate means most weight data is already L2-resident, so the primary gain is compute throughput (3-5x more FLOP/s via Tensor Cores), not memory bandwidth."
+      },
+      "confidence": "high",
+      "prerequisite_for": [],
+      "notes": "The zero Tensor Core activity is the single highest-leverage finding in this profile. smsp__pipe_tensor_cycles_active = 0.0% on every GEMM is definitive — cuBLAS has chosen the SIMT path. On Blackwell (sm100), the default FP32 TF32 flag should be True in PyTorch 2.x, yet Kernel2 (the legacy non-TF32 SGEMM) is executing. This implies either (a) the workload script sets allow_tf32=False, (b) Inductor is emitting a custom GEMM that bypasses the cuBLAS allow_tf32 path, or (c) the model was compiled in a context where TF32 was disabled. Verify with torch.backends.cuda.matmul.allow_tf32 before committing to Level B."
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": [
+        "aten::_efficient_attention_forward (108 nodes)",
+        "aten::_scaled_dot_product_efficient_attention (12 nodes)"
+      ],
+      "bottleneck": {
+        "description": "The attention kernel 'fmha_cutlassF_f32_aligned_64x64_rf_sm80' has three simultaneous problems. First, it is compiled for sm80 (A100) and executing on a Blackwell sm100 device — it runs in emulation/compatibility mode and cannot use Blackwell-specific warp specialization or async copy improvements. Second, registers_per_thread=168 is extremely high (nearly hitting the 255-per-thread hardware limit), causing achieved_occupancy to collapse to 8.5% — the warp scheduler can only keep 1-2 warps resident per SM instead of the target 6-8. Third, local_memory_spills=49152 bytes per kernel launch confirms significant register file pressure spilling to slow local memory. Despite tensor_core_active_pct=32.3% (Tensor Cores are active when the SM is computing), the SM is only active 14.32% of wall time because wave occupancy is 1.0 — grid=[2,12,4]=96 blocks matches the estimated ~96-170 SM count of the RTX PRO 6000 Blackwell, leaving zero opportunity for latency hiding across waves. Additionally, four separate Triton kernels per transformer block prepare the causal mask tensor [4,12,128,128] that is then passed as a dense bias to efficient_attention, when the mask could be handled natively via is_causal=True inside the kernel with zero materialization cost.",
+        "evidence": {
+          "kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80",
+          "total_launches": 108,
+          "total_duration_ns": 1700000,
+          "fraction_of_op_time_pct": 100.0,
+          "counters": {
+            "tensor_core_active_pct": 32.3,
+            "eligible_cycles_pct": 21.32,
+            "sm_throughput_pct": 14.32,
+            "achieved_occupancy": 8.5,
+            "registers_per_thread": 168,
+            "local_memory_spills": 49152,
+            "dram_throughput_pct": 13.34,
+            "l2_hit_rate": 58.62,
+            "grid_blocks": 96,
+            "kernel_suffix_arch": "sm80 (wrong: device is Blackwell sm100)"
+          }
+        }
+      },
+      "transformation": {
+        "type": "fusion",
+        "description": "Replace the torch.ops.aten._scaled_dot_product_efficient_attention.default node (which selects the cutlass efficient_attention backend and requires a materialized attention bias) with torch.ops.aten.scaled_dot_product_attention.default using is_causal=True and attn_mask=None. This forces PyTorch's SDPA dispatcher to select the Flash Attention 3 or cuDNN SDPA backend, both of which (a) ship with Blackwell sm100 kernel code, (b) implement the causal mask within the fused kernel without materializing a [4,12,128,128] tensor, (c) use fewer registers per thread (typically 64-96 vs 168), and (d) have better wave pipelining at low grid occupancy. The upstream causal mask construction nodes — aten::constant_pad_nd, aten::where, aten::scalar_tensor, aten::cat, aten::slice, aten::expand, aten::transpose (the four 'triton_poi_fused__scaled_dot_product_efficient_attention_cat_constant_pad_nd_expand_scalar_tensor_slice_split_transpose_view_where_*' Triton kernels per block) — become dead code after this replacement and are eliminated by DCE.",
+        "location": "torch.ops.aten._scaled_dot_product_efficient_attention.default nodes (12 per forward pass, one per transformer block). Inputs observed: Q/K/V shape [4,12,128,64] (batch=4, heads=12, seq=128, head_dim=64), attn_bias shape [4,12,128,128] (materialized causal mask).",
+        "fx_steps": [
+          "import math",
+          "import torch",
+          "import torch.fx as fx",
+          "",
+          "def replace_efficient_attn_with_sdpa_causal(gm: fx.GraphModule) -> fx.GraphModule:",
+          "    \"\"\"",
+          "    Replace aten._scaled_dot_product_efficient_attention nodes that carry a",
+          "    materialized causal mask with aten.scaled_dot_product_attention(is_causal=True).",
+          "    Upstream mask-construction nodes become dead code and are eliminated by DCE.",
+          "    \"\"\"",
+          "    graph = gm.graph",
+          "    target = torch.ops.aten._scaled_dot_product_efficient_attention.default",
+          "",
+          "    for node in list(graph.nodes):",
+          "        if node.target != target:",
+          "            continue",
+          "        # Signature: (query, key, value, attn_bias, compute_log_sumexp,",
+          "        #              dropout_p, is_causal, scale=None)",
+          "        args = node.args",
+          "        kwargs = node.kwargs",
+          "        q, k, v = args[0], args[1], args[2]",
+          "        scale = kwargs.get('scale', args[7] if len(args) > 7 else None)",
+          "        # head_dim=64 → scale=0.125 if not explicitly provided",
+          "        if scale is None:",
+          "            scale = 1.0 / math.sqrt(64)",
+          "",
+          "        with graph.inserting_before(node):",
+          "            new_node = graph.call_function(",
+          "                torch.ops.aten.scaled_dot_product_attention.default,",
+          "                args=(q, k, v),",
+          "                kwargs={",
+          "                    'attn_mask': None,",
+          "                    'dropout_p': 0.0,",
+          "                    'is_causal': True,",
+          "                    'scale': scale,",
+          "                },",
+          "            )",
+          "",
+          "        # _scaled_dot_product_efficient_attention returns a tuple",
+          "        # (output, log_sumexp, seed, offset); downstream users index [0].",
+          "        # SDPA returns the output tensor directly — fix up getitem users.",
+          "        for user in list(node.users):",
+          "            if user.target == operator.getitem and user.args[1] == 0:",
+          "                user.replace_all_uses_with(new_node)",
+          "                graph.erase_node(user)",
+          "            # log_sumexp and philox outputs (indices 1-3) are not used in inference",
+          "",
+          "        graph.erase_node(node)",
+          "",
+          "    graph.eliminate_dead_code()",
+          "    graph.lint()",
+          "    gm.recompile()",
+          "    return gm"
+        ],
+        "code_hint": "Import operator (stdlib) for operator.getitem. If the model is in training mode, log_sumexp (getitem index 1) is consumed by the backward pass — verify no non-zero users of indices 1-3 before erasing. For inference only, indices 1-3 are always dead. The scale argument for GPT-2 small head_dim=64 is 1/sqrt(64)=0.125; pass it explicitly to avoid a second sqrt call inside the kernel."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 820000,
+        "duration_reduction_pct_of_total": 3.3,
+        "kernel_launches_eliminated": 144,
+        "memory_traffic_reduction": "Eliminates materialization of 12x [4,12,128,128] float32 causal mask tensors per forward pass (12 blocks × 3 measure iters = 36 mask tensors × 786,432 bytes each = 28.3 MB total avoided DRAM writes and reads across the measurement window). Also eliminates intermediate Q-transpose buffers allocated for the sm80 kernel's preferred layout."
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "The wave starvation issue (96 blocks, ~96-170 SM device) is fundamental to batch=4 seq=128 — it is not resolved by kernel replacement alone. Increasing batch size to 8 would double the grid to 192 blocks and provide 2 full waves. The confidence is medium rather than high because PyTorch 2.12's SDPA dispatcher behavior on RTX PRO 6000 Blackwell has not been profiled here — the dispatch may still fall back to efficient_attention if the Flash Attention 3 kernels are not compiled for this exact device. Verify post-change that the kernel name changes from fmha_cutlassF_f32_aligned_64x64_rf_sm80 to a flash_attn or cudnn kernel. If OPT-1 is also applied (BF16), the BF16 attention path is additionally beneficial because Flash Attention 3 BF16 kernels are highly optimized for Blackwell whereas the FP32 path has less coverage."
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": [
+        "aten::mm (324 nodes)",
+        "aten::addmm (468 nodes)"
+      ],
+      "bottleneck": {
+        "description": "Secondary analysis after OPT-1: if BF16 dtype promotion is applied, the per-GEMM achieved_occupancy of 17-22% (from the FP32 baseline) will shift. The grid configurations for the mm/addmm kernels are: [128,1,6]=768 blocks for [512x768x768], [64,3,5]=960 blocks for [512x768x3072] and [512x768x2304], [64,1,9]=576 blocks for [512x3072x768]. All of these provide 6-10 full waves on a ~96 SM device, so wave starvation is NOT the limiter for GEMMs — only for attention. However, for the attention output projection ([512,768]x[768,768], grid 128x6=768 blocks) and the FFN down-projection ([512,3072]x[3072,768], grid 64x9=576 blocks), there are many independent GEMMs across the 12 transformer layers that execute sequentially. Batching these 12 independent same-shaped GEMMs into a single strided-batched GEMM call (e.g., cublasSgemmStridedBatched) would reduce kernel launch overhead from 12 separate cuBLAS calls to 1 and enable the GPU scheduler to overlap them.",
+        "evidence": {
+          "kernel": "Kernel2",
+          "total_launches": 36,
+          "total_duration_ns": 888000,
+          "fraction_of_op_time_pct": 5.3,
+          "counters": {
+            "sm_throughput_pct_range": "38.39 – 52.68",
+            "eligible_cycles_pct_range": "42.81 – 47.70",
+            "kernel_launches_per_shape_per_iter": "12 sequential launches for each of 3 GEMM shapes"
+          }
+        }
+      },
+      "transformation": {
+        "type": "batch_padding",
+        "description": "Fuse the 12 per-layer mm calls of identical shape into a single torch.ops.aten.mm.default call on a batched tensor, or replace with torch.ops.aten.bmm.default where the batch dimension stacks the 12 layer outputs. The attention output projection ([512,768]x[768,768]) and FFN projections ([512,768]x[768,3072], [512,3072]x[3072,768]) execute 12 times sequentially with the same weight shape but different activations. Batching stacks activations to [12,512,768] and executes a single cuBLAS strided-batched GEMM, reducing launch overhead and allowing the GPU to better tile across the combined work.",
+        "location": "Groups of torch.ops.aten.mm.default nodes with identical input shapes that are topologically independent (no data dependency between layer i and layer j for same-shape GEMMs). Specifically, the 12 attention output projection nodes (each [512,768]x[768,768]), the 12 FFN up-projection nodes (each [512,768]x[768,3072]), and the 12 FFN down-projection nodes (each [512,3072]x[3072,768]).",
+        "fx_steps": [
+          "# Conceptual FX surgery (topology analysis required before implementation):",
+          "# 1. Collect all mm nodes grouped by (M, K, N) shape that have no mutual",
+          "#    data dependency (can be verified by checking if any node in group A",
+          "#    appears in the transitive inputs of any node in group B).",
+          "# 2. For independent same-shape mm groups of size G:",
+          "#    a. Insert torch.ops.aten.stack.default on the list of input tensors",
+          "#       to create [G, M, K] and [G, K, N] batched tensors.",
+          "#    b. Replace the G individual mm nodes with a single bmm.default call",
+          "#       on the stacked inputs: bmm([G,M,K], [G,K,N]) -> [G,M,N].",
+          "#    c. Insert G individual torch.ops.aten.select.int(result, 0, i) nodes",
+          "#       to recover the per-layer [M,N] tensors for downstream users.",
+          "# 3. If weights are shared (same weight matrix across all 12 layers),",
+          "#    broadcast the weight rather than stacking: only stack activations,",
+          "#    use mm([G*M, K], [K, N]) with a reshape.",
+          "",
+          "# NOTE: GPT-2 has DISTINCT weight matrices per layer, so weights must also",
+          "# be stacked. This requires the weight parameters to be pre-stacked into a",
+          "# single [12, K, N] buffer at model construction time.",
+          "# This is a significant model-level change, not a pure FX-level optimization."
+        ],
+        "code_hint": "The most practical implementation path is not FX surgery but rather restructuring the model to use a single batched linear layer that processes all 12 layers' activations in one call. For an FX-only approach, use torch.fx.passes.utils.source_matcher_utils to identify the 12-node groups by shape, then apply the stack/bmm/unstack pattern. Note that since GPT-2 uses residual connections (layer i output feeds layer i+1 input), only same-level projections within a single forward pass are independent, not cross-layer ones."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 1200000,
+        "duration_reduction_pct_of_total": 4.8,
+        "kernel_launches_eliminated": 33,
+        "memory_traffic_reduction": "Negligible; primary gain is reduced kernel launch latency (~5-10 microseconds per eliminated launch on Blackwell) and improved cuBLAS tile scheduling across the batched work."
+      },
+      "confidence": "low",
+      "prerequisite_for": [],
+      "notes": "This optimization's primary value emerges AFTER OPT-1 is applied: once GEMMs are running on Tensor Cores (much faster individually), the 12x sequential kernel launch overhead becomes a larger fraction of remaining GEMM time. The benefit is currently small relative to the dtype issue. Additionally, GPT-2's residual stream (activation of layer i flows into layer i+1) means the 12 same-shape GEMMs within each layer type ARE independent of each other (they have separate input activations), but the independence check across the full graph requires careful topological validation. Confidence is low because this requires either FX surgery that is complex to validate correctly, or a model restructuring that goes beyond pure compilation-level changes."
+    }
+  ],
+  "global_notes": [
+    "schema_version validated: 1.0",
+    "~30 operators below 1% threshold omitted (combined 2.0% of attributed time). These include layer::unique::prologue, 12 fused transformer block operators (layer::unique/duplicate::modules_0-11), aten::embedding, aten::arange, aten::view, aten::native_layer_norm (final), aten::native_layer_norm_backward (if present), and various small pointwise Triton kernels.",
+    "Device: NVIDIA RTX PRO 6000 Blackwell Server Edition (sm100). hardware-limits.md not present; Blackwell architectural parameters used from published specifications. SM count estimated at 96-170 (GB202-class die); ridge point estimated at ~111 FLOP/byte for FP32. These estimates affect the wave count calculation for OPT-2 attention analysis.",
+    "warp_cycles_per_instruction is null for ALL operators — confirmed Blackwell behavior (metric removed in sm100). Using eligible_cycles_pct < 20% as the latency-bound indicator. The attention kernel (eligible_cycles_pct=21.32%) is borderline latency-bound; all GEMM kernels (42-62%) are solidly compute-bound.",
+    "Edge case flag fused_kernel_double_count: multiple operators have is_fused=true with fused_with[] lists. The aggregated.total_duration_ns for fused operators (e.g., layer::unique::modules_N) only includes non-GEMM Triton kernels; the GEMM kernels within the same fusion scope are separately attributed as aten::mm or aten::addmm. This means there is no double-counting between the GEMM operators and the fused layer operators — the flag is informational.",
+    "Critical finding: smsp__pipe_tensor_cycles_active = 0.0% on every GEMM kernel (aten::mm, aten::addmm) confirms Tensor Cores are completely idle for 91.1% of attributed compute time. This is the dominant optimization target. All other optimizations are secondary to OPT-1.",
+    "total_attributed_ns estimated at 25,150,000 ns (16.7ms mm + 6.2ms addmm + 1.7ms attention + 0.55ms elementwise/LN). Duration values are ncu-counter-collection inflated (2-5x real latency); all relative comparisons within this profile are valid.",
+    "Recommended application order: OPT-1 (dtype) → OPT-2 (SDPA) → OPT-3 (batched GEMM). OPT-1 and OPT-2 are independent but OPT-2 yields additional benefit in the BF16 regime because Flash Attention 3 BF16 kernels are better optimized for Blackwell than their FP32 counterparts."
+  ]
+}
