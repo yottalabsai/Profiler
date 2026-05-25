@@ -46,7 +46,7 @@ Layer deduplication is unconditional when using the built-in backend: the FX gra
 
 ```
 Delegates to: capture-agent
-Output: profile.json, profiler_output/{stem}.part.json (when built-in backend used)
+Output: profile.json, profiler_output/{stem}.corr.json, profiler_output/{stem}.part.json (built-in backend only)
 Skip if: --from is set to a later stage
 ```
 
@@ -64,7 +64,7 @@ Generates a production-ready custom `torch.compile()` backend implementing the p
 
 ```
 Delegates to: backend-engineer
-Output: {workload}_optimized.py, test_{workload}_optimized.py, implementation_notes.md
+Output: {workload}_optimized.py, test_{workload}_optimized.py, profiler_output/implementation_notes.md
 Skip if: --from is set to a later stage
 ```
 
@@ -73,6 +73,7 @@ Runs the 4-step validation sequence (syntax, import, registration, pytest). The 
 
 ```
 Delegates to: validation-agent
+Output: profiler_output/validation_report.json
 Blocks: Stage 4 if any validation step fails
 ```
 

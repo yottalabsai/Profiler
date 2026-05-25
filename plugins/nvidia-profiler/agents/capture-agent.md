@@ -138,13 +138,13 @@ This is the most finicky step. The `map` subcommand orchestrates `ncu` to replay
 
 Always pass `--ncu-output-dir {ncu_reps_dir}` so the `.ncu-rep` files are written to a known, persistent location under `profiler_output/ncu_reps/` — **never** to `/tmp/`. Files in `/tmp/` can be cleaned up by the OS at any time and are lost if the run is interrupted or needs to be debugged. Persistent `.ncu-rep` files allow re-importing metrics without a full ncu replay.
 
-### Command (Linux with sudo):
+### Command:
 ```bash
 PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     {manifest_path} \
     --script {project_root}/nvidia/scripts/run_workload.py \
     --ncu-executable {ncu_executable} \
-    --ncu-sudo \
+    [--ncu-sudo] \
     --ncu-env "PYTHONPATH={project_root}:{pythonpath}" \
     --ncu-output-dir {ncu_reps_dir} \
     --model-name {model_name} \
@@ -152,26 +152,14 @@ PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
     [--partition-map {output_dir}/{workload_stem}.part.json] \
     --script-args --workload {workload_path} --warmup-iters 2 --measure-iters 2 --output-prefix {output_dir}/{workload_stem} --inductor-debug-dir {inductor_debug_dir} [--compile-backend {compile_backend}]
 ```
+
+Include `--ncu-sudo` when `sudo_required=true` from preflight.
 
 **`--partition-map`:** Include when `{output_dir}/{workload_stem}.part.json` exists (produced by the built-in dedup backend in Stage 0a). Passes the `partition_equivalence_map` to `KernelProfileConfig`, causing ncu to skip replaying duplicate-partition kernels and propagate hardware counter metrics from unique representatives to all their duplicates. The `.part.json` is always written by the built-in dedup backend; it is NOT written when `--compile-backend` is used (custom backends handle dedup internally). Omit `--partition-map` when `--compile-backend` was used in Stage 0a.
 
 **`--ncu-env` only needs `PYTHONPATH`**: `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` are auto-forwarded from the current process by `KernelProfileOrchestrator._ncu_env()`, ensuring ncu uses the same compiled artifacts and launches the same kernel names. Do not add them to `--ncu-env` — they are already handled.
 
 **Do NOT use `python -m nvidia.operator_profiler map`** — the package has no `__main__.py` and this invocation fails. Use the `operator-profiler` CLI entry point (installed via `pip install .` from the project root).
-
-### Command (Linux without sudo, or Windows):
-```bash
-PYTHONPATH={project_root}:{pythonpath} operator-profiler map \
-    {manifest_path} \
-    --script {project_root}/nvidia/scripts/run_workload.py \
-    --ncu-executable {ncu_executable} \
-    --ncu-env "PYTHONPATH={project_root}:{pythonpath}" \
-    --ncu-output-dir {ncu_reps_dir} \
-    --model-name {model_name} \
-    --output {profile_path} \
-    [--partition-map {output_dir}/{workload_stem}.part.json] \
-    --script-args --workload {workload_path} --warmup-iters 2 --measure-iters 2 --output-prefix {output_dir}/{workload_stem} --inductor-debug-dir {inductor_debug_dir} [--compile-backend {compile_backend}]
-```
 
 ### Error Handling
 

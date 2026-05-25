@@ -33,7 +33,7 @@ All output files must be written to the **same directory as the workload file**,
 
 1. `{workload_dir}/{workload_basename}_optimized.py` — the optimized workload with custom backend
 2. `{workload_dir}/test_{workload_basename}_optimized.py` — validation test script
-3. `{workload_dir}/implementation_notes.md` — architecture and design rationale (ingested by /report)
+3. `{workload_dir}/profiler_output/implementation_notes.md` — architecture and design rationale (ingested by /report)
 
 Derive `{workload_basename}` from the workload file name (e.g. `conv_block.py` → `conv_block_optimized.py`).
 Backend name: `{model_name_snake_case}_opt` from `optimizations.json analysis.model` (e.g. `ConvBlock` → `conv_block_opt`).
@@ -210,13 +210,8 @@ def test_backend_registration():
     assert '{backend_name}' in backends, f"Backend not found in: {backends}"
 
 def test_get_model_and_input():
-    """Model and input have expected shapes and dtypes."""
-    import torch
-    from {workload_module_optimized} import get_model_and_input
-    model, x = get_model_and_input()
-    assert x.device.type == 'cuda', "Input must be on CUDA"
-    # Verify shape matches profile (derive from optimizations.json or profile.json)
-    # Verify dtype matches expected (BF16 if dtype promotion applied)
+    """Assert input is on CUDA; verify shape and dtype match expected values from
+    optimizations.json or profile.json (derive per workload — not a fixed template)."""
 
 def test_compiled_forward_pass(caplog):
     """Compiled forward pass triggers the backend; captures FX pass application logs."""
@@ -245,18 +240,11 @@ def test_compiled_forward_pass(caplog):
 
 ## implementation_notes.md
 
-Write to `{workload_dir}/implementation_notes.md`. This file is ingested by `/report` as its Implementation Notes section — write for a technical reader, not an end user.
+Write to `{workload_dir}/profiler_output/implementation_notes.md`. This file is ingested by `/report` as its Implementation Notes section — write for a technical reader, not an end user.
 
 ### Backend Architecture
 
-One-row-per-pass table:
-
-| Pass | Method | Reason |
-|---|---|---|
-| OPT-1 BF16 promotion | `get_model_and_input()` | dtype is a Dynamo trace-time static — must be set before compile |
-| OPT-2 pre-transposed weights | per-rep loop | requires `register_buffer`; `replace_pattern` cannot write tensors |
-
-Include every pass from `optimizations.json fx_steps[]`, including stubs (mark as "stub — not applied").
+One-row-per-pass table. Columns: `Pass` (OPT-N description), `Method` (`get_model_and_input()`, per-rep loop, or `replace_pattern`), `Reason` (one sentence why). Include every pass from `optimizations.json fx_steps[]`; mark stubs as "stub — not applied".
 
 ### Key Design Decisions
 

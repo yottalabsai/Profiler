@@ -11,204 +11,108 @@ Generates `report.md` documenting the full optimization lifecycle. The report is
 
 ```
 /report
-/report --audience=team          # include hardware counter explainers (default)
-/report --audience=executive     # leads with speedup numbers, minimal counter detail
-/report --output=custom_name.md
 ```
 
 ## Inputs (reads from current directory)
 
-- `profile.json` — baseline hardware metrics
-- `profile_optimized.json` — optimized hardware metrics (if available)
-- `optimizations.json` — proposed optimizations with evidence (includes time budget and bottleneck analysis)
-- `validation_report.json` — which passes applied (from `/validate`)
-- `implementation_notes.md` — backend architecture and design rationale (written by `/backend`; required)
+- `profile.json` — baseline hardware metrics (required)
+- `optimizations.json` — proposed optimizations with evidence (required)
+- `profile_optimized.json` — optimized hardware metrics (optional; Section 6 skipped if absent)
+- `profiler_output/validation_report.json` — pass application status from `/validate` (optional; Section 4 statuses marked UNKNOWN if absent)
+- `profiler_output/implementation_notes.md` — backend design rationale from `/backend` (required; stop if missing)
 
-Missing files other than `implementation_notes.md` are noted as "not yet available" and those sections are skipped. If `implementation_notes.md` is missing, stop and tell the user to run `/backend` first.
+Missing optional files are noted as "not yet available" and those sections are skipped. If `profiler_output/implementation_notes.md` is missing, stop and tell the user to run `/backend` first.
 
 ## Report Structure
 
-Mirror `examples/conv_block/report.md` as the gold standard. Include these sections:
+Include these sections:
 
 ### 1. Hardware Context
 
-```markdown
-## Hardware Context
+Open the report with a one-sentence headline: "This optimization achieved X× total speedup on [model] (B=[N], [GPU])." This ensures the document is scannable without requiring hardware expertise.
 
-| Field | Value |
-|---|---|
-| GPU | NVIDIA H100 SXM5 (132 SMs) |
-| Architecture | Hopper |
-| PyTorch | 2.3.0 |
-| Compile Mode | inductor |
-| Batch Size | 16 |
-| Measurement | 10 iterations (ncu replay — relative timing only) |
-```
+Key-value table. Fields to include: GPU model (with SM count), architecture family (Ampere / Hopper / Blackwell), PyTorch version, compile mode, batch size, iteration count with the note "(ncu replay — relative timing only)".
 
 ### 2. Operator Summary
 
-Time-budget table sorted by wall-time percentage:
-```markdown
-## Operator Summary (Baseline)
+Table columns: `Operator`, `Time (%)`, `Duration (ns)`, `Kernels`, `Bottleneck Class`. Sort by `Time (%)` descending.
 
-| Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
-|---|---|---|---|---|
-| aten::linear | 42.3% | 5,234,567 | 30 | tensor_core_idle |
-| aten::layer_norm | 18.1% | 2,241,200 | 20 | well_optimized |
-```
+On Blackwell (B100/B200), `tensor_core_active_pct` is unavailable; Bottleneck Class is derived from memory throughput % and achieved occupancy instead.
 
 ### 3. Reading the Metrics
 
-Include a brief explainer for non-GPU-expert readers:
+Explain only metrics that appear in this workload's profile and drive the identified
+bottlenecks. Give thresholds and interpretations that make the value actionable —
+not textbook definitions.
 
-```markdown
-## Reading the Metrics
-
-**Waves/SM:** Number of waves of warps dispatched per SM. A wave is one full occupancy
-cycle. `waves_per_sm < 0.5` means most SMs are idle most of the time — not enough
-parallel work. Formula: `ceil(grid_x × grid_y × grid_z / sm_count)`.
-
-**Achieved Occupancy:** Fraction of theoretical maximum warps active simultaneously.
-Low occupancy (< 20%) means insufficient parallelism to hide memory latency.
-
-**tensor_core_active_pct = 0.0 (not null):** The GEMM kernel ran but did not use
-Tensor Core hardware. This always means the kernel took the FP32 SIMT path (no
-dtype cast to BF16/FP16). Fixing this is the highest-ROI optimization available.
-
-**tensor_core_active_pct = null:** Normal for non-GEMM kernels (elementwise, reductions)
-and for Blackwell GPUs where this counter was removed. Not a problem.
-
-**ncu replay timing note:** All durations come from ncu's kernel replay mode and are
-2–5× longer than real execution. Use for relative comparison only.
-```
+One non-obvious rule: **tensor_core_active_pct = 0.0 (not null)** means the GEMM ran
+on the FP32 SIMT path with Tensor Cores completely idle — the highest-ROI optimization
+signal available. A null value is expected for non-GEMM kernels and on architectures
+where the counter was removed; do not flag it as a problem.
 
 ### 4. Optimizations Applied
 
-```markdown
-## Optimizations Applied
+Read `validation_report.json → passes[].status`. Table columns: `ID`, `Type`, `Target Operators`, `Hardware Evidence`, `Confidence` (all from `optimizations.json`); `Status` from `validation_report.json → passes[].status`.
 
-| ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
-|---|---|---|---|---|---|
-| OPT-1 | dtype_promotion | aten::linear (all) | tensor_core_active_pct = 0.0 | high | APPLIED |
-| OPT-2 | memory_layout | aten::conv2d | convertTensor_kernel ×60 | high | APPLIED |
-| OPT-3 | qkv_fusion | aten::linear (0,1,2) | waves_per_sm = 0.3 | medium | NOT APPLIED |
-```
-
-Only include optimizations confirmed as APPLIED in the validation log. Mark others as NOT APPLIED with the reason.
+If `validation_report.json` is absent, mark all statuses as UNKNOWN and add: "Run `/validate` to determine which passes were applied."
 
 ### 5. Implementation Notes
 
-Include the content of `implementation_notes.md` verbatim under this heading. Do not rewrite or summarize it — the backend engineer authored it with full implementation context.
+Read `implementation_notes.md` and paste its full raw text directly under this heading — every line, as-is, with no wrapper prose, no introduction sentence, no italicized preamble. The file's own content is the section body. Do not add any text before or after it.
 
 ### 6. Before/After Results
 
 If `profile_optimized.json` is not available, this section reads "Profiling in progress — run `/capture workload_optimized.py --profile-name=optimized` to generate it."
 
-When both profiles are present, compute the comparison directly:
+When both profiles are present:
 
-**Step A — Batch size normalization**
+**Before comparison**, verify both profiles share the same batch size (`capture_metadata.batch_size`). If they differ, skip this section and add: "Batch size mismatch between baseline and optimized captures — comparison skipped. Re-capture with matching batch sizes."
 
-Extract batch size from `capture_metadata.model_name` (convention: `ModelName-B{N}`, e.g. `ConvBlock-B16`). If absent, infer from GEMM kernel `grid_dim` (grid scales proportionally with batch). Apply:
+**Step A — Operator matching**
 
-```
-normalized_optimized_ns = raw_optimized_ns × (baseline_batch / optimized_batch)
-```
+Match operators across profiles by `operator_name` (NOT `operator_id` — it changes between captures). When N baseline entries collapse to 1 optimized entry due to fusion, sum the baseline durations and compare the sum to the single optimized entry. Report a single row labeled e.g. `aten::linear (fused ×3)` with combined baseline, optimized, and speedup.
 
-If batch sizes cannot be determined, compare raw durations and add a caveat.
+**Step B — Speedup attribution**
 
-**Step B — Operator matching**
-
-Match operators across profiles by `operator_name` (NOT `operator_id` — it changes between captures). When operator counts differ due to fusion:
-
-| What you see in optimized profile | Transformation confirmed |
-|---|---|
-| 3 × `aten::linear` → 1 merged entry | QKV weight fusion |
-| `aten::mm` + `aten::softmax` → single `flash_fwd*` or SDPA kernel | FlashAttention replacement |
-| `gemmSN_NN_kernel` / `gemmSN_TN_kernel` → `sm90_xmma_gemm_bf16bf16_*` | BF16 dtype promotion → Tensor Cores active |
-| `convertTensor_kernel` absent | channels_last applied |
-| `BatchNorm` kernel absent | BN folded into Conv2d |
-
-**Step C — Speedup attribution**
-
-A speedup is attributed to a transformation ONLY when all three hold:
-1. Validation log shows the pass was APPLIED (INFO log, not `WARNING: Pattern not found`)
+Read `validation_report.json → passes[].status`. A speedup is attributed to a transformation only when all three hold:
+1. `status == APPLIED` in `validation_report.json`
 2. The corresponding hardware metric changed in the expected direction
 3. The operator containing those kernels shows speedup
 
-If the validation log shows `WARNING: Pattern not found` for a pass, that pass did NOT contribute to any speedup — even if the operator shows improvement (Inductor's own optimization may be responsible).
+If a pass has `status == NOT_APPLIED` or `status == FAILED`, that pass did NOT contribute to any speedup — even if the operator shows improvement (Inductor's own optimization may be responsible).
 
-**Step D — Residual opportunity detection**
+If `validation_report.json` is absent, mark all attribution as "Validation results unavailable — speedup source unconfirmed."
 
-After measuring the optimized profile, re-rank operators by `total_duration_ns` and classify their new bottlenecks (the optimization typically exposes second-order bottlenecks). Cross-reference with unapplied proposals in `optimizations.json` (medium/low confidence that degraded gracefully) and estimate residual gain using their `estimated_impact` discounted by confidence.
+**Step C — Residual opportunity detection**
 
-```markdown
-## Results: Before vs. After (Normalized to B=16)
+After measuring the optimized profile, re-rank operators by `total_duration_ns` and classify their new bottlenecks (the optimization typically exposes second-order bottlenecks). Cross-reference with unapplied proposals in `optimizations.json` and estimate residual gain using their `estimated_impact` discounted by confidence.
 
-| Operator | Baseline (ns) | Optimized (ns) | Speedup |
-|---|---|---|---|
-| aten::conv2d | 1,740,320 | 892,000 | **1.95x** |
-| aten::batch_norm | 330,944 | 315,000 | 1.05x |
-| **Total** | **2,122,456** | **1,232,000** | **1.72x** |
-```
+Table columns: `Operator`, `Baseline (ns)`, `Optimized (ns)`, `Speedup`. Include a **Total** row.
 
 ### 7. What Drove Each Speedup
 
-Causal attribution section — one paragraph per applied optimization:
-
-```markdown
-## What Drove Each Speedup
-
-**channels_last layout (OPT-2, +0.95x speedup on aten::conv2d):**
-Converting the model to `channels_last` memory format eliminated 60 `convertTensor_kernel`
-launches per forward pass. cuDNN previously had to coerce from NCHW to NHWC for each
-convolution call; with NHWC-native tensors, no coercion is needed. Evidence: the
-`convertTensor_kernel` entries are entirely absent from the optimized profile.
-```
+One paragraph per applied optimization. Header: `**{description} ({OPT-N}, +{X}x on {operator}):**` followed by one sentence explaining the mechanism and one sentence citing the hardware evidence (which counter changed, or which kernel appeared/disappeared).
 
 ### 8. Remaining Opportunities
 
-```markdown
-## Remaining Opportunities
+If all proposed optimizations were applied: "All proposed optimizations were applied. No further FX-level gains identified in this profile."
 
-These optimizations from the proposal were not applied in this iteration:
-
-| ID | Type | Target | Reason Not Applied | Projected Gain |
-|---|---|---|---|---|
-| OPT-3 | qkv_fusion | aten::linear | Pattern not found in Inductor graph | ~1.3x on linear ops |
-
-Estimated additional gain if OPT-3 is applied: ~15% total throughput improvement.
-```
-
-### 9. Reproduction Commands
-
-```markdown
-## Reproducing This Analysis
-
-```bash
-# 1. Capture baseline profile
-/capture examples/conv_block/conv_block.py
-
-# 2. Generate optimization proposals
-/propose profile.json
-
-# 3. Generate optimized backend
-/backend conv_block.py optimizations.json
-
-# 4. Validate backend
-/validate conv_block_optimized.py
-
-# 5. Profile optimized workload
-/capture conv_block_optimized.py --profile-name=optimized --compile-backend=conv_block_opt
-```
-```
+Otherwise, table columns: `ID`, `Type`, `Target`, `Reason Not Applied` (from `validation_report.json → passes[].detail`), `Projected Gain` (from `optimizations.json → estimated_impact`). End with one sentence estimating total additional gain if all remaining passes were applied.
 
 ## Anti-Patterns to Avoid
 
 These make reports inaccurate and misleading:
 
-- **Do NOT** credit a transformation that logged `WARNING: Pattern not found` in the validation output — even if the operator shows speedup (Inductor may have optimized it independently)
-- **Do NOT** compare raw durations across different batch sizes — always normalize first
-- **Do NOT** omit the batch size in the results table — "1.95x speedup" is meaningless without knowing if batch changed
+- **Do NOT** credit a transformation that has `status != APPLIED` in `validation_report.json` — even if the operator shows speedup (Inductor may have optimized it independently)
+- **Do NOT** omit the batch size in the results table — "1.95x speedup" is meaningless without it
 - **Do NOT** claim `tensor_core_active_pct = null` is a bottleneck — it's expected for non-GEMM kernels and on Blackwell
 - **Do NOT** state absolute latency values as wall-clock times — ncu replay values are 2–5× longer than real execution; always add the caveat
 - **Do NOT** describe future work without clearly labeling it as "not yet implemented" in the optimization table
+
+## Post-Generation
+
+`profiler_output/implementation_notes.md` is retained after report generation — do not delete it.
+
+## Reference Output
+
+See `examples/conv_block/report.md` for a complete reference output. Use it only as a formatting fallback — the structured instructions above take precedence.
