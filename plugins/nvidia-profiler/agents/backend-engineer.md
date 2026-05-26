@@ -52,33 +52,43 @@ The rules below are the authoritative implementation guide. Read them before wri
 ```python
 # ALWAYS — imports the callable function
 from torch._inductor.compile_fx import compile_fx
+from torch._functorch.aot_autograd import aot_autograd
 
 # NEVER — imports the module → TypeError: 'module' object is not callable
 from torch._inductor import compile_fx
 ```
 
-### Rule 2: Weight Node Detection
-`@register_backend` receives the graph **before** Inductor lowers it (pre-Inductor form). At this level ALL `nn.Module` parameters are lifted to `placeholder` nodes — there are no `get_attr` nodes and no `aten.t.default` wrapping. The actual weight tensors are in `example_inputs` (matched positionally to placeholder nodes).
+`compile_fx` is called inside `_aten_fw_compiler`, not directly from the backend function. `aot_autograd` wraps each partition or the full graph to expose the Aten IR graph to passes.
+
+### Rule 2: Weight Node Detection (Aten IR level)
+
+All passes run inside `_aten_fw_compiler`, which `aot_autograd` calls with the fully decomposed Aten IR graph. ALL `nn.Module` parameters are still `placeholder` nodes at this level — AOTAutograd does not resolve them to constants. Their actual tensors are in `fw_example_inputs`, positionally matched to placeholder nodes in graph order.
 
 ```python
-# CORRECT — build a placeholder→tensor map at the start of any pass that reads weights
+# CORRECT — build the lookup at the start of any pass that reads weight values
 placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-ph_to_tensor = {ph: t for ph, t in zip(placeholders, partition_inputs)}
-# Then: actual_weight = ph_to_tensor.get(linear_node.args[1])
+ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+
+# For aten.addmm.default(bias, x, t_node): weight placeholder is inside aten.t.default
+t_node    = addmm_node.args[2]          # aten.t.default node
+weight_ph = t_node.args[0]              # the placeholder
+weight    = ph_to_tensor[weight_ph]     # actual tensor
 
 # WRONG — get_attr nodes and gm.get_parameter() do not exist at this IR level
 if node.args[0].op == 'get_attr':
     weight = gm.get_parameter(node.args[0].target)   # KeyError or AttributeError
 ```
 
-The pre-Inductor ops for common layers:
-- `nn.Linear` → `call_function: torch.nn.functional.linear` (args: input, weight, bias)
-- `@` / `matmul` → `call_function: operator.matmul`
-- `*` / `mul` → `call_function: operator.mul`
-- `softmax` → `call_function: torch.softmax`
-- `.transpose()` → `call_method: "transpose"`
-- `nn.Conv2d` → `call_function: torch.nn.functional.conv2d`
-- `nn.BatchNorm2d` → `call_function: torch.nn.functional.batch_norm`
+Aten IR forms of common layers (what `_aten_fw_compiler` actually sees):
+- `nn.Linear` (with bias) → `aten.addmm.default(bias_ph, x, aten.t.default(weight_ph))`
+- `nn.Linear` (no bias) → `aten.mm.default(x, aten.t.default(weight_ph))`
+- `x @ y` → `aten.mm.default`
+- `nn.Conv2d` → `aten.convolution.default(x, weight_ph, bias_ph, ...)`
+- `nn.BatchNorm2d` (eval) → `aten._native_batch_norm_legit_no_training.default(...)` — returns 3-tuple
+- `F.scaled_dot_product_attention` → `aten._scaled_dot_product_efficient_attention.default` or `aten.scaled_dot_product_flash_attention.default` — hardware-selected, returns 4-tuple
+- `F.layer_norm` → `aten.native_layer_norm.default` — returns 3-tuple
+
+See `knowledge/fx-patterns.md` for the full Aten IR op mapping table.
 
 ### Rule 3: Graph Mutation Order
 1. Collect nodes to modify using `list(gm.graph.nodes)` — snapshot, never iterate live
@@ -116,7 +126,7 @@ def pass_name(gm: fx.GraphModule) -> fx.GraphModule:
 | `low` (stub) | Detect only, never transform; always `return gm` unchanged | N/A |
 
 ### Rule 5: Canonical FX Patterns
-For QKV fusion, SDPA replacement, BN fold, pre-transposed weights, and activation substitution: read `knowledge/fx-patterns.md` and use those implementations as the starting point. Do NOT invent alternative implementations unless the canonical pattern cannot apply to this specific graph.
+For QKV fusion, SDPA replacement, BN fold, pre-transposed weights, and activation substitution: read `knowledge/fx-patterns.md` and use those implementations as the starting point. All patterns are at Aten IR level — pass `fw_example_inputs` where the old guide said `partition_inputs`. Do NOT invent alternative implementations unless the canonical pattern cannot apply to this specific graph.
 
 ### Rule 6: Pass Application Order
 Apply passes in this order in the backend function:
@@ -147,10 +157,19 @@ Read `optimizations.json analysis.compile_mode`:
 
 ### Rule 9: Dedup-Aware Backend Structure
 
-ALWAYS import and use `UniqueSubgraphRegistry`. The backend function must follow this structure exactly:
+ALWAYS import and use `UniqueSubgraphRegistry`. All graph passes run inside `_aten_fw_compiler` at Aten IR level. The backend function must follow this structure exactly:
 
 ```python
+from torch._functorch.aot_autograd import aot_autograd
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
+
+def _aten_fw_compiler(gm: fx.GraphModule, fw_example_inputs) -> Callable:
+    """All graph passes run here at Aten IR level."""
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+    gm = _pass_...(gm, ph_to_tensor)   # weight-access passes (QKV fusion, BN fold, etc.)
+    gm = _pass_...(gm)                  # op-target passes (BF16 casts, SDPA replacement, etc.)
+    return compile_fx(gm, fw_example_inputs)
 
 @register_backend
 def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
@@ -161,22 +180,16 @@ def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     if not equiv_map:
         # No repeated layers detected — flat compile preserves cross-layer Inductor fusion
         logger.info("{model_name_snake}_opt: no repeated layers, flat compile path")
-        gm = _pass_replace_sdpa(gm)        # apply manual passes to the full flat graph
-        logger.info("{model_name_snake}_opt: delegating to Inductor")
-        return compile_fx(gm, example_inputs)
+        return aot_autograd(fw_compiler=_aten_fw_compiler)(gm, example_inputs)
 
-    logger.info(f"{model_name_snake}_opt: {len(equiv_map)} duplicate partitions, dedup path")
+    logger.info(f"{model_name_snake}_opt: {len(equiv_map)} duplicate partition(s), dedup path")
 
-    # Apply passes to each unique rep, then propagate to its duplicates
-    for rep_name, rep_mod in registry.unique_reps:
-        _pass_replace_sdpa(rep_mod)
-        for _, dup_mod in registry.duplicates_of(rep_name):
-            _pass_replace_sdpa(dup_mod)
-
-    # Compile each unique rep with its actual partition inputs; share callable with duplicates
+    # Compile each unique rep via aot_autograd; passes run inside _aten_fw_compiler.
+    # Share the compiled callable with all structural duplicates.
     partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
     for rep_name, rep_mod in registry.unique_reps:
-        compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
+        inputs = partition_inputs.get(rep_name, example_inputs)
+        compiled = aot_autograd(fw_compiler=_aten_fw_compiler)(rep_mod, inputs)
         rep_mod.forward = compiled
         for _, dup_mod in registry.duplicates_of(rep_name):
             dup_mod.forward = compiled
@@ -188,10 +201,35 @@ def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
 **Return value note:** `registry.split` is a `GraphModule` whose child partitions have their `.forward` patched with Inductor-compiled callables. `lambda *args: registry.split(*args)` routes each forward call through this assembled graph via `nn.Module.__call__`.
 
 **Classify each optimization before writing code:**
-- Manual per-rep (tuple outputs, decomposed ops, `register_buffer`) → per-rep loop
+- Graph passes (any target) → `_aten_fw_compiler` at Aten IR level
 - Non-graph (dtype, layout, batch shape) → `get_model_and_input()` only
 
-Refer to `knowledge/fx-patterns.md` Pass Taxonomy section for canonical classifications and the `_capture_partition_inputs` utility implementation.
+Refer to `knowledge/fx-patterns.md` for the standard backend pattern, the `_capture_partition_inputs` utility, and all canonical pass implementations at Aten IR level.
+
+### Rule 10: IR Level — All Passes at Aten IR
+
+Every graph pass runs inside `_aten_fw_compiler` at Aten IR level. The profiler measures operators at the `aten::` level, and `optimizations.json` expresses all targets as `aten::` names. There is no "pre-Inductor pass" category.
+
+**Decision table:**
+
+| Optimization | IR level | Location |
+|---|---|---|
+| BF16 casts on `aten::addmm` / `aten::mm` | Aten IR | `_aten_fw_compiler` |
+| SDPA kernel replacement | Aten IR | `_aten_fw_compiler` |
+| Conv channels_last annotation | Aten IR | `_aten_fw_compiler` (target `aten.convolution.default`) |
+| QKV weight fusion | Aten IR | `_aten_fw_compiler` (target `aten.addmm.default` triplets) |
+| Conv-BN fold | Aten IR | `_aten_fw_compiler` (target `aten._native_batch_norm_legit_no_training.default`) |
+| Pre-transposed weights | Aten IR | `_aten_fw_compiler` (target `aten.t.default` → `aten.mm.default`) |
+| Activation substitution | Aten IR | `_aten_fw_compiler` (target `aten.tanh.default`) |
+| dtype, memory_format, batch shape | Non-graph | `get_model_and_input()` only |
+
+**Multi-output Aten ops** (`native_layer_norm`, `_native_batch_norm_legit_no_training`, `_scaled_dot_product_efficient_attention`, `scaled_dot_product_flash_attention`) return tuples. Do NOT replace the op node directly:
+1. Find `getitem(node, 0)` consumer
+2. Insert replacement before it; `replace_all_uses_with(replacement)`
+3. Erase the getitem, then the original op if no remaining users
+4. Call `gm.graph.eliminate_dead_code()`
+
+---
 
 ## Test Script Requirements
 
@@ -244,7 +282,7 @@ Write to `{workload_dir}/profiler_output/implementation_notes.md`. This file is 
 
 ### Backend Architecture
 
-One-row-per-pass table. Columns: `Pass` (OPT-N description), `Method` (`get_model_and_input()`, per-rep loop, or `replace_pattern`), `Reason` (one sentence why). Include every pass from `optimizations.json fx_steps[]`; mark stubs as "stub — not applied".
+One-row-per-pass table. Columns: `Pass` (OPT-N description), `Method` (`get_model_and_input()`, `_aten_fw_compiler`, or stub), `Reason` (one sentence why). Include every pass from `optimizations.json fx_steps[]`; mark stubs as "stub — not applied".
 
 ### Key Design Decisions
 
