@@ -22,4 +22,6 @@ description: Generate a production-ready workload_optimized.py with a custom tor
 
 Delegates to: backend-engineer
 
+Note: All generated FX passes run at Aten IR level inside `_aten_fw_compiler` (via `aot_autograd`), not at the pre-Inductor functional level.
+
 Translate any flags present into their agent instructions above and include them in the human-turn prompt alongside the workload and optimizations paths.

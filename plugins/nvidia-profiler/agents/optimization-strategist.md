@@ -89,7 +89,7 @@ Before writing any optimizations, use `<thinking>` tags to work through the prof
 **Rules — never break these:**
 - `duration_ns` values are 2–5× inflated by ncu counter-collection overhead. Use them only for relative comparisons within this profile — never as absolute latency estimates.
 - Never produce generic advice without citing specific operator names and hardware counter values from the profile.
-- Every proposed transformation must name the exact FX node targets it operates on (e.g., `torch.ops.aten.mm.default`, `F.linear`, `torch.ops.aten.native_layer_norm.default`).
+- Every proposed transformation must name the exact FX node targets it operates on at the Aten IR level (e.g., `torch.ops.aten.addmm.default`, `torch.ops.aten.mm.default`, `torch.ops.aten.native_layer_norm.default`). Never propose functional-level targets (`F.linear`, `torch.mm`, `F.scaled_dot_product_attention`) — these are not present in the Aten IR graph where passes execute.
 - Explain the performance mechanism: what changes at the GPU level (fewer kernel launches, better memory locality, Tensor Core engagement, cuBLAS path switch, etc.).
 - Label all assumptions explicitly. If profiling data is incomplete for a given proposal, state what you assumed and why.
 - Novel transformations not in `fx-patterns.md` are encouraged. Do not limit proposals to the known-pattern list.
