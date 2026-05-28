@@ -1,113 +1,300 @@
 """
-mlp_activations_optimized.py — Custom torch.compile() backend for MLPActivations.
+mlp_activations_optimized.py — custom torch.compile() backend for MLPActivations.
 
-Implements five profiling-guided optimizations from optimizations.json:
+Implements the two transformations proposed in optimizations.json at the Aten IR
+level (post-AOTAutograd, pre-Inductor):
 
-  OPT-1 (HIGH, priority 1)   — TF32/BF16 dtype promotion
-                               Stage 1: torch.set_float32_matmul_precision('high')
-                               and allow_tf32 flags set at module load (non-graph).
-                               Stage 2: FX pass that casts F.linear input, weight,
-                               and bias to bfloat16 before each mm/addmm, and
-                               restores float32 on the output.
-                               Dominant fix: Tensor Cores were 0% active on all
-                               GEMM kernels — cuBLAS was routing to SIMT FP32
-                               scalar path (Kernel2) exclusively.
+  OPT-1  dtype_promotion  (priority 1, high confidence)
+         Wrap every GEMM node with bf16 casts on the matmul operands and an
+         fp32 cast on the result, so Inductor selects the Blackwell bf16
+         tensor-core GEMM template instead of the FP32 SIMT path
+         (tensor_core_active_pct = 0 on every GEMM in the baseline profile).
 
-  OPT-2 (HIGH, priority 2)   — Eliminate splitKreduce overhead
-                               Set torch._inductor.config.coordinate_descent_tuning
-                               = True so the autotuner finds non-splitK tile configs
-                               for the M=256 tall-skinny shapes [256x512]x[512x2048]
-                               and [256x2048]x[2048x512].
-                               Implemented as Inductor config in the backend.
+  OPT-2  epilogue fusion  (priority 2, medium confidence; MUST run after OPT-1)
+         Enable Inductor epilogue_fusion + max_autotune_gemm so the per-layer
+         bias-add and activation (relu/gelu/silu/tanh) fuse into the bf16 matmul
+         template, removing the separate triton_poi_fused_addmm_* pointwise
+         kernels and their GEMM-output round trip.
 
-  OPT-3 (MEDIUM, priority 3) — Activation epilogue fusion
-                               Set torch._inductor.config.epilogue_fusion = True and
-                               epilogue_fusion_first_threshold = 1000 to fold
-                               relu/gelu/silu/tanh into the GEMM epilogue tile,
-                               eliminating separate pointwise kernel launches.
-                               Implemented as Inductor config in the backend.
+IR-level note
+-------------
+With bias=True, nn.Linear lowers to `aten.addmm.default(bias, x, w_t)` at the
+Aten IR level (NOT bare `aten.mm.default`). The profile shows `aten::mm` because
+Inductor decomposes addmm into mm+add *during* lowering, which is downstream of
+this pass. OPT-1 therefore targets `aten.addmm.default` (the real node we see)
+and also handles bare `aten.mm.default` defensively. The bf16 cast of the
+addmm's matmul operands is what reaches Inductor's GEMM template selection.
 
-  OPT-4 (MEDIUM, priority 4) — Batch repeated GEMMs into bmm
-                               FX pass that detects pairs of F.linear nodes sharing
-                               the same weight placeholder and replaces them with a
-                               single bmm on a stacked input, eliminating duplicate
-                               kernel launches for identical-weight GEMMs.
-                               Operates at the F.linear level (pre-Inductor).
+The Aten-IR passes run via Inductor's `post_grad_custom_pre_pass` hook (the
+decomposed Aten graph just before lowering), and the backend delegates to
+`compile_fx` directly. On torch 2.11 a manual `aot_autograd(fw_compiler=
+compile_fx)` composition mis-boxes runtime inputs (AssertionError in
+copy_misaligned_inputs); routing through `compile_fx` as the dynamo backend lets
+it drive AOTAutograd internally and apply the pass at the correct stage.
 
-  OPT-5 (LOW, priority 5)    — Register pressure via max_autotune_gemm
-                               Set torch._inductor.config.max_autotune_gemm = True
-                               to let Inductor select lower-register-pressure Triton
-                               GEMM templates. Stub: depends on OPT-1 outcome.
-
-Backend registration name: mlp_activations_opt
-Prerequisite order: OPT-1 → OPT-2, OPT-1 → OPT-3 (per optimizations.json).
-OPT-4 and OPT-5 are independent.
+Backend registered name (for Stage 4 capture):  mlp_activations_opt
 """
 from __future__ import annotations
 
 import logging
-import operator
-from collections import defaultdict
 from typing import Callable
 
 import torch
 import torch.fx as fx
-import torch.nn as nn
-import torch.nn.functional as F
+import torch._inductor.config as ind_cfg
 from torch._dynamo import register_backend
-from torch._inductor.compile_fx import compile_fx  # function, not module
+from torch._inductor.compile_fx import compile_fx
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("mlp_activations_opt")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
 
-# ---------------------------------------------------------------------------
-# Module-level constant: backend name
-# ---------------------------------------------------------------------------
-BACKEND_NAME = "mlp_activations_opt"
+# Aten op handles
+_ATEN_MM = torch.ops.aten.mm.default
+_ATEN_ADDMM = torch.ops.aten.addmm.default
+_ATEN_TO_DTYPE = torch.ops.aten.to.dtype
+_ATEN_ADD_TENSOR = torch.ops.aten.add.Tensor
 
-# ---------------------------------------------------------------------------
-# Module-load-time side effects for OPT-1 Stage 1
-# Must be set BEFORE torch.compile traces the model.
-# ---------------------------------------------------------------------------
-
-# OPT-1 Stage 1: route all FP32 GEMMs through TF32 Tensor Core path.
-# 'high' maps to TF32; 'medium' would select BF16 accumulation in some backends.
-torch.set_float32_matmul_precision("high")
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-logger.info(
-    "mlp_activations_opt: set_float32_matmul_precision('high'), allow_tf32=True "
-    "at module load [OPT-1 Stage 1]"
-)
+_ACTIVATIONS = {
+    torch.ops.aten.relu.default,
+    torch.ops.aten.gelu.default,
+    torch.ops.aten.silu.default,
+    torch.ops.aten.tanh.default,
+}
 
 
-# ---------------------------------------------------------------------------
-# Model definition (verbatim copy so this file is self-contained)
-# ---------------------------------------------------------------------------
+def _val_to_dtype(node: fx.Node, dtype: torch.dtype):
+    """Return a fake-tensor `meta['val']` for a to.dtype node, if the source has one."""
+    src_val = node.meta.get("val")
+    if src_val is not None and hasattr(src_val, "to"):
+        try:
+            return src_val.to(dtype)
+        except Exception:  # pragma: no cover - defensive
+            return None
+    return None
 
-DEVICE     = "cuda"
+
+# --------------------------------------------------------------------------- #
+# OPT-1 — dtype promotion: route every GEMM onto the bf16 tensor-core path.    #
+# --------------------------------------------------------------------------- #
+def _promote_gemm_to_bf16(graph: fx.Graph) -> None:
+    """
+    Aten-IR graph pass (runs as Inductor's post_grad_custom_pre_pass, i.e. on the
+    decomposed Aten graph just before Inductor lowering).
+
+    For each GEMM node, cast its matmul operands to bf16, run the GEMM in bf16,
+    and cast the result back to fp32 so downstream consumers (bias-add /
+    activation epilogues, and the final model output) still see fp32.
+
+      aten.addmm(bias, m1, m2)  ->  to_fp32(aten.addmm(to_bf16(bias),
+                                                       to_bf16(m1),
+                                                       to_bf16(m2)))
+      aten.mm(m1, m2)           ->  to_fp32(aten.mm(to_bf16(m1), to_bf16(m2)))
+
+    With bias=True, nn.Linear is `aten.addmm.default` at this IR level (the GEMM
+    lives inside addmm); bare `aten.mm.default` is handled defensively. Inserted
+    `to.dtype` nodes get a populated `meta['val']` so Inductor's post-grad fake
+    propagation does not KeyError on a missing 'val'.
+
+    High confidence: the GEMM pattern is guaranteed present in this MLP, so we do
+    not gate on a `matched` flag; an exception is downgraded to a warning and the
+    graph is left unchanged.
+    """
+    try:
+        gemm_nodes = [
+            n
+            for n in list(graph.nodes)
+            if n.op == "call_function" and n.target in (_ATEN_ADDMM, _ATEN_MM)
+        ]
+        if not gemm_nodes:
+            logger.warning(
+                "[OPT-1 promote_gemm_to_bf16] No addmm/mm nodes found — pass not applied"
+            )
+            return
+
+        promoted = 0
+        for node in gemm_nodes:
+            # addmm(bias, mat1, mat2): cast all three (addmm needs uniform dtype).
+            # mm(mat1, mat2): cast both operands.
+            cast_arg_idx = (0, 1, 2) if node.target is _ATEN_ADDMM else (0, 1)
+
+            new_args = list(node.args)
+            with graph.inserting_before(node):
+                for i in cast_arg_idx:
+                    src = node.args[i]
+                    cast = graph.call_function(_ATEN_TO_DTYPE, (src, torch.bfloat16))
+                    v = _val_to_dtype(src, torch.bfloat16)
+                    if v is not None:
+                        cast.meta["val"] = v
+                    new_args[i] = cast
+            node.args = tuple(new_args)
+
+            # The GEMM node now produces bf16; reflect that in its own meta['val'].
+            self_val = _val_to_dtype(node, torch.bfloat16)
+            if self_val is not None:
+                node.meta["val"] = self_val
+
+            # Cast the bf16 GEMM result back to fp32 for the epilogue/output.
+            with graph.inserting_after(node):
+                back = graph.call_function(_ATEN_TO_DTYPE, (node, torch.float32))
+            back_val = _val_to_dtype(node, torch.float32)
+            if back_val is not None:
+                back.meta["val"] = back_val
+            node.replace_all_uses_with(back)
+            # replace_all_uses_with rewrote back's own arg to itself; restore it.
+            back.args = (node, torch.float32)
+            promoted += 1
+
+        graph.lint()
+        logger.info(
+            "[OPT-1 promote_gemm_to_bf16] Applied: %d GEMM node(s) promoted to bf16",
+            promoted,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("[OPT-1 promote_gemm_to_bf16] Failed: %s — graph unchanged", e)
+
+
+# --------------------------------------------------------------------------- #
+# OPT-2 — epilogue fusion: bias-add + activation fold into the GEMM template.  #
+# --------------------------------------------------------------------------- #
+def _tag_epilogue_fusions(graph: fx.Graph) -> None:
+    """
+    Tag each `(GEMM) -> (fp32 cast) -> (activation)` chain so the relationship is
+    discoverable for logging / inspection. The actual fusion is enabled by the
+    Inductor config flags in `_configure_inductor()`; this pass annotates
+    node.meta and counts fusible chains, degrading to a clean no-op when none
+    are present.
+
+    Note: after OPT-1 the GEMM's direct user is the fp32 `to.dtype` cast, and the
+    activation consumes that cast — so we look one hop past the cast to find the
+    activation. Medium confidence: gated on a `matched` count.
+    """
+    try:
+        matched = 0
+        for node in list(graph.nodes):
+            if node.op != "call_function" or node.target not in (_ATEN_ADDMM, _ATEN_MM):
+                continue
+            # Walk GEMM -> {direct users, and users-of-fp32-cast}.
+            candidates = set(node.users)
+            for u in list(node.users):
+                if u.target is _ATEN_TO_DTYPE:
+                    candidates.update(u.users)
+            for user in candidates:
+                if user.target is _ATEN_ADD_TENSOR or user.target in _ACTIVATIONS:
+                    user.meta["inductor_epilogue_of"] = node
+                    matched += 1
+        if matched == 0:
+            logger.warning(
+                "[OPT-2 tag_epilogue_fusions] No GEMM->pointwise epilogue chains "
+                "found — relying on Inductor config flags only"
+            )
+            return
+        logger.info(
+            "[OPT-2 tag_epilogue_fusions] Applied: tagged %d epilogue node(s) "
+            "for matmul-template fusion",
+            matched,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("[OPT-2 tag_epilogue_fusions] Failed: %s — graph unchanged", e)
+
+
+def _aten_pre_lowering_pass(graph: fx.Graph) -> None:
+    """
+    Inductor `post_grad_custom_pre_pass` entry point. Runs on the decomposed Aten
+    graph immediately before Inductor lowering — the correct IR level for both
+    OPT-1 and OPT-2 per optimizations.json. Order: OPT-1 (high conf) then OPT-2
+    (prereq: OPT-1).
+    """
+    _promote_gemm_to_bf16(graph)
+    _tag_epilogue_fusions(graph)
+
+
+def _configure_inductor() -> None:
+    """
+    OPT-2 config half + OPT-1 pass registration. Enables epilogue fusion and the
+    max-autotune GEMM path so the bf16 matmul template (selected after OPT-1)
+    absorbs the bias + activation epilogue, and wires the Aten-IR pass into the
+    Inductor post-grad pipeline. Idempotent; safe to call before every compile.
+    """
+    ind_cfg.post_grad_custom_pre_pass = _aten_pre_lowering_pass
+    ind_cfg.epilogue_fusion = True
+    ind_cfg.max_autotune_gemm = True
+    logger.info(
+        "[OPT-2 configure_inductor] epilogue_fusion=True, max_autotune_gemm=True; "
+        "OPT-1/OPT-2 Aten pass registered as post_grad_custom_pre_pass"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Registered backend.                                                          #
+# --------------------------------------------------------------------------- #
+@register_backend
+def mlp_activations_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+    """
+    Dedup-aware backend.
+
+    The four MLP layers have distinct shapes / activations, so the registry finds
+    no structural duplicates and the flat compile path is taken (which also
+    preserves cross-layer Inductor fusion). The dedup branch is retained for
+    parity with the standard backend template.
+
+    IR note: the OPT-1/OPT-2 graph passes run at the Aten IR level via Inductor's
+    `post_grad_custom_pre_pass` hook (wired in `_configure_inductor`), then we
+    delegate to `compile_fx` as the dynamo backend directly. On torch 2.11 a
+    manual `aot_autograd(fw_compiler=compile_fx)` wrapper mis-boxes runtime inputs
+    (AssertionError in copy_misaligned_inputs); calling `compile_fx` as the
+    backend lets it drive AOTAutograd internally and apply the pass at the right
+    stage without that boxing bug.
+    """
+    logger.info("mlp_activations_opt backend: starting")
+    _configure_inductor()
+
+    registry = UniqueSubgraphRegistry(gm)
+    equiv_map = registry.build_partition_equivalence_map()
+
+    if not equiv_map:
+        logger.info("mlp_activations_opt: no repeated layers, flat compile path")
+        return compile_fx(gm, example_inputs)
+
+    logger.info(
+        "mlp_activations_opt: %d duplicate partition(s), dedup path", len(equiv_map)
+    )
+    for rep_name, rep_mod in registry.unique_reps:
+        compiled = compile_fx(rep_mod, example_inputs)
+        rep_mod.forward = compiled
+        for _dup_name, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    return lambda *args: registry.split(*args)
+
+
+# --------------------------------------------------------------------------- #
+# Workload interface.                                                          #
+# --------------------------------------------------------------------------- #
+DEVICE = "cuda"
 BATCH_SIZE = 256
-DIM_IN     = 512
+DIM_IN = 512
 DIM_HIDDEN = 2048
-DIM_OUT    = 512
+DIM_OUT = 512
+
+import torch.nn as nn  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
 
 class MLPActivations(nn.Module):
-    """
-    Four-layer MLP with heterogeneous activations.
+    """Four-layer MLP with heterogeneous activations (matches baseline)."""
 
-    Layer 1: Linear + ReLU
-    Layer 2: Linear + GELU
-    Layer 3: Linear + SiLU
-    Layer 4: Linear + Tanh
-    """
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.fc1 = nn.Linear(DIM_IN,     DIM_HIDDEN, bias=True)
+        self.fc1 = nn.Linear(DIM_IN, DIM_HIDDEN, bias=True)
         self.fc2 = nn.Linear(DIM_HIDDEN, DIM_HIDDEN, bias=True)
         self.fc3 = nn.Linear(DIM_HIDDEN, DIM_HIDDEN, bias=True)
-        self.fc4 = nn.Linear(DIM_HIDDEN, DIM_OUT,    bias=True)
+        self.fc4 = nn.Linear(DIM_HIDDEN, DIM_OUT, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.fc1(x))
@@ -117,392 +304,23 @@ class MLPActivations(nn.Module):
         return x
 
 
-# ---------------------------------------------------------------------------
-# FX Pass: OPT-1 Stage 2 — BF16 promotion on F.linear nodes (high confidence)
-# ---------------------------------------------------------------------------
-
-def _pass_promote_linear_to_bf16(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    OPT-1 Stage 2 — insert bfloat16 casts around every F.linear node.
-
-    At pre-Inductor level, nn.Linear lowers to call_function with
-    target=torch.nn.functional.linear, args=(input, weight, bias).
-
-    Strategy:
-      - Cast input, weight (and bias if present) to bfloat16 before the linear.
-      - Cast the output back to float32 so downstream activations and the next
-        linear's input-cast remain dtype-consistent.
-
-    This forces cuBLAS/Inductor to select a Tensor Core (BF16) GEMM algorithm
-    on Blackwell, replacing the SIMT Kernel2 path that had 0% Tensor Core
-    activity in the baseline profile.
-    """
-    try:
-        matched = False
-        graph = gm.graph
-        for node in list(graph.nodes):
-            if not (node.op == "call_function" and node.target is F.linear):
-                continue
-            matched = True
-
-            inp_node    = node.args[0]
-            weight_node = node.args[1]
-            bias_node   = node.args[2] if len(node.args) > 2 else None
-
-            with graph.inserting_before(node):
-                cast_inp = graph.call_function(
-                    torch.ops.aten.to.dtype,
-                    args=(inp_node, torch.bfloat16),
-                )
-                cast_w = graph.call_function(
-                    torch.ops.aten.to.dtype,
-                    args=(weight_node, torch.bfloat16),
-                )
-
-            new_args: tuple
-            if bias_node is not None:
-                with graph.inserting_before(node):
-                    cast_bias = graph.call_function(
-                        torch.ops.aten.to.dtype,
-                        args=(bias_node, torch.bfloat16),
-                    )
-                new_args = (cast_inp, cast_w, cast_bias)
-            else:
-                new_args = (cast_inp, cast_w)
-
-            node.args = new_args
-
-            # Restore float32 on the output to preserve downstream dtype contract
-            with graph.inserting_after(node):
-                cast_out = graph.call_function(
-                    torch.ops.aten.to.dtype,
-                    args=(node, torch.float32),
-                )
-            node.replace_all_uses_with(cast_out)
-            # Fix the self-reference broken by replace_all_uses_with
-            cast_out.args = (node,) + cast_out.args[1:]
-
-        if not matched:
-            logger.warning(
-                "[_pass_promote_linear_to_bf16] No F.linear nodes found — pass not applied"
-            )
-            return gm
-
-        graph.lint()
-        gm.recompile()
-        logger.info(
-            "[_pass_promote_linear_to_bf16] Applied BF16 casts to all F.linear nodes [OPT-1]"
-        )
-
-    except Exception as exc:
-        logger.warning("[_pass_promote_linear_to_bf16] Failed: %s", exc)
-
-    return gm
-
-
-# ---------------------------------------------------------------------------
-# FX Pass: OPT-4 — Batch repeated GEMMs sharing the same weight into bmm
-#                  (medium confidence)
-# ---------------------------------------------------------------------------
-
-def _pass_fuse_repeated_mm_to_bmm(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    OPT-4 — replace pairs of F.linear nodes that share a weight placeholder
-    with a single bmm on a stacked input batch.
-
-    Pattern: two call_function(F.linear, args=(x_i, w, bias)) nodes where
-    w (node.args[1]) is the identical FX node — i.e. the same weight placeholder
-    is consumed by two separate linear calls.
-
-    Replacement:
-      stack_input = torch.stack([x_0, x_1], dim=0)   # [2, M, K]
-      w_expanded  = w.unsqueeze(0).expand(2, -1, -1)  # [2, N, K]
-      bmm_out     = torch.bmm(stack_input, w_expanded.transpose(-1, -2))  # [2, M, N]
-      # ... then re-add bias and select slices for each original user
-
-    Note: At the pre-Inductor level this MLP has distinct weight parameters for
-    each of the four layers, so no weights are actually shared. The pass detects
-    this gracefully and logs a warning rather than transforming the graph.
-    The implementation is correct for workloads where weight sharing does occur
-    (e.g. tied embeddings or repeated blocks with shared projection weights).
-
-    Bias handling: F.linear adds bias after the matmul. For the batched case,
-    we add the bias to each bmm slice before returning the per-original output.
-    """
-    try:
-        matched = False
-        graph = gm.graph
-        nodes_snapshot = list(graph.nodes)
-
-        # Group F.linear nodes by their weight argument (node identity = same tensor)
-        weight_to_linears: dict = defaultdict(list)
-        for node in nodes_snapshot:
-            if node.op == "call_function" and node.target is F.linear:
-                weight_arg = node.args[1]
-                weight_to_linears[weight_arg].append(node)
-
-        for weight_node, linear_nodes in weight_to_linears.items():
-            if len(linear_nodes) < 2:
-                continue
-
-            # Only fuse pairs (extend to N in a loop if needed)
-            n1, n2 = linear_nodes[0], linear_nodes[1]
-            bias_n1 = n1.args[2] if len(n1.args) > 2 else None
-            bias_n2 = n2.args[2] if len(n2.args) > 2 else None
-            inp_n1  = n1.args[0]
-            inp_n2  = n2.args[0]
-
-            # n1 must appear before n2 in topological order (already guaranteed
-            # by iterating nodes_snapshot in graph order)
-            matched = True
-
-            with graph.inserting_before(n1):
-                # Stack inputs along batch dim: [2, M, K]
-                stack_node = graph.call_function(
-                    torch.stack,
-                    args=([inp_n1, inp_n2],),
-                    kwargs={"dim": 0},
-                )
-                # Expand weight: [N, K] -> [1, N, K] -> [2, N, K]
-                w_unsqueezed = graph.call_function(
-                    torch.ops.aten.unsqueeze.default,
-                    args=(weight_node, 0),
-                )
-                w_expanded = graph.call_function(
-                    torch.ops.aten.expand.default,
-                    args=(w_unsqueezed, [2, -1, -1]),
-                )
-                # Transpose weight for mm: [2, N, K] -> [2, K, N]
-                w_transposed = graph.call_function(
-                    torch.ops.aten.transpose.int,
-                    args=(w_expanded, -1, -2),
-                )
-                # Batched matmul: [2, M, K] @ [2, K, N] -> [2, M, N]
-                bmm_node = graph.call_function(
-                    torch.ops.aten.bmm.default,
-                    args=(stack_node, w_transposed),
-                )
-                # Select slice 0 and 1 for the two original linears
-                slice0 = graph.call_function(
-                    torch.ops.aten.select.int,
-                    args=(bmm_node, 0, 0),
-                )
-                slice1 = graph.call_function(
-                    torch.ops.aten.select.int,
-                    args=(bmm_node, 0, 1),
-                )
-                # Re-add bias if present (F.linear semantics: output + bias)
-                out0: fx.Node = slice0
-                if bias_n1 is not None:
-                    out0 = graph.call_function(
-                        torch.ops.aten.add.Tensor,
-                        args=(slice0, bias_n1),
-                    )
-                out1: fx.Node = slice1
-                if bias_n2 is not None:
-                    out1 = graph.call_function(
-                        torch.ops.aten.add.Tensor,
-                        args=(slice1, bias_n2),
-                    )
-
-            n1.replace_all_uses_with(out0)
-            n2.replace_all_uses_with(out1)
-
-            logger.info(
-                "[_pass_fuse_repeated_mm_to_bmm] Fused %s + %s "
-                "sharing weight %s into bmm [OPT-4]",
-                n1.name, n2.name, weight_node.name,
-            )
-
-        if not matched:
-            logger.warning(
-                "[_pass_fuse_repeated_mm_to_bmm] No F.linear pairs share a weight node "
-                "— pass not applied (distinct weights per layer, as expected for this MLP) "
-                "[OPT-4]"
-            )
-            return gm
-
-        graph.eliminate_dead_code()
-        graph.lint()
-        gm.recompile()
-        logger.info("[_pass_fuse_repeated_mm_to_bmm] Applied [OPT-4]")
-
-    except Exception as exc:
-        logger.warning("[_pass_fuse_repeated_mm_to_bmm] Failed: %s", exc)
-
-    return gm
-
-
-# ---------------------------------------------------------------------------
-# Utility: capture partition inputs (needed for dedup path)
-# ---------------------------------------------------------------------------
-
-def _capture_partition_inputs(
-    split_gm: fx.GraphModule,
-    example_inputs: list,
-) -> dict[str, list]:
-    """Capture actual input tensors for each partition by running split_gm once."""
-    partition_inputs: dict[str, list] = {}
-    hooks = []
-    for name, submod in split_gm.named_children():
-        if isinstance(submod, fx.GraphModule):
-            def _hook(mod, args, _name=name):
-                partition_inputs[_name] = list(args)
-            hooks.append(submod.register_forward_pre_hook(_hook))
-    with torch.no_grad():
-        split_gm(*example_inputs)
-    for h in hooks:
-        h.remove()
-    return partition_inputs
-
-
-# ---------------------------------------------------------------------------
-# Backend: mlp_activations_opt
-# ---------------------------------------------------------------------------
-
-@register_backend
-def mlp_activations_opt(gm: fx.GraphModule, example_inputs) -> Callable:
-    """
-    Custom torch.compile() backend for MLPActivations.
-
-    Pass application order (per prerequisite_for constraints in optimizations.json):
-      1. OPT-4 — batch repeated GEMMs to bmm (before BF16 pass to avoid
-                 dtype mismatches in the pattern-matching check)
-      2. OPT-1 Stage 2 — BF16 cast on all F.linear nodes
-      3. OPT-2 — coordinate_descent_tuning (Inductor config; no graph change)
-      4. OPT-3 — epilogue_fusion (Inductor config; no graph change)
-      5. OPT-5 — max_autotune_gemm (Inductor config; stub)
-      6. Delegate to compile_fx
-
-    OPT-1 Stage 1 (TF32 global flags) is applied at module-load time above.
-    """
-    logger.info("mlp_activations_opt backend: starting FX pass pipeline")
-
-    # Build dedup registry to detect any repeated subgraph structure.
-    # MLPActivations has four distinct layers — no structural duplicates expected.
-    # The flat-compile path is the primary path.
-    registry = UniqueSubgraphRegistry(gm)
-    equiv_map = registry.build_partition_equivalence_map()
-
-    if not equiv_map:
-        # Flat path — no repeated partitions. Apply passes directly to full graph.
-        logger.info("mlp_activations_opt: no repeated partitions — flat compile path")
-
-        # OPT-4: batch repeated GEMMs (run before BF16 to keep pattern detection clean)
-        gm = _pass_fuse_repeated_mm_to_bmm(gm)
-
-        # OPT-1 Stage 2: BF16 cast on all F.linear nodes
-        gm = _pass_promote_linear_to_bf16(gm)
-
-        # OPT-2 + OPT-3 + OPT-5: Inductor config directives
-        _apply_inductor_config()
-
-        logger.info("mlp_activations_opt: delegating to Inductor compile_fx")
-        return compile_fx(gm, example_inputs)
-
-    # Dedup path — unexpected for MLPActivations, included for robustness
-    logger.info(
-        "mlp_activations_opt: %d duplicate partition(s) detected — dedup path",
-        len(equiv_map),
-    )
-
-    for rep_name, rep_mod in registry.unique_reps:
-        _pass_fuse_repeated_mm_to_bmm(rep_mod)
-        _pass_promote_linear_to_bf16(rep_mod)
-        for _, dup_mod in registry.duplicates_of(rep_name):
-            _pass_fuse_repeated_mm_to_bmm(dup_mod)
-            _pass_promote_linear_to_bf16(dup_mod)
-
-    _apply_inductor_config()
-
-    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
-
-    for rep_name, rep_mod in registry.unique_reps:
-        inputs = partition_inputs.get(rep_name, example_inputs)
-        compiled = compile_fx(rep_mod, inputs)
-        rep_mod.forward = compiled
-        for _, dup_mod in registry.duplicates_of(rep_name):
-            dup_mod.forward = compiled
-
-    return lambda *args: registry.split(*args)
-
-
-def _apply_inductor_config() -> None:
-    """
-    Apply Inductor config directives for OPT-2, OPT-3, and OPT-5.
-
-    OPT-2: coordinate_descent_tuning — lets Inductor's autotuner search
-    non-splitK tile configs for M=256 tall-skinny GEMMs.
-
-    OPT-3: epilogue_fusion — folds activation functions (relu/gelu/silu/tanh)
-    into the GEMM output tile write, eliminating separate pointwise kernels.
-
-    OPT-5: max_autotune_gemm — stub; enables Inductor to select lower-register
-    Triton GEMM templates. Depends on OPT-1 switching to TC-path first.
-    """
-    try:
-        import torch._inductor.config as inductor_config
-
-        # OPT-2: coordinate descent tile-size search (eliminates splitKreduce)
-        if not getattr(inductor_config, "coordinate_descent_tuning", False):
-            inductor_config.coordinate_descent_tuning = True
-            logger.info(
-                "mlp_activations_opt: coordinate_descent_tuning=True [OPT-2]"
-            )
-        if hasattr(inductor_config, "coordinate_descent_n_steps"):
-            inductor_config.coordinate_descent_n_steps = 10
-
-        # OPT-3: epilogue fusion for activation folding into GEMM
-        if not getattr(inductor_config, "epilogue_fusion", True):
-            inductor_config.epilogue_fusion = True
-            logger.info("mlp_activations_opt: epilogue_fusion=True [OPT-3]")
-        else:
-            # Already True by default in recent Inductor; log confirmation
-            logger.info(
-                "mlp_activations_opt: epilogue_fusion already enabled [OPT-3]"
-            )
-        if hasattr(inductor_config, "epilogue_fusion_first_threshold"):
-            inductor_config.epilogue_fusion_first_threshold = 1000
-            logger.info(
-                "mlp_activations_opt: epilogue_fusion_first_threshold=1000 [OPT-3]"
-            )
-
-        # OPT-5: max_autotune_gemm — enable Triton GEMM template autotuning
-        if not getattr(inductor_config, "max_autotune_gemm", False):
-            inductor_config.max_autotune_gemm = True
-            logger.info("mlp_activations_opt: max_autotune_gemm=True [OPT-5 stub]")
-        if hasattr(inductor_config, "max_autotune_gemm_backends"):
-            inductor_config.max_autotune_gemm_backends = "TRITON,ATEN"
-
-    except Exception as exc:
-        logger.warning("mlp_activations_opt: Inductor config setup failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Workload interface
-# ---------------------------------------------------------------------------
-
 def get_model_and_input() -> tuple:
     """
-    Return (uncompiled_model, input_tensor) ready for torch.compile.
+    Return (raw_model, input_tensor) on CUDA, uncompiled and unwarmed.
 
-    Non-graph optimizations applied here:
-    - OPT-1 Stage 1: TF32 global flags are set at module-load time above.
-      No model-level dtype conversion is done here; BF16 casts are injected
-      by the backend FX pass so the public interface stays float32.
-
-    No channels_last or batch-padding required: MLPActivations uses 2-D
-    input [BATCH_SIZE, DIM_IN] — channels_last only applies to 4-D NCHW tensors.
+    OPT-1 (dtype promotion) and OPT-2 (epilogue fusion) are graph-level passes
+    that run inside the backend, so no non-graph (dtype/layout/batch) changes are
+    applied here — the input stays fp32, [256, 512], exactly as the baseline.
     """
     assert torch.cuda.is_available(), "CUDA required"
     model = MLPActivations().to(DEVICE).eval()
-    x     = torch.randn(BATCH_SIZE, DIM_IN, device=DEVICE)
+    x = torch.randn(BATCH_SIZE, DIM_IN, device=DEVICE)
     return model, x
 
 
 if __name__ == "__main__":
     model, x = get_model_and_input()
-    compiled = torch.compile(model, backend=BACKEND_NAME)
+    compiled = torch.compile(model, backend="mlp_activations_opt")
     with torch.no_grad():
         out = compiled(x)
-    print(f"Output shape: {out.shape}, dtype: {out.dtype}")
+    print("output shape:", tuple(out.shape), "dtype:", out.dtype)

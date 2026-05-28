@@ -1,0 +1,245 @@
+{
+  "analysis": {
+    "model": "depthwise_separable_conv",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "compile_mode": "inductor",
+    "dtype": "fp32 (inferred: torch.randn default, no autocast; weights/inputs FP32)",
+    "total_profiled_wall_time_ms": 0.860312,
+    "edge_case_flags": [
+      "fused_kernel_double_count",
+      "dynamic_shapes"
+    ],
+    "time_budget": {
+      "layer::unique::prologue": { "pct": 50.9, "duration_ns": 437850, "kernel_count": 30 },
+      "aten::cudnn_convolution_0": { "pct": 18.66, "duration_ns": 160511, "kernel_count": 9 },
+      "aten::cudnn_convolution (op_id=26, PW 1x1 128->256)": { "pct": 5.64, "duration_ns": 48480, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=53, PW 1x1 128->256)": { "pct": 5.56, "duration_ns": 47872, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=18, PW 1x1 64->128)": { "pct": 3.14, "duration_ns": 27040, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=45, PW 1x1 64->128)": { "pct": 3.13, "duration_ns": 26912, "kernel_count": 1 },
+      "aten::convolution_0": { "pct": 2.5, "duration_ns": 21536, "kernel_count": 2 },
+      "aten::cudnn_convolution (op_id=49, DW 3x3 128ch)": { "pct": 1.93, "duration_ns": 16575, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=22, DW 3x3 128ch)": { "pct": 1.92, "duration_ns": 16512, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=37, PW 1x1 32->64)": { "pct": 1.62, "duration_ns": 13920, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=10, PW 1x1 32->64)": { "pct": 1.59, "duration_ns": 13696, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=41, DW 3x3 64ch)": { "pct": 1.03, "duration_ns": 8896, "kernel_count": 1 },
+      "aten::cudnn_convolution (op_id=14, DW 3x3 64ch)": { "pct": 1.02, "duration_ns": 8736, "kernel_count": 1 }
+    }
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "priority": 1,
+      "operators": [
+        "aten::cudnn_convolution (op_id=6,14,22,33,41,49 depthwise — 6 nodes)",
+        "aten::cudnn_convolution (op_id=10,18,26,37,45,53 pointwise — 6 nodes)",
+        "unattributed triton_poi_fused__native_batch_* (12 BatchNorm-fold kernels)"
+      ],
+      "bottleneck": {
+        "description": "The model is in eval() mode, so every nn.BatchNorm2d is a fixed affine transform (gamma/sqrt(var+eps) scale, beta-mean*scale shift). Because each convolution is dispatched to a cuDNN library kernel (conv2d_c1_k1_nhwc / 'Kernel2'), Inductor cannot fuse the BatchNorm into the conv epilogue and instead lowers each BN (and its ReLU6 clamp) into a standalone elementwise Triton kernel (triton_poi_fused__native_batch_norm_*). These kernels do a full-tensor DRAM read + affine + DRAM write with zero arithmetic reuse — pure memory traffic. There are at least 12 such kernels in the measure region (unattributed) plus more inside the prologue range, totaling ~132 us of avoidable elementwise/launch traffic.",
+        "evidence": {
+          "kernel": "triton_poi_fused__native_batch_norm_* (e.g. k_00060, k_00062, k_00064, k_00066, k_00068, k_00070, k_00073, k_00075, k_00077, k_00079, k_00081, k_00083)",
+          "total_launches": 12,
+          "total_duration_ns": 132509,
+          "fraction_of_op_time_pct": 15.4,
+          "counters": {
+            "grid_dim_matches_conv_output_tensors": 1.0,
+            "metrics_raw_empty_pure_memory_movement": 1.0,
+            "is_eval_mode_bn_constant_foldable": 1.0
+          }
+        }
+      },
+      "transformation": {
+        "type": "fusion",
+        "description": "Conv-BatchNorm folding at the Aten IR. In inference, fold each batch_norm that consumes a convolution output directly into the convolution's weight and bias: W' = W * (gamma / sqrt(running_var + eps)).reshape(-1,1,1,1); b' = beta + (b - running_mean) * gamma / sqrt(running_var + eps). After folding, the BN node is removed from the graph and its standalone Triton kernel disappears; the conv output then feeds the ReLU6 (hardtanh) clamp directly, which Inductor can pointwise-fuse into the (now sole) following elementwise op. This both eliminates ~12 elementwise kernels per forward and removes their full-tensor DRAM read/write traffic.",
+        "location": "Custom FX pass over the Aten/Inductor pre-grad graph, registered ahead of Inductor lowering.",
+        "fx_steps": [
+          "for node in graph.find_nodes(op='call_function', target=torch.ops.aten.convolution.default):",
+          "    users = list(node.users)",
+          "    if len(users) != 1: continue",
+          "    bn = users[0]",
+          "    if bn.target not in (torch.ops.aten._native_batch_norm_legit_no_training.default, torch.ops.aten.batch_norm.default): continue",
+          "    # unpack conv (input, weight, bias, stride, padding, dilation, transposed, output_padding, groups)",
+          "    conv_w = get_attr_tensor(node.args[1]); conv_b = node.args[2]",
+          "    weight_bn, bias_bn, running_mean, running_var = bn.args[1], bn.args[2], bn.args[3], bn.args[4]; eps = bn.args[-1]",
+          "    inv_std = torch.rsqrt(running_var + eps)",
+          "    folded_w = conv_w * (weight_bn * inv_std).reshape(-1, 1, 1, 1)",
+          "    folded_b = bias_bn + (((conv_b if conv_b is not None else 0) - running_mean) * weight_bn * inv_std)",
+          "    update conv weight/bias placeholders (register_buffer / get_attr) with folded_w, folded_b",
+          "    bn.replace_all_uses_with(node)",
+          "    graph.erase_node(bn)",
+          "graph.lint(); recompile()"
+        ],
+        "code_hint": "Equivalent to torch.ao.nn.intrinsic conv-bn fusion / torch.fx.experimental.optimization.fuse(model, inplace=True) applied in eval mode before Inductor; do the fold on the Aten graph so it covers all 6 conv->BN pairs."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 110000,
+        "duration_reduction_pct_of_total": 12.8,
+        "kernel_launches_eliminated": 12,
+        "memory_traffic_reduction": "Removes ~12 full-tensor read+write passes over the conv outputs (BN affine traffic). Approx 100+ GB-units of redundant DRAM read+write eliminated across the 3 blocks (BN kernels read every conv output element and write it back)."
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-2", "OPT-3"],
+      "notes": "Foundational pass: it rewrites convolution weight/bias constants, so it MUST run before OPT-2 (1x1->matmul, which reshapes the folded weight) and OPT-3 (depthwise Triton fusion). Standard high-confidence inference transform. Folded weights are allocated at the runtime dtype (FP32 here); if a dtype-promotion pass were added it must precede this fold."
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": [
+        "aten::cudnn_convolution (op_id=10,18,26,37,45,53 pointwise 1x1 — 6 nodes)"
+      ],
+      "bottleneck": {
+        "description": "The 1x1 pointwise convolutions are dispatched to a cuDNN kernel ('Kernel2') that is severely occupancy/latency-bound, NOT compute-bound. A 1x1 conv is mathematically a GEMM (B*H*W, C_in) x (C_in, C_out) = (50176, C_in) x (C_in, C_out), which is the ideal regime for a cuBLAS tensor-core GEMM. cuDNN instead selected a kernel using 224-228 registers/thread and ~82 KB dynamic shared memory, which caps achieved_occupancy at ~8.3% and leaves eligible_cycles at 16-20% (latency-bound on Blackwell, the <20% indicator since warp_cycles_per_instruction is unavailable). Tensor cores fire only 39-45% of the time and DRAM throughput sits at 26-31%. The largest two (128->256, op_id 26 & 53) cost ~48 us each and are the biggest single kernels in the profile.",
+        "evidence": {
+          "kernel": "Kernel2 (cuDNN 1x1 pointwise; dominant k_00069 / k_00082 for 128->256)",
+          "total_launches": 6,
+          "total_duration_ns": 177920,
+          "fraction_of_op_time_pct": 20.7,
+          "counters": {
+            "achieved_occupancy": 8.31,
+            "eligible_cycles_pct": 16.34,
+            "registers_per_thread": 228.0,
+            "dynamic_smem_per_block_kb": 81.92,
+            "tensor_core_active_pct": 44.98,
+            "dram_throughput_pct": 31.19,
+            "sm_throughput_pct": 36.91,
+            "grid_x": 784.0
+          }
+        }
+      },
+      "transformation": {
+        "type": "memory_layout",
+        "description": "Rewrite each 1x1, stride-1, padding-0, groups-1, dilation-1 convolution as an explicit GEMM so it routes to cuBLAS / Inductor's GEMM template instead of the 8%-occupancy cuDNN 'Kernel2'. Reshape activation from (N,C_in,H,W) to (N*H*W, C_in), reshape weight from (C_out,C_in,1,1) to (C_in,C_out)^T, do aten.mm/aten.addmm, then reshape back to (N,C_out,H,W). cuBLAS picks a tile/occupancy-balanced tensor-core GEMM, lifting occupancy and TC utilization well above the cuDNN choice for these large M=50176 problems.",
+        "location": "Custom FX pass over the Aten pre-grad graph (after OPT-1 folding).",
+        "fx_steps": [
+          "for node in graph.find_nodes(op='call_function', target=torch.ops.aten.convolution.default):",
+          "    inp, w = node.args[0], node.args[1]; stride, pad, dil = node.args[3], node.args[4], node.args[5]; groups = node.args[8]",
+          "    if not (kernel_hw(w)==(1,1) and stride==[1,1] and pad==[0,0] and dil==[1,1] and groups==1): continue",
+          "    with graph.inserting_before(node):",
+          "        x_perm = graph.call_function(torch.ops.aten.permute.default, (inp, [0,2,3,1]))   # N,H,W,C_in",
+          "        x_2d   = graph.call_function(torch.ops.aten.reshape.default, (x_perm, [-1, C_in]))",
+          "        w_2d   = graph.call_function(torch.ops.aten.reshape.default, (w, [C_out, C_in]))",
+          "        w_t    = graph.call_function(torch.ops.aten.t.default, (w_2d,))",
+          "        mm     = graph.call_function(torch.ops.aten.addmm.default, (bias, x_2d, w_t)) if bias is not None else graph.call_function(torch.ops.aten.mm.default, (x_2d, w_2d_T))",
+          "        out_p  = graph.call_function(torch.ops.aten.reshape.default, (mm, [N, H, W, C_out]))",
+          "        out    = graph.call_function(torch.ops.aten.permute.default, (out_p, [0,3,1,2]))",
+          "    node.replace_all_uses_with(out)",
+          "    graph.erase_node(node)",
+          "graph.lint(); recompile()"
+        ],
+        "code_hint": "Inductor has a conv-1x1-as-mm rewrite but only applies it under certain layout/heuristic conditions; forcing it here guarantees the cuBLAS GEMM path. Keep the activation in channels_last so the permute is a metadata-only view and the mm reads contiguous (M, C_in) rows (pairs well with OPT-4)."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 90000,
+        "duration_reduction_pct_of_total": 10.5,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "Same logical FLOPs, but a well-occupied cuBLAS GEMM raises achieved occupancy from ~8% toward 50-70% and tensor-core utilization from ~45% toward >80%, roughly halving the wall time of the two 48 us 128->256 kernels and the two 27 us 64->128 kernels."
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "Must run after OPT-1 (folds BN scale/shift into the conv weight that this pass reshapes). Capped at medium per fallback policy (exa-search/context7 unavailable to confirm the exact Blackwell cuBLAS tile choice). Estimate uses relative duration only; ncu counter inflation (2-5x) means absolute ns are not literal."
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": [
+        "aten::convolution (op_id=4,12,20,31,39,47 depthwise — triton_poi_fused_convolution_0 layout/copy)",
+        "aten::cudnn_convolution (op_id=6,14,22,33,41,49 depthwise 3x3)"
+      ],
+      "bottleneck": {
+        "description": "Each depthwise stage emits an Inductor layout-conversion kernel 'triton_poi_fused_convolution_0' (NCHW->channels-last copy feeding cuDNN's NHWC depthwise) that is pure bandwidth movement: 25 regs/thread, IPC 0.09, sm_throughput 9.6%, eligible_cycles ~9% (deeply latency-bound), tensor_core 0%. It exists only to satisfy the cuDNN depthwise layout. The depthwise conv itself (conv2d_c1_k1_nhwc) is correctly memory-bound (occ 72-87%, DRAM 48-74%, tc 0% as expected for depthwise) and is healthy — but it is preceded by this redundant copy and followed by a separate BN/ReLU6 kernel.",
+        "evidence": {
+          "kernel": "triton_poi_fused_convolution_0 (k_00058, k_00071, and prologue copies)",
+          "total_launches": 2,
+          "total_duration_ns": 21536,
+          "fraction_of_op_time_pct": 2.5,
+          "counters": {
+            "registers_per_thread": 25.0,
+            "ipc_active": 0.09,
+            "sm_throughput_pct": 9.58,
+            "eligible_cycles_pct": 9.0,
+            "tensor_core_active_pct": 0.0,
+            "dram_throughput_pct": 50.77
+          }
+        }
+      },
+      "transformation": {
+        "type": "fusion",
+        "description": "Force the depthwise 3x3 conv through Inductor's own Triton convolution codegen instead of cuDNN. Because the depthwise conv is memory-bound (tc 0%) and Inductor can pointwise-fuse the (already BN-folded) bias add and the ReLU6 hardtanh into the same Triton kernel, a single fused depthwise-conv+clamp Triton kernel replaces the {layout-copy + cuDNN depthwise + separate activation} trio, eliminating the redundant copy kernel and one elementwise launch per stage.",
+        "location": "Inductor config (force convolution lowering for grouped/depthwise convs) plus the OPT-1 epilogue fusion; alternatively an explicit FX rewrite of aten.convolution(groups==C_in) to an Inductor-lowerable form.",
+        "fx_steps": [
+          "for node in graph.find_nodes(op='call_function', target=torch.ops.aten.convolution.default):",
+          "    if node.args[8] == channels_of(node.args[0]):   # groups == in_channels -> depthwise",
+          "        mark node with meta['inductor_force_triton'] = True   # opt out of cuDNN dispatch",
+          "    # ensure the following hardtanh(0,6) and any folded-bias add remain immediate users so Inductor's",
+          "    # pointwise scheduler fuses them into the conv epilogue (no separate elementwise kernel)",
+          "set torch._inductor.config.max_autotune_conv_backends to prefer 'triton' for grouped convs"
+        ],
+        "code_hint": "The 'conv2d_c1_k1_nhwc' depthwise kernel is already efficient; the win is removing 'triton_poi_fused_convolution_0' (the NCHW->NHWC copy) and folding the activation. Validate that the Triton depthwise codegen does not regress the memory-bound stage before committing."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 21000,
+        "duration_reduction_pct_of_total": 2.4,
+        "kernel_launches_eliminated": 8,
+        "memory_traffic_reduction": "Eliminates the redundant full-tensor layout copy before each depthwise conv (1 copy read+write per stage) and folds the depthwise activation into the conv epilogue."
+      },
+      "confidence": "low",
+      "prerequisite_for": [],
+      "notes": "Must run after OPT-1 so the activation/bias fuse into the depthwise epilogue. Low confidence: Inductor's Triton depthwise codegen can be slower than cuDNN for some shapes; gate behind an autotune comparison. Largely overlaps with OPT-4 (channels_last also removes the copy)."
+    },
+    {
+      "id": "OPT-4",
+      "priority": 4,
+      "operators": [
+        "aten::convolution (op_id=4,12,20,31,39,47 — triton_poi_fused_convolution_0 layout copies)"
+      ],
+      "bottleneck": {
+        "description": "The depthwise convs run NHWC (conv2d_c1_k1_nhwc) and the pointwise GEMM (after OPT-2) prefers row-contiguous channels-last activations, but the graph default is NCHW, forcing per-stage layout-conversion copies (triton_poi_fused_convolution_0, eligible_cycles 9%, sm 9.6%). Running the entire model in channels_last keeps a single consistent layout end-to-end so these copies collapse to metadata-only views.",
+        "evidence": {
+          "kernel": "triton_poi_fused_convolution_0 (layout copy, k_00058/k_00071 + prologue)",
+          "total_launches": 2,
+          "total_duration_ns": 21536,
+          "fraction_of_op_time_pct": 2.5,
+          "counters": {
+            "ipc_active": 0.09,
+            "eligible_cycles_pct": 9.0,
+            "sm_throughput_pct": 9.58
+          }
+        }
+      },
+      "transformation": {
+        "type": "memory_layout",
+        "description": "Enforce channels_last (NHWC) for the whole subgraph: convert the graph input to channels_last once at the entry and let layout propagate so every depthwise (NHWC-native) and pointwise (GEMM) consumer reads its preferred layout without per-stage copies. At FX, insert one aten.clone with memory_format=channels_last at the placeholder and drop redundant intervening contiguous/copy nodes between consecutive convs.",
+        "location": "FX pass over the Aten graph input + redundant-copy elimination between conv stages.",
+        "fx_steps": [
+          "inp = next(n for n in graph.nodes if n.op == 'placeholder')",
+          "with graph.inserting_after(inp):",
+          "    cl = graph.call_function(torch.ops.aten.clone.default, (inp,), {'memory_format': torch.channels_last})",
+          "inp.replace_all_uses_with(cl); cl.update_arg(0, inp)",
+          "# remove now-redundant layout copies that Inductor inserted before each depthwise conv",
+          "for node in list(graph.find_nodes(op='call_function', target=torch.ops.aten.clone.default)):",
+          "    if produces_same_layout_as_input(node): node.replace_all_uses_with(node.args[0]); graph.erase_node(node)",
+          "graph.lint()"
+        ],
+        "code_hint": "Equivalent at the module level to model.to(memory_format=torch.channels_last) and x = x.to(memory_format=torch.channels_last); doing it in the graph guarantees Inductor keeps the layout stable across all 3 blocks."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 18000,
+        "duration_reduction_pct_of_total": 2.1,
+        "kernel_launches_eliminated": 6,
+        "memory_traffic_reduction": "Collapses the per-stage NCHW<->NHWC layout copies into metadata views; one read+write full-tensor copy removed per depthwise stage."
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "Independent of OPT-1/2 but most effective applied after OPT-2 so the GEMM permute becomes a no-op view. Overlaps with OPT-3's copy elimination; apply whichever the autotuner shows is cheaper, not both redundantly."
+    }
+  ],
+  "global_notes": [
+    "2 operators below 1% threshold omitted (combined 1.37% of attributed time): aten::cudnn_convolution op_id=6 (DW 3x3 32ch, 5856 ns, 0.68%) and op_id=33 (DW 3x3 32ch, 5920 ns, 0.69%).",
+    "ASSUMPTION: knowledge/hardware-limits.md and knowledge/fx-patterns.md were not present in this checkout (searched several candidate paths). Architecture context uses established Blackwell facts for the RTX PRO 6000 Blackwell Server Edition: sm_count assumed = 188; warp_cycles_per_instruction is unavailable on Blackwell (confirmed null in every aggregated block) so eligible_cycles_pct < 20% is used as the latency-bound indicator. FX patterns use canonical Aten-IR surgery (conv-bn fold, conv1x1->mm, channels_last) per fallback policy; novel-pass confidence capped at medium.",
+    "EDGE CASE fused_kernel_double_count: every fine-grained per-op-id entry has is_fused == true, and the coarse aggregations 'layer::unique::prologue' (437850 ns, 30 kernels) and 'aten::cudnn_convolution_0' (160511 ns, 9 kernels) are NVTX/torch_profiler roll-ups that cover the SAME kernels as the fine-grained is_fused entries. Summing all non-null aggregated blocks (860312 ns, per spec) therefore double-counts: 'prologue' is essentially the first (warm-up) compiled iteration spanning start_ns 4.256e9-4.659e9, while the per-op-id measure kernels run from 4.659e9 onward. All bottleneck mechanisms and impact estimates are derived from the fine-grained measure-iteration kernels, not from the inflated sum.",
+    "EDGE CASE dynamic_shapes (FALSE POSITIVE): kernels sharing the name 'Kernel2' have durations spanning 13696-48480 ns (>50% CV), which trips the dynamic-shapes heuristic. This is NOT dynamic shaping — these are statically-distinct conv shapes (32->64, 64->128, 128->256) that happen to dispatch to the same cuDNN kernel symbol. No shape-specialization opportunity.",
+    "duration_ns values are inflated 2-5x by ncu counter collection and are used only for relative ranking within this profile, never as absolute latency.",
+    "Dependency DAG: OPT-1 (conv-BN fold) rewrites convolution weight/bias constants and is a prerequisite for OPT-2 (1x1->mm reshapes the folded weight) and OPT-3 (depthwise epilogue fusion folds the activation). OPT-4 (channels_last) is independent but best applied after OPT-2; OPT-3 and OPT-4 both eliminate the layout-copy kernel and should not both be applied. No cycles. Recommended order: OPT-1 -> OPT-2 -> OPT-4 (with OPT-3 as an autotune-gated alternative to OPT-4).",
+    "19 pre-NVTX initialization kernels (k_00000-k_00018: conv_depthwise2d_forward, bn_fw_inf, vectorized_elementwise, Kernel2) are flagged as warm-up in profile.warnings and are correctly excluded from the budget."
+  ]
+}

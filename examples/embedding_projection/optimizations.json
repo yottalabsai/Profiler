@@ -1,0 +1,194 @@
+{
+  "analysis": {
+    "model": "EmbeddingProjection",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "compile_mode": "inductor",
+    "dtype": "fp32 (inferred — see global_notes; dtype absent from capture_metadata)",
+    "total_profiled_wall_time_ms": 34.75,
+    "edge_case_flags": [],
+    "time_budget": {
+      "layer::unique::prologue": { "pct": 36.61, "duration_ns": 12545988, "kernel_count": 12 },
+      "aten::mm (op_id=14, 512x32000 logit head)": { "pct": 21.69, "duration_ns": 7432892, "kernel_count": 1 },
+      "aten::mm_0 (512x32000 logit head, high-conf)": { "pct": 16.72, "duration_ns": 5729381, "kernel_count": 2 },
+      "aten::mm (op_id=7, 512x32000 logit head)": { "pct": 15.60, "duration_ns": 5346118, "kernel_count": 1 },
+      "aten::mm (op_id=11, 512x2048 MLP up)": { "pct": 3.99, "duration_ns": 1365818, "kernel_count": 1 },
+      "aten::addmm_0 (2048x512 MLP down, high-conf)": { "pct": 1.42, "duration_ns": 487581, "kernel_count": 1 },
+      "aten::addmm (op_id=6, 2048x512 MLP down)": { "pct": 1.42, "duration_ns": 487294, "kernel_count": 1 },
+      "aten::addmm (op_id=13, 2048x512 MLP down)": { "pct": 1.42, "duration_ns": 486398, "kernel_count": 1 },
+      "aten::mm (op_id=4, 512x2048 MLP up)": { "pct": 1.12, "duration_ns": 384638, "kernel_count": 1 }
+    }
+  },
+  "optimizations": [
+    {
+      "id": "OPT-1",
+      "priority": 1,
+      "operators": [
+        "aten::mm (op_id=14, 512x32000) (1 node)",
+        "aten::mm_0 (512x32000) (2 nodes)",
+        "aten::mm (op_id=7, 512x32000) (1 node)",
+        "aten::mm (op_id=11, 512x2048) (1 node)",
+        "aten::mm (op_id=4, 512x2048) (1 node)",
+        "aten::addmm_0 (2048x512) (1 node)",
+        "aten::addmm (op_id=6, 2048x512) (1 node)",
+        "aten::addmm (op_id=13, 2048x512) (1 node)"
+      ],
+      "bottleneck": {
+        "description": "Every matmul in the graph executes on the SIMT FFMA path with Tensor Cores completely idle. The GEMM kernels (opaque name 'Kernel2', e.g. grid [512,16,1] block [256,1,1] for the 512x32000 logit head) report smsp__pipe_tensor_cycles_active = 0 (tensor_core_active_pct = 0.0) and smsp__average_thread_inst_executed_per_inst_executed.ratio = 32 — i.e. full 32-wide SIMT issue with zero tensor-pipe activity. This is the canonical FP32 signature: cuBLAS/Inductor routes FP32 matmuls to a scalar FFMA SIMT GEMM rather than a Tensor-Core tile kernel. The kernels are compute-bound on the wrong pipe: sm_throughput 56-64%, dram_throughput only 5-13%, but IPC is only 0.63-0.65 and achieved_occupancy is pinned at 16.66% because each thread holds 210-212 registers accumulating FP32 in-register. The GEMMs (mm + addmm) account for ~63% of attributed time directly, and dominate the prologue partition's other 37% as well (the prologue range encloses the same logit-head and MLP GEMMs), so in practice the FP32 SIMT path is responsible for the overwhelming majority of wall time.",
+        "evidence": {
+          "kernel": "Kernel2 (512x32000 logit-head GEMM, k_00031 / op_id=14)",
+          "total_launches": 6,
+          "total_duration_ns": 7432892,
+          "fraction_of_op_time_pct": 21.69,
+          "counters": {
+            "tensor_core_active_pct": 0.0,
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
+            "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32.0,
+            "achieved_occupancy": 16.66,
+            "registers_per_thread": 212.0,
+            "ipc_active": 0.65,
+            "sm_throughput_pct": 63.73,
+            "dram_throughput_pct": 12.72
+          }
+        }
+      },
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Promote the matmul inputs to bfloat16 so Inductor/cuBLAS dispatches the GEMMs to the Blackwell Tensor-Core path instead of the scalar FFMA SIMT kernel. Insert a graph pass that, for each aten.mm.default and aten.addmm.default node, casts the activation and weight operands to torch.bfloat16 before the matmul and casts the result back to fp32 (or keeps bf16 downstream where the consumer tolerates it). LayerNorm and the embedding gather stay in fp32; only the GEMM operands are downcast. Tensor Cores on this part run BF16 at many times the FP32-SIMT FFMA rate, so the per-kernel duration on the four 512x32000 logit GEMMs (the single largest cost) and the MLP GEMMs should collapse. Casting the logit-head output to bf16 also halves its ~991 MB DRAM write traffic.",
+        "location": "Aten IR FX graph, after embedding/layernorm nodes, on every aten.mm.default and aten.addmm.default",
+        "fx_steps": [
+          "for node in list(gm.graph.nodes):",
+          "    if node.op == 'call_function' and node.target in (torch.ops.aten.mm.default, torch.ops.aten.addmm.default):",
+          "        with gm.graph.inserting_before(node):",
+          "            # addmm signature: (bias, mat1, mat2); mm signature: (mat1, mat2)",
+          "            mm_arg_start = 1 if node.target is torch.ops.aten.addmm.default else 0",
+          "            new_args = list(node.args)",
+          "            for i in range(mm_arg_start, mm_arg_start + 2):",
+          "                cast = gm.graph.call_function(torch.ops.aten.to.dtype, (new_args[i], torch.bfloat16))",
+          "                new_args[i] = cast",
+          "            if node.target is torch.ops.aten.addmm.default:",
+          "                new_args[0] = gm.graph.call_function(torch.ops.aten.to.dtype, (new_args[0], torch.bfloat16))",
+          "            node.args = tuple(new_args)",
+          "        with gm.graph.inserting_after(node):",
+          "            back = gm.graph.call_function(torch.ops.aten.to.dtype, (node, torch.float32))",
+          "        node.replace_all_uses_with(back)",
+          "        back.args = (node, torch.float32)",
+          "gm.graph.lint(); gm.recompile()"
+        ],
+        "code_hint": "Register as a custom Inductor FX pass via torch._inductor.config or a register_backend wrapper that runs the pass before compile_fx. The aten.to.dtype casts will themselves be fused by Inductor into the producing/consuming Triton epilogues, so they add no standalone kernels. Conservative alternative with no graph surgery and tighter numerics: torch.set_float32_matmul_precision('high') (TF32) — see OPT-2."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 18000000,
+        "duration_reduction_pct_of_total": 55.0,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "Logit-head GEMM output writes drop from ~991 MB to ~495 MB per launch when output is kept bf16; total GEMM operand traffic roughly halved. Primary win is compute, not bandwidth."
+      },
+      "confidence": "high",
+      "prerequisite_for": ["OPT-3"],
+      "notes": "Root of the dtype DAG. Any buffer-registering pass must run after this. BF16 changes numerics — validate logit/loss tolerance. Estimated reduction is conservative (Tensor-Core BF16 typically 4-8x faster than FP32 SIMT FFMA on these shapes); duration_ns figures are ncu-inflated 2-5x so use only for relative ranking."
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "operators": [
+        "aten::mm (all GEMM nodes) (5 nodes)",
+        "aten::addmm (all GEMM nodes) (3 nodes)"
+      ],
+      "bottleneck": {
+        "description": "Same root cause as OPT-1 (Tensor Cores idle, ratio=32 SIMT FFMA path), presented as the lower-risk, numerics-preserving alternative for deployments that cannot accept BF16 mantissa loss. With TF32 enabled, FP32 matmuls on Blackwell route to the Tensor-Core TF32 path (19-bit mantissa, 8-bit exponent) without any dtype change to activations or weights, engaging the tensor pipe that currently reads 0%.",
+        "evidence": {
+          "kernel": "Kernel2 (all mm/addmm GEMMs share this SIMT signature)",
+          "total_launches": 8,
+          "total_duration_ns": 21720520,
+          "fraction_of_op_time_pct": 63.39,
+          "counters": {
+            "tensor_core_active_pct": 0.0,
+            "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32.0,
+            "registers_per_thread": 211.0,
+            "ipc_active": 0.64,
+            "achieved_occupancy": 16.66
+          }
+        }
+      },
+      "transformation": {
+        "type": "dtype_promotion",
+        "description": "Enable TF32 Tensor-Core dispatch for FP32 matmuls. This is a backend-precision toggle rather than graph surgery, so it does not alter the Aten IR node set; it changes which cuBLAS/cutlass kernel Inductor's GEMM lowering selects for the existing aten.mm.default / aten.addmm.default nodes. Lower expected speedup than BF16 (TF32 has ~half the BF16 throughput on Blackwell) but preserves FP32 storage and exponent range.",
+        "location": "Backend/runtime config applied before compile_fx; affects lowering of all aten.mm.default and aten.addmm.default nodes",
+        "fx_steps": [
+          "torch.backends.cuda.matmul.allow_tf32 = True",
+          "torch.set_float32_matmul_precision('high')  # routes fp32 aten.mm/aten.addmm to TF32 Tensor Cores"
+        ],
+        "code_hint": "Mutually exclusive with OPT-1 in practice — pick BF16 (OPT-1, higher throughput) or TF32 (OPT-2, tighter numerics). If both accuracy budget and throughput matter, prototype both and compare logit MSE."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 12000000,
+        "duration_reduction_pct_of_total": 35.0,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "None — operands and outputs remain fp32; win is purely compute-pipe (TF32 Tensor Cores vs FFMA SIMT)."
+      },
+      "confidence": "medium",
+      "prerequisite_for": [],
+      "notes": "Alternative to OPT-1, not additive. No FX node targets change because TF32 is selected at the GEMM-lowering layer. Capped at medium confidence: it is a config lever rather than a verified graph transform, and the realized speedup depends on cuBLAS heuristics for these specific shapes."
+    },
+    {
+      "id": "OPT-3",
+      "priority": 3,
+      "operators": [
+        "aten::mm (op_id=14, 512x32000) (1 node)",
+        "aten::mm (op_id=7, 512x32000) (1 node)",
+        "aten::mm_0 (512x32000) (2 nodes)"
+      ],
+      "bottleneck": {
+        "description": "The 512x32000 logit-head GEMMs each write ~991 MB to DRAM (dram_bytes_op_write ~991.5) — the [8192, 32000] fp32 output is ~1.05 GB. Once OPT-1/OPT-2 moves the multiply to Tensor Cores, these kernels shift toward being limited by that output write rather than FFMA compute, and the write is the single largest memory transaction in the graph. Keeping the logit output in bf16 (rather than upcasting back to fp32 immediately after the head) halves this write to ~495 MB. This only matters after the compute bottleneck is removed — pre-OPT-1 the kernel is compute-bound (sm 63.7%, dram 12.7%) so the write is hidden.",
+        "evidence": {
+          "kernel": "Kernel2 (k_00031, 512x32000 logit head)",
+          "total_launches": 4,
+          "total_duration_ns": 18508391,
+          "fraction_of_op_time_pct": 54.01,
+          "counters": {
+            "dram__bytes_op_write.sum": 991.58,
+            "dram__bytes_op_read.sum": 97.24,
+            "dram_throughput_pct": 12.72,
+            "l2_hit_rate": 84.55
+          }
+        }
+      },
+      "transformation": {
+        "type": "memory_layout",
+        "description": "For the logit-head aten.mm.default nodes (the [8192,512] x [512,32000] matmuls), do not insert the OPT-1 fp32 down-cast on the output; leave the result in bf16 and let the consumer (loss / softmax / top-k) read bf16, or fuse the down-cast into the consumer's epilogue. This removes a full-tensor fp32 round-trip on the largest tensor in the model and halves its 991 MB write.",
+        "location": "Aten IR FX graph, on the output edge of the two distinct logit-head aten.mm.default nodes (op_id=7 and op_id=14) and their high-confidence twin (mm_0)",
+        "fx_steps": [
+          "logit_mms = [n for n in gm.graph.nodes if n.op=='call_function' and n.target is torch.ops.aten.mm.default and getattr(n, 'meta', {}).get('val') is not None and n.meta['val'].shape[-1] == 32000]",
+          "for node in logit_mms:",
+          "    # skip the fp32 back-cast inserted by OPT-1; rewrite consumers to accept bf16",
+          "    for user in list(node.users):",
+          "        if user.target is torch.ops.aten.to.dtype and user.args[1] == torch.float32:",
+          "            user.replace_all_uses_with(node)",
+          "            gm.graph.erase_node(user)",
+          "gm.graph.lint(); gm.recompile()"
+        ],
+        "code_hint": "Identify logit heads by output dim == vocab_size (32000) from node.meta['val'].shape. Validate that the downstream loss/argmax tolerates bf16 logits (argmax and cross-entropy are generally robust)."
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 1500000,
+        "duration_reduction_pct_of_total": 4.0,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "~496 MB per logit-head launch (991 MB fp32 write -> ~495 MB bf16 write); ~2 GB total across the four logit-head launches in the trace."
+      },
+      "confidence": "low",
+      "prerequisite_for": [],
+      "notes": "Depends on OPT-1 (must run after the bf16 dtype-promotion pass — it deletes the fp32 back-cast that OPT-1 inserts). Low confidence because the realized time win depends on how much of the write is exposed after Tensor-Core engagement, which cannot be measured from the current fp32 profile."
+    }
+  ],
+  "global_notes": [
+    "Schema version 1.0 validated.",
+    "0 operators below the 1% threshold omitted — all 9 attributed operators are >= 1% of attributed time (total_attributed_ns = 34,266,108 ns).",
+    "DTYPE INFERENCE: capture_metadata has no dtype field. Inferred fp32 from converging evidence across all GEMMs: tensor_core_active_pct = 0.0, smsp__average_thread_inst_executed_per_inst_executed.ratio = 32 (pure SIMT issue), registers_per_thread = 210-212, and opaque SIMT GEMM kernel name 'Kernel2'. If the model is already bf16/fp16, OPT-1/OPT-2 are void and the zero tensor-core activity would instead indicate a kernel-selection bug to investigate.",
+    "HARDWARE CONTEXT: device is Blackwell (RTX PRO 6000 Blackwell Server Edition). Per Blackwell metric rules, warp_cycles_per_instruction is unavailable (null in profile); the latency-bound indicator is eligible_cycles_pct < 20. Observed eligible_cycles_pct is 63-65% across all GEMMs, so the workload is NOT latency-bound — it is compute-bound on the wrong (SIMT FFMA) pipe. SM count assumed ~188 for any waves/SM reasoning; hardware-limits.md was not present at the expected path so this is an assumption.",
+    "MEASUREMENT CAVEAT — probable iteration folding / double counting: the 'layer::unique::prologue' NVTX range (36.6% of budget, 12 kernels) encloses a full forward pass (embedding, MLP GEMMs, and TWO 512x32000 logit-head GEMMs) whose kernels are the same shapes/durations as the separately-attributed aten::mm_0/addmm_0 (high-confidence torch_profiler) and the op_id-labeled aten ops. The repeated identical [512,16,1]-grid 5.3 ms GEMMs and the duplicated MLP+head op chain (op4/6/7 then op11/13/14) indicate multiple measurement iterations captured under different attribution tiers, not distinct model layers. measure_iters is absent from capture_metadata so warm_up_inflation could not be formally confirmed and the flag was not set. Treat the per-operator percentages as relative weights, not as a sum of independent work.",
+    "KERNEL NAME OPACITY: all GEMMs report kernel_name 'Kernel2' with demangled_name null. The true cuBLAS/cutlass symbol is lost, so dynamic_shapes detection by name-grouping is unreliable (the wide duration spread under 'Kernel2' reflects different GEMM shapes, not shape polymorphism of one kernel) — dynamic_shapes flag intentionally NOT set.",
+    "No edge_case_flags triggered: single stream (id=7) so no multi_stream_overlap; compile_mode=inductor so no cuda_graph_replay; no kernel has is_fused=true; timestamps are positive and < 1e15; unattributed ratio 4/25 = 0.16 < 0.3.",
+    "ncu counter-collection inflates duration_ns by 2-5x; all duration figures are used for relative ranking within this profile only, never as absolute latency.",
+    "knowledge/fx-patterns.md and knowledge/hardware-limits.md were not found at the expected paths and MCP tools (context7, exa-search, sequential-thinking, memory) were unavailable. Per fallback policy, proposals were derived from the hardware counters directly; the novel logit-output-downcast transform (OPT-3) is capped at low confidence accordingly.",
+    "Dependency DAG: OPT-1 (bf16 dtype promotion) is the root. OPT-3 must run after OPT-1 (it removes the fp32 back-cast OPT-1 inserts). OPT-2 (TF32) is a mutually-exclusive alternative to OPT-1 — apply one or the other, not both."
+  ]
+}

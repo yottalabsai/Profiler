@@ -4,76 +4,25 @@
     "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "compile_mode": "inductor",
     "dtype": "float32",
-    "total_profiled_wall_time_ms": 1.8387,
+    "total_profiled_wall_time_ms": 2.221429,
     "edge_case_flags": [
-      "fused_kernel_double_count"
+      "fused_kernel_double_count",
+      "layer_nvtx_double_count"
     ],
     "time_budget": {
-      "layer::unique::prologue": {
-        "pct": 40.41,
-        "duration_ns": 742976,
-        "kernel_count": 16
-      },
-      "aten::mm (call_index=0, 4 kernels)": {
-        "pct": 13.41,
-        "duration_ns": 246474,
-        "kernel_count": 4
-      },
-      "aten::_efficient_attention_forward (call_index=0)": {
-        "pct": 6.30,
-        "duration_ns": 115909,
-        "kernel_count": 1
-      },
-      "aten::_efficient_attention_forward (op_id=14)": {
-        "pct": 6.11,
-        "duration_ns": 112325,
-        "kernel_count": 1
-      },
-      "aten::_efficient_attention_forward (op_id=36)": {
-        "pct": 6.11,
-        "duration_ns": 112292,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=4, Q-proj)": {
-        "pct": 3.37,
-        "duration_ns": 61859,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=26, Q-proj)": {
-        "pct": 3.34,
-        "duration_ns": 61378,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=21, out-proj)": {
-        "pct": 3.33,
-        "duration_ns": 61187,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=5, K-proj)": {
-        "pct": 3.31,
-        "duration_ns": 60931,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=43, out-proj)": {
-        "pct": 3.31,
-        "duration_ns": 60899,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=27, K-proj)": {
-        "pct": 3.31,
-        "duration_ns": 60835,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=6, V-proj)": {
-        "pct": 3.30,
-        "duration_ns": 60610,
-        "kernel_count": 1
-      },
-      "aten::mm (op_id=28, V-proj)": {
-        "pct": 3.30,
-        "duration_ns": 60643,
-        "kernel_count": 1
-      }
+      "layer::unique::prologue": { "pct": 41.13, "duration_ns": 913658, "kernel_count": 16 },
+      "aten::mm_0": { "pct": 13.46, "duration_ns": 299007, "kernel_count": 4 },
+      "aten::_efficient_attention_forward_0": { "pct": 6.19, "duration_ns": 137408, "kernel_count": 1 },
+      "aten::_efficient_attention_forward (op_id=14, fused)": { "pct": 6.18, "duration_ns": 137375, "kernel_count": 1 },
+      "aten::_efficient_attention_forward (op_id=36, fused)": { "pct": 6.18, "duration_ns": 137311, "kernel_count": 1 },
+      "aten::mm (op_id=4)": { "pct": 3.37, "duration_ns": 74880, "kernel_count": 1 },
+      "aten::mm (op_id=5)": { "pct": 3.37, "duration_ns": 74879, "kernel_count": 1 },
+      "aten::mm (op_id=6)": { "pct": 3.36, "duration_ns": 74656, "kernel_count": 1 },
+      "aten::mm (op_id=21)": { "pct": 3.36, "duration_ns": 74528, "kernel_count": 1 },
+      "aten::mm (op_id=43)": { "pct": 3.36, "duration_ns": 74528, "kernel_count": 1 },
+      "aten::mm (op_id=26)": { "pct": 3.35, "duration_ns": 74432, "kernel_count": 1 },
+      "aten::mm (op_id=27)": { "pct": 3.35, "duration_ns": 74495, "kernel_count": 1 },
+      "aten::mm (op_id=28)": { "pct": 3.34, "duration_ns": 74272, "kernel_count": 1 }
     }
   },
   "optimizations": [
@@ -81,192 +30,183 @@
       "id": "OPT-1",
       "priority": 1,
       "operators": [
-        "aten::mm (13 nodes across 9 named operators)",
-        "layer::unique::prologue (8 Kernel2 instances)"
+        "aten::mm (9 nodes)",
+        "aten::_efficient_attention_forward (3 nodes)"
       ],
       "bottleneck": {
-        "description": "All 20 Kernel2 (cuBLAS GEMM) instances across the entire profile show tensor_core_active_pct=0.0. On Blackwell (SM100), FP32 GEMMs route through TF32 Tensor Cores only when torch.backends.cuda.matmul.allow_tf32=True. The evidence strongly indicates this flag is False, forcing cuBLAS onto the FP32 SIMT path. The SIMT FP32 peak is roughly 8-16x slower than the TF32 or BF16 Tensor Core path on this hardware. Every mm node in the graph is suffering this deficit. The eligible_cycles_pct=58% confirms warps are issuing continuously to SIMT ALUs, not stalled — the bottleneck is instruction throughput on the wrong execution unit.",
+        "description": "Every Q/K/V/output projection GEMM (4096x512 @ 512x512) runs on the FP32 CUDA-core SIMT path, not the Tensor Cores. cuBLAS dispatches FP32 mm to the generic SIMT GEMM ('Kernel2'): smsp__pipe_tensor_cycles_active = 0 and tensor_core_active_pct = 0.0 across all 9 mm kernels, while smsp__average_thread_inst_executed_per_inst_executed.ratio = 32.0 confirms a fully-scalar 32-thread/warp FMA loop. sm__throughput is stuck at ~36% with achieved_occupancy ~16.5% (capped by registers_per_thread = 210). The CUTLASS attention kernel is the FP32 variant (fmha_cutlassF_f32_aligned_64x64_rf_sm80): it does use Tensor Cores (58.7%) but spills heavily (l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum = 757760 local-memory wavefronts, registers_per_thread = 168, occupancy 14%) because the FP32 register footprint exceeds the file. The 5th-gen Blackwell Tensor Cores are almost entirely idle on the dominant compute.",
         "evidence": {
-          "kernel": "Kernel2",
-          "total_launches": 20,
-          "total_duration_ns": 1223093,
-          "fraction_of_op_time_pct": 66.5,
+          "kernel": "Kernel2 (FP32 SIMT GEMM) + fmha_cutlassF_f32_aligned_64x64_rf_sm80",
+          "total_launches": 12,
+          "total_duration_ns": 1085418,
+          "fraction_of_op_time_pct": 48.86,
           "counters": {
-            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
-            "eligible_cycles_pct": 58.1,
-            "sm_throughput_pct": 36.1,
-            "dram_throughput_pct": 7.5,
-            "achieved_occupancy_pct": 16.6,
-            "registers_per_thread": 210.0,
-            "dynamic_smem_per_block_kb": 49.15,
-            "waves_per_sm": 1.0
+            "mm.tensor_core_active_pct": 0.0,
+            "mm.smsp__pipe_tensor_cycles_active.avg.pct": 0.0,
+            "mm.avg_threads_per_warp": 32.0,
+            "mm.sm_throughput_pct": 36.04,
+            "mm.achieved_occupancy": 16.55,
+            "mm.registers_per_thread": 210.0,
+            "fmha.tensor_core_active_pct": 58.73,
+            "fmha.local_memory_spills": 757760,
+            "fmha.registers_per_thread": 168.0,
+            "fmha.achieved_occupancy": 14.07,
+            "fmha.eligible_cycles_pct": 33.88
           }
         }
       },
       "transformation": {
         "type": "dtype_promotion",
-        "description": "Two-stage fix. Stage 1 (zero graph change): set torch.backends.cuda.matmul.allow_tf32=True before torch.compile, which instructs cuBLAS to use TF32 Tensor Cores for FP32 GEMMs. This is the minimum viable fix and requires no FX surgery. Stage 2 (full BF16 promotion via FX pass): insert aten.to.dtype casts to bfloat16 before every aten.mm.default node and cast outputs back to float32. BF16 unconditionally engages Tensor Cores regardless of the allow_tf32 flag and provides approximately 2x more throughput than TF32 on Blackwell. The FX pass operates on the post-Dynamo ATen IR graph passed to the Inductor backend.",
-        "location": "Every torch.ops.aten.mm.default node in the graph (13 individually attributed + 8 in prologue partitions)",
+        "description": "Insert dtype casts so all attention-block GEMMs and the SDPA inputs execute in BF16 (or at minimum TF32). Casting the mm operands to bfloat16 reroutes cuBLAS from the SIMT 'Kernel2' path to the HMMA Tensor-Core path, and rerouting Q/K/V to bf16 makes SDPA select the bf16 CUTLASS/flash fmha kernel, eliminating the FP32 register-spill (757760 local-memory wavefronts -> ~0). GPU-level effect: HMMA pipe replaces scalar FMA loop (tensor_core_active 0% -> engaged), register pressure drops (210 -> well under the limit) so occupancy and SM throughput rise, and the FP32 fmha spill path is removed. Apply at the Aten IR level by inserting aten.convert_element_type before each mm/SDPA consumer and casting the layernorm output back as needed; weights are cast once and re-registered as bf16 buffers.",
+        "location": "FX backend pass run on the Inductor pre-grad / Aten graph, before lowering",
         "fx_steps": [
-          "# Stage 1 — set before torch.compile call (no graph change):\nimport torch\ntorch.backends.cuda.matmul.allow_tf32 = True",
-          "# Stage 2 — FX pass for full BF16 promotion:\nimport torch\nimport torch.fx as fx\n\ndef promote_mm_to_bf16(gm: fx.GraphModule) -> fx.GraphModule:\n    graph = gm.graph\n    for node in list(graph.nodes):\n        if (node.op == 'call_function'\n                and node.target == torch.ops.aten.mm.default):\n            # Cast both inputs to bf16\n            with graph.inserting_before(node):\n                cast_a = graph.call_function(\n                    torch.ops.aten.to.dtype,\n                    args=(node.args[0], torch.bfloat16)\n                )\n                cast_b = graph.call_function(\n                    torch.ops.aten.to.dtype,\n                    args=(node.args[1], torch.bfloat16)\n                )\n            node.args = (cast_a, cast_b)\n            # Cast output back to fp32 for downstream compatibility\n            with graph.inserting_after(node):\n                cast_out = graph.call_function(\n                    torch.ops.aten.to.dtype,\n                    args=(node, torch.float32)\n                )\n            node.replace_all_uses_with(cast_out)\n            cast_out.args = (node,) + cast_out.args[1:]\n    graph.lint()\n    gm.recompile()\n    return gm",
-          "# Register as a post-grad Inductor pass:\nfrom torch._inductor import config as inductor_config\ninductor_config.post_grad_custom_pre_pass = promote_mm_to_bf16"
+          "for node in graph.find_nodes(op='call_function', target=torch.ops.aten.mm.default):",
+          "    lhs, rhs = node.args[0], node.args[1]",
+          "    with graph.inserting_before(node):",
+          "        lhs_bf16 = graph.call_function(torch.ops.aten.convert_element_type.default, (lhs, torch.bfloat16))",
+          "        rhs_bf16 = graph.call_function(torch.ops.aten.convert_element_type.default, (rhs, torch.bfloat16))",
+          "    node.update_arg(0, lhs_bf16); node.update_arg(1, rhs_bf16)",
+          "    with graph.inserting_after(node):",
+          "        back = graph.call_function(torch.ops.aten.convert_element_type.default, (node, torch.float32))",
+          "    node.replace_all_uses_with(back, delete_user_cb=lambda u: u is not back)",
+          "for node in graph.find_nodes(op='call_function', target=torch.ops.aten._scaled_dot_product_efficient_attention.default):",
+          "    q, k, v = node.args[0], node.args[1], node.args[2]",
+          "    with graph.inserting_before(node):",
+          "        qb = graph.call_function(torch.ops.aten.convert_element_type.default, (q, torch.bfloat16))",
+          "        kb = graph.call_function(torch.ops.aten.convert_element_type.default, (k, torch.bfloat16))",
+          "        vb = graph.call_function(torch.ops.aten.convert_element_type.default, (v, torch.bfloat16))",
+          "    node.update_arg(0, qb); node.update_arg(1, kb); node.update_arg(2, vb)",
+          "graph.lint(); gm.recompile()"
         ],
-        "code_hint": "torch.backends.cuda.matmul.allow_tf32 = True  # minimum fix\n# or: model = model.bfloat16(); inputs = inputs.bfloat16()  # full fix"
+        "code_hint": "Equivalent fast-path: torch.backends.cuda.matmul.allow_tf32 = True engages TF32 Tensor Cores without explicit casts, but BF16 yields the larger win because it also removes the fmha FP32 register spill. Guard accuracy with a tolerance check; keep LayerNorm reductions in FP32."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 611000,
-        "duration_reduction_pct_of_total": 33.2,
+        "relative_duration_reduction_ns": 650000,
+        "duration_reduction_pct_of_total": 29.0,
         "kernel_launches_eliminated": 0,
-        "memory_traffic_reduction": "None directly — same DRAM traffic, but Tensor Core throughput increases 8-16x so wall time drops substantially. With TF32: ~2x GEMM speedup, saving ~611K ns. With BF16: ~4x speedup, saving ~917K ns."
+        "memory_traffic_reduction": "GEMM operand reads halved (FP32->BF16); SDPA Q/K/V reads halved and 757760 local-memory spill wavefronts per fmha eliminated"
       },
       "confidence": "high",
       "prerequisite_for": ["OPT-2", "OPT-3"],
-      "notes": "The kernel name 'Kernel2' with 210 registers/thread and 49.15 KB dynamic shared memory is characteristic of a cuBLAS GEMM algorithm (not a Triton kernel). Triton-generated GEMM kernels for this shape would have different register profiles. The allow_tf32 flag is the most likely root cause. Assumption: model was compiled with default PyTorch settings where allow_tf32 may be True globally but was overridden at the workload level (e.g., via torch.set_default_dtype(torch.float32) in a context that also disables TF32). The fused_kernel_double_count flag is active: the prologue's 8 Kernel2 instances and the individually attributed mm operators represent non-overlapping kernel IDs, so the total duration sum (1,223,093 ns) is not double-counted."
+      "notes": "tensor_core_active_pct = 0.0 with avg_threads_per_warp = 32.0 is an unambiguous FP32-SIMT signature; this is the single highest-leverage change. Must precede any pass that calls register_buffer (QKV fusion, pre-transpose) because fused/transposed weight buffers must be allocated at the promoted bf16 dtype. duration_ns figures are ncu-inflated (2-5x); reduction estimate is scaled to the relative time share, not absolute latency."
     },
     {
       "id": "OPT-2",
       "priority": 2,
       "operators": [
-        "aten::mm (op_id=4, Q-proj, 1 node)",
-        "aten::mm (op_id=5, K-proj, 1 node)",
-        "aten::mm (op_id=6, V-proj, 1 node)",
-        "aten::mm (op_id=26, Q-proj, 1 node)",
-        "aten::mm (op_id=27, K-proj, 1 node)",
-        "aten::mm (op_id=28, V-proj, 1 node)"
+        "aten::mm (op_id=4 Q-proj)",
+        "aten::mm (op_id=5 K-proj)",
+        "aten::mm (op_id=6 V-proj)"
       ],
       "bottleneck": {
-        "description": "Three sequential identical-shape GEMM kernels (Q, K, V projections) are launched back-to-back per attention layer: each computes [4096,512] x [512,512] with tensor_core_active_pct=0. Beyond the dtype bottleneck (addressed in OPT-1), each launches a separate kernel with a 1-wave grid (128 CTAs on ~170 SMs = 75% SM utilization). Three independent launches cannot pipeline and each suffers the wave tail. Fusing to a single [4096,512] x [512,1536] GEMM increases N from 512 to 1536, moving the grid from [64,1,2]=128 CTAs to approximately [64,3,2]=384 CTAs (2-3 waves), improving SM utilization and enabling better L2 data reuse of the shared input matrix X across all three projections.",
+        "description": "The three Q/K/V projections are emitted as three independent aten::mm nodes, each [4096,512] @ [512,512], each a separate 'Kernel2' launch (~74.8us). All three share the SAME left-hand activation (the post-LayerNorm tensor, input_op_ids reference the same producer), so the activation is read from DRAM three times. Each kernel launches grid [64,1,2] = 128 thread blocks; on 188 SMs that is a single wave covering only ~68% of the machine, so ~32% of SMs sit idle (wave-quantization starvation) and there are three launch/sync overheads per block.",
         "evidence": {
-          "kernel": "Kernel2",
-          "total_launches": 6,
-          "total_duration_ns": 366256,
-          "fraction_of_op_time_pct": 19.92,
+          "kernel": "Kernel2 (Q/K/V projection GEMMs)",
+          "total_launches": 3,
+          "total_duration_ns": 224415,
+          "fraction_of_op_time_pct": 10.1,
           "counters": {
-            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
-            "sm_throughput_pct": 36.1,
-            "waves_per_sm": 1.0,
-            "l2_hit_rate_pct": 91.5,
-            "l1_hit_rate_pct": 10.8
+            "grid_dim": "[64,1,2] = 128 blocks",
+            "sm_count": 188,
+            "waves_per_launch": 1,
+            "sm_coverage_pct": 68.1,
+            "sm_throughput_pct": 36.0,
+            "achieved_occupancy": 16.5,
+            "dram_throughput_pct": 7.5
           }
         }
       },
       "transformation": {
         "type": "fusion",
-        "description": "Pre-concatenate the Q, K, V weight matrices (each [512,512]) into a single [512,1536] parameter. Replace the three sequential aten.mm.default nodes that share the same input activation with one aten.mm.default call against the concatenated weight, then split the [4096,1536] output with aten.split.Tensor into three [4096,512] tensors. This eliminates 2 kernel launches per attention layer (4 launches across 2 identified triplets, plus additional savings if the prologue contains equivalent triplets). Weight concatenation is done once at model initialization via register_buffer, not at each forward pass.",
-        "location": "aten::mm triplets (op_ids 4+5+6 and op_ids 26+27+28) where args[0] is the same input activation and args[1] shapes are all [512, 512]",
+        "description": "Concatenate the Q, K, V weight tensors along the output dimension into one [512, 1536] weight, replace the three aten::mm nodes with a single aten::mm producing [4096, 1536], then split the result back into three [4096,512] views with aten.split (or three aten.slice) feeding the existing reshape/SDPA path. GPU-level effect: one kernel launch instead of three; the shared activation is read once instead of three times; the fused GEMM launches grid ~[192,1,2] = 384 blocks (>= 2 full waves on 188 SMs), eliminating the single-wave 32% SM-idle quantization. Combined with OPT-1 the fused GEMM runs as one large HMMA call, which is the most Tensor-Core-efficient shape.",
+        "location": "FX backend pass; match the 3-sibling mm pattern that shares one activation producer and feeds the SDPA reshape chain",
         "fx_steps": [
-          "# Identify QKV triplets: mm nodes sharing the same first argument\nfrom collections import defaultdict\nimport torch\nimport torch.fx as fx\n\ndef fuse_qkv_projections(gm: fx.GraphModule) -> fx.GraphModule:\n    graph = gm.graph\n    mm_nodes = [\n        n for n in graph.nodes\n        if n.op == 'call_function'\n        and n.target == torch.ops.aten.mm.default\n    ]\n    # Group consecutive mm nodes by shared input (args[0])\n    by_input: dict = defaultdict(list)\n    for n in mm_nodes:\n        by_input[n.args[0]].append(n)\n\n    for shared_input, group in by_input.items():\n        if len(group) < 3:\n            continue\n        q_node, k_node, v_node = group[0], group[1], group[2]\n        w_q, w_k, w_v = q_node.args[1], k_node.args[1], v_node.args[1]\n\n        # Pre-concat weights along dim=1: [512,512]*3 -> [512,1536]\n        with graph.inserting_before(q_node):\n            cat_w = graph.call_function(\n                torch.ops.aten.cat.default,\n                args=([w_q, w_k, w_v],),\n                kwargs={'dim': 1}\n            )\n            fused = graph.call_function(\n                torch.ops.aten.mm.default,\n                args=(shared_input, cat_w)\n            )\n            # Split [4096,1536] -> three [4096,512]\n            splits = graph.call_function(\n                torch.ops.aten.split.Tensor,\n                args=(fused, 512, 1)\n            )\n            q_out = graph.call_function(\n                operator.getitem, args=(splits, 0)\n            )\n            k_out = graph.call_function(\n                operator.getitem, args=(splits, 1)\n            )\n            v_out = graph.call_function(\n                operator.getitem, args=(splits, 2)\n            )\n        q_node.replace_all_uses_with(q_out)\n        k_node.replace_all_uses_with(k_out)\n        v_node.replace_all_uses_with(v_out)\n\n    graph.eliminate_dead_code()\n    graph.lint()\n    gm.recompile()\n    return gm"
+          "q_mm, k_mm, v_mm = <the three sibling aten.mm.default nodes sharing args[0]>",
+          "act = q_mm.args[0]   # shared post-LayerNorm activation [4096,512]",
+          "wq, wk, wv = q_mm.args[1], k_mm.args[1], v_mm.args[1]   # each [512,512]",
+          "# build fused weight buffer (bf16, after OPT-1) once at trace time:",
+          "w_fused = self.register_buffer('qkv_weight', torch.cat([wq_t, wk_t, wv_t], dim=1))  # [512,1536]",
+          "with graph.inserting_before(q_mm):",
+          "    fused = graph.call_function(torch.ops.aten.mm.default, (act, w_fused_node))   # [4096,1536]",
+          "    q_s = graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 0, 512))",
+          "    k_s = graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 512, 1024))",
+          "    v_s = graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 1024, 1536))",
+          "q_mm.replace_all_uses_with(q_s); k_mm.replace_all_uses_with(k_s); v_mm.replace_all_uses_with(v_s)",
+          "graph.erase_node(q_mm); graph.erase_node(k_mm); graph.erase_node(v_mm)",
+          "graph.lint(); gm.recompile()"
         ],
-        "code_hint": "# In module __init__, pre-concatenate and register:\nself.register_buffer('qkv_weight',\n    torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], dim=0))\n# In forward: Q, K, V = F.linear(x, self.qkv_weight).chunk(3, dim=-1)"
+        "code_hint": "Concatenate weights along the N (output) axis matching the mm convention act @ W. After OPT-1 the cat must happen on bf16 tensors so register_buffer allocates at the runtime dtype."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 183000,
-        "duration_reduction_pct_of_total": 9.95,
-        "kernel_launches_eliminated": 4,
-        "memory_traffic_reduction": "Input activation X ([4096,512]) is loaded from L2 once for a single fused GEMM instead of three times for three independent GEMMs. L2 reuse reduces effective DRAM reads by approximately 2/3 for the input tensor per triplet."
+        "relative_duration_reduction_ns": 60000,
+        "duration_reduction_pct_of_total": 2.7,
+        "kernel_launches_eliminated": 2,
+        "memory_traffic_reduction": "shared [4096,512] activation read 1x instead of 3x (~24 MB/iter saved at FP32, ~12 MB at BF16); better wave occupancy raises effective SM utilization from ~68% to ~100%"
       },
       "confidence": "high",
-      "prerequisite_for": [],
-      "notes": "This transformation assumes the three mm nodes sharing input X are topologically adjacent with no intervening writes to X, which is standard for self-attention QKV projections. The weight cat is done at graph instantiation (or module init), not in the forward pass, so the cat node itself adds no runtime cost. Apply OPT-1 first so the fused GEMM also benefits from Tensor Cores. Impact estimate is for the 2 identified named triplets (6 kernels × ~61K ns); additional savings accrue from equivalent triplets inside the prologue partition (estimated 4 more triplet executions)."
+      "prerequisite_for": ["OPT-3"],
+      "notes": "Pattern detection: three aten.mm nodes whose args[0] is the same node and whose args[1] are distinct weight placeholders, all consumed by the SDPA reshape chain. Must run after OPT-1 (register_buffer for the fused weight is allocated at the promoted dtype). The latency win is modest in wall time but the launch-count and wave-occupancy improvement compounds with OPT-1's Tensor-Core engagement."
     },
     {
       "id": "OPT-3",
       "priority": 3,
       "operators": [
-        "aten::_efficient_attention_forward (call_index=0, 1 node)",
-        "aten::_efficient_attention_forward (op_id=14, 1 node)",
-        "aten::_efficient_attention_forward (op_id=36, 1 node)"
+        "aten::mm (op_id=4,5,6 fused QKV)",
+        "aten::mm (output projection nodes)"
       ],
       "bottleneck": {
-        "description": "The attention kernel 'fmha_cutlassF_f32_aligned_64x64_rf_sm80' is a CUTLASS FlashAttention variant compiled for SM80 (Ampere) running on a Blackwell SM100 GPU. Two distinct problems: (1) The kernel was compiled for SM80 and cannot use SM100 wgmma (warp-group matrix multiply-accumulate) instructions introduced in Hopper/Blackwell; it falls back to SM80 mma instructions, which are slower on Blackwell's pipeline. (2) The kernel has 168 registers/thread, causing 757,760 local memory spill transactions per launch. At the fmha grid of 512 CTAs, these spills add significant DRAM traffic beyond the theoretical attention IO. Achieved occupancy is only 14% because the 168-register kernel can only fit 1-2 blocks per SM. Switching to BF16 inputs would cause PyTorch to dispatch to a Blackwell-native cuDNN or Flash Attention 3 kernel with SM100 ISA instructions and better register allocation.",
+        "description": "The 'Kernel2' GEMM reads its right-hand weight in a layout that forces an in-kernel transpose/repack each launch, contributing to the low sm_throughput (~36%) and the 49% L1TEX throughput with only 10.8% L1 sector hit rate (poor weight-load locality). Because weights are constant across iterations, the repack is pure redundant work. registers_per_thread = 210 also points at the GEMM epilogue/transpose path consuming the register file and capping occupancy at ~16.5%.",
         "evidence": {
-          "kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80",
-          "total_launches": 3,
-          "total_duration_ns": 340526,
-          "fraction_of_op_time_pct": 18.52,
+          "kernel": "Kernel2 (post-OPT-1/2 Tensor-Core GEMM)",
+          "total_launches": 6,
+          "total_duration_ns": 448000,
+          "fraction_of_op_time_pct": 20.1,
           "counters": {
-            "tensor_core_active_pct": 58.7,
-            "sm_throughput_pct": 51.3,
-            "dram_throughput_pct": 11.0,
-            "achieved_occupancy_pct": 14.1,
-            "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 757760,
-            "registers_per_thread": 168.0,
-            "eligible_cycles_pct": 33.9,
-            "lts__t_sector_hit_rate.pct": 85.4
+            "l1tex__t_sector_hit_rate.pct": 10.83,
+            "l1tex__throughput.avg.pct": 49.3,
+            "sm_throughput_pct": 36.0,
+            "registers_per_thread": 210.0,
+            "achieved_occupancy": 16.5
           }
         }
       },
       "transformation": {
-        "type": "fusion",
-        "description": "After OPT-1 promotes mm inputs to BF16, ensure the Q/K/V tensors entering scaled_dot_product_attention are also BF16. PyTorch 2.11 on Blackwell will then dispatch to the Flash Attention 3 backend (via cuDNN attention or the torch.backends.cuda.flash_sdp path), which is compiled for SM100 and uses wgmma instructions. Additionally, explicitly enable the Flash SDP backend and disable the memory-efficient SDP backend to prevent fallback to the SM80 CUTLASS kernel. No FX node surgery to the _efficient_attention_forward node itself is needed; the backend selection is transparent once dtype is correct.",
-        "location": "torch.ops.aten._scaled_dot_product_efficient_attention.default (3 nodes) — the outer aten::_efficient_attention_forward nodes are their dispatch targets",
+        "type": "memory_layout",
+        "description": "Pre-transpose (and contiguous-pack) the projection weights at compile time so the runtime GEMM consumes them in the Tensor-Core-preferred layout with no in-kernel transpose. Replace the mm weight argument with a pre-transposed constant buffer and drop any aten.t / aten.permute feeding the mm. GPU-level effect: removes the per-launch weight repack, improves L1 weight-load locality (lifts the 10.8% sector hit rate), and frees epilogue registers so occupancy can rise above the current 16.5% cap.",
+        "location": "FX backend pass, after QKV fusion has rewritten the weight nodes",
         "fx_steps": [
-          "# Set backend preferences before torch.compile:\nimport torch\ntorch.backends.cuda.enable_flash_sdp(True)\ntorch.backends.cuda.enable_mem_efficient_sdp(False)\ntorch.backends.cuda.enable_math_sdp(False)",
-          "# If FX surgery is needed to force the Flash path explicitly,\n# replace aten._scaled_dot_product_efficient_attention with\n# aten._scaled_dot_product_flash_attention:\nimport torch\nimport torch.fx as fx\n\ndef replace_efficient_attn_with_flash(gm: fx.GraphModule) -> fx.GraphModule:\n    graph = gm.graph\n    target = torch.ops.aten._scaled_dot_product_efficient_attention.default\n    flash_target = torch.ops.aten._scaled_dot_product_flash_attention.default\n    for node in list(graph.nodes):\n        if node.op == 'call_function' and node.target == target:\n            # Flash attention signature: (query, key, value, attn_mask,\n            #   dropout_p, is_causal, scale)\n            # Efficient attention signature: (query, key, value,\n            #   attn_bias, compute_log_sumexp, dropout_p, is_causal, scale)\n            q, k, v = node.args[0], node.args[1], node.args[2]\n            is_causal = node.kwargs.get('is_causal', False)\n            scale = node.kwargs.get('scale', None)\n            with graph.inserting_before(node):\n                new_node = graph.call_function(\n                    flash_target,\n                    args=(q, k, v),\n                    kwargs={\n                        'dropout_p': 0.0,\n                        'is_causal': is_causal,\n                        'scale': scale,\n                        'return_debug_mask': False\n                    }\n                )\n            # Flash returns (output, logsumexp, cum_seq_q, cum_seq_k,\n            #   max_q, max_k, philox_seed, philox_offset, debug_mask)\n            # Efficient returns (output, logsumexp, philox_seed, philox_offset)\n            # Replace only the output (index 0) uses\n            for user in list(node.users):\n                if (user.op == 'call_function'\n                        and user.target == operator.getitem\n                        and user.args[1] == 0):\n                    with graph.inserting_before(user):\n                        flash_out = graph.call_function(\n                            operator.getitem, args=(new_node, 0)\n                        )\n                    user.replace_all_uses_with(flash_out)\n            if not node.users:\n                graph.erase_node(node)\n    graph.lint()\n    gm.recompile()\n    return gm"
+          "for mm in graph.find_nodes(op='call_function', target=torch.ops.aten.mm.default):",
+          "    w = mm.args[1]",
+          "    if is_constant_weight(w):",
+          "        w_pt = self.register_buffer(f'{w.name}_pt', w_tensor.t().contiguous())",
+          "        # rewrite mm to consume the pre-transposed buffer in the layout cuBLAS prefers",
+          "        mm.update_arg(1, w_pt_node)",
+          "        # if an aten.t()/aten.permute() fed args[1], erase it",
+          "        if w.op == 'call_function' and w.target in (torch.ops.aten.t.default, torch.ops.aten.permute.default):",
+          "            graph.erase_node(w)",
+          "graph.lint(); gm.recompile()"
         ],
-        "code_hint": "torch.backends.cuda.enable_flash_sdp(True)\ntorch.backends.cuda.enable_mem_efficient_sdp(False)\n# Then compile: torch.compile(model, backend='inductor')"
+        "code_hint": "Validate the resulting cuBLAS path actually changes (re-profile and confirm sector hit rate and occupancy rise); if cuBLAS already handles the layout internally this is a no-op. Pre-transpose buffer must be bf16 (post OPT-1)."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 136000,
-        "duration_reduction_pct_of_total": 7.4,
+        "relative_duration_reduction_ns": 25000,
+        "duration_reduction_pct_of_total": 1.1,
         "kernel_launches_eliminated": 0,
-        "memory_traffic_reduction": "Eliminating 757,760 local memory spill transactions per kernel launch (3 named + 2 prologue = 5 launches) reduces DRAM traffic from register spills by approximately 5 x 757,760 x 32 bytes = ~121 MB equivalent in spill traffic. Additionally, SM100 wgmma allows higher occupancy (estimated 25-30% vs current 14%), enabling more latency hiding."
+        "memory_traffic_reduction": "eliminates per-launch weight repack; improves L1 weight reuse (10.8% -> higher sector hit rate)"
       },
-      "confidence": "medium",
+      "confidence": "low",
       "prerequisite_for": [],
-      "notes": "Confidence is medium because Flash Attention 3 availability on PyTorch 2.11 for Blackwell depends on the specific cuDNN version bundled with the CUDA 12.8 install. If cuDNN >= 9.0 is present, torch.backends.cuda.enable_flash_sdp will dispatch to the cuDNN-based attention kernel which is SM100-native. If not, the fallback remains the SM80 CUTLASS kernel. Verify with torch.backends.cuda.flash_sdp_enabled(). The FX surgery step is a fallback if the backend flag approach fails. OPT-1 is prerequisite because the SM80 kernel is the only available choice for FP32 inputs on the currently detected runtime; BF16 is needed to unlock the alternative backends."
-    },
-    {
-      "id": "OPT-4",
-      "priority": 4,
-      "operators": [
-        "aten::mm (op_id=21, out-proj, 1 node)",
-        "aten::mm (op_id=43, out-proj, 1 node)",
-        "aten::mm (call_index=0, output projection kernels among 4)"
-      ],
-      "bottleneck": {
-        "description": "Each attention output projection (mm followed by residual add) launches two separate kernels: one Kernel2 GEMM and one elementwise add. The add is not fused with the GEMM because aten::mm returns a new tensor and aten::add follows as a separate node. cuBLAS exposes aten::addmm (C = alpha*A@B + beta*C) which computes GEMM + add in a single kernel call, eliminating the separate elementwise kernel and reading the residual tensor only once. Each eliminated add kernel reduces memory bandwidth: the residual tensor ([4096,512] fp32 = 8 MB) is read once in addmm vs once for add separately. With 3 attention layers the savings are 3 avoided kernel launches and 3 fewer full-tensor reads.",
-        "evidence": {
-          "kernel": "Kernel2 + downstream elementwise kernel (not separately profiled but implied by graph structure)",
-          "total_launches": 3,
-          "total_duration_ns": 183085,
-          "fraction_of_op_time_pct": 9.96,
-          "counters": {
-            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
-            "sm_throughput_pct": 36.2,
-            "dram_throughput_pct": 7.5,
-            "l2_hit_rate_pct": 91.5
-          }
-        }
-      },
-      "transformation": {
-        "type": "fusion",
-        "description": "Walk the ATen graph and find patterns where aten.mm.default is the sole producer consumed by aten.add.Tensor. Replace the (mm, add) pair with aten.addmm.default(residual, A, B), which maps directly to cuBLAS GEMM+bias in a single call. The residual tensor becomes the C matrix in the BLAS call. This transformation is safe only when the mm node has exactly one user (the add node) and the add output shape matches the mm output shape.",
-        "location": "aten.mm.default nodes (op_ids 21 and 43 output projections, and one or more within aten::mm call_index=0) where the sole user is aten.add.Tensor with a residual connection",
-        "fx_steps": [
-          "import torch\nimport torch.fx as fx\n\ndef fuse_mm_add_to_addmm(gm: fx.GraphModule) -> fx.GraphModule:\n    graph = gm.graph\n    for node in list(graph.nodes):\n        if (node.op != 'call_function'\n                or node.target != torch.ops.aten.mm.default):\n            continue\n        users = list(node.users)\n        if len(users) != 1:\n            continue\n        add_node = users[0]\n        if (add_node.op != 'call_function'\n                or add_node.target not in (\n                    torch.ops.aten.add.Tensor,\n                    torch.ops.aten.add_.Tensor\n                )):\n            continue\n        # Determine which add argument is the residual\n        a_mat, b_mat = node.args[0], node.args[1]\n        if add_node.args[0] is node:\n            residual = add_node.args[1]\n        else:\n            residual = add_node.args[0]\n        # Replace mm + add with addmm(residual, A, B)\n        with graph.inserting_before(node):\n            addmm_node = graph.call_function(\n                torch.ops.aten.addmm.default,\n                args=(residual, a_mat, b_mat)\n            )\n        add_node.replace_all_uses_with(addmm_node)\n        graph.erase_node(add_node)\n        if not node.users:\n            graph.erase_node(node)\n    graph.eliminate_dead_code()\n    graph.lint()\n    gm.recompile()\n    return gm"
-        ],
-        "code_hint": "# Inductor often does this automatically; verify it isn't already fused\n# by checking if 'addmm' appears in the compiled graph:\n# torch.compile(model, backend='inductor').__wrapped__.print_readable()"
-      },
-      "estimated_impact": {
-        "relative_duration_reduction_ns": 18000,
-        "duration_reduction_pct_of_total": 1.0,
-        "kernel_launches_eliminated": 3,
-        "memory_traffic_reduction": "3 fewer reads of the [4096,512] fp32 residual tensor (~8 MB each), saving ~24 MB of DRAM reads across 3 output projections. The elementwise add kernels for a tensor this size are fast (<5 µs each) so primary benefit is launch overhead reduction and L2 pressure relief."
-      },
-      "confidence": "medium",
-      "prerequisite_for": [],
-      "notes": "Confidence is medium because Inductor may already perform mm+add -> addmm folding internally as part of its epilogue fusion. Verify by inspecting the compiled kernel count: if the number of elementwise kernels after the output projection mm is zero, this optimization is already applied. If Inductor is already fusing, this FX pass is a no-op and harmless. The impact estimate is conservative because the add kernels are not separately profiled in this trace; only the mm durations are measured. The fused_kernel_double_count edge case flag means the prologue operator may contain additional mm+add pairs not visible as individual named operators."
+      "notes": "Must come after OPT-2 (QKV fusion erases the original Q/K/V weight placeholder nodes; pre-transpose must act on the fused weight buffer instead). Confidence is low because the profile does not expose the cuBLAS heuristic directly and modern cuBLAS often absorbs the transpose internally on Blackwell; treat as speculative pending a re-profile. Gated behind OPT-1 (register_buffer dtype rule)."
     }
   ],
   "global_notes": [
-    "2 operators below 1% threshold omitted (combined 1.10% of attributed time): aten::_unsafe_view (0.62%, fused with add+native_layer_norm) and aten::native_layer_norm (0.48%)",
-    "Device is NVIDIA RTX PRO 6000 Blackwell Server Edition (SM100+). warp_cycles_per_instruction is unavailable on Blackwell — using eligible_cycles_pct < 20 as the latency-bound indicator throughout. All warp_cycles_per_instruction fields in the profile are null, confirming Blackwell architecture.",
-    "SM count assumed ~170 (Blackwell GB202-class die). Kernel2 grid [64,1,2]=128 CTAs yields ceil(128/170)=1 wave — the GEMM saturates only 75% of SMs per wave. fmha grid [8,8,8]=512 CTAs yields ceil(512/170)=4 waves.",
-    "fused_kernel_double_count flag active: layer::unique::prologue (is_fused=true) and both named aten::_efficient_attention_forward (op_ids 14 and 36) and aten::_unsafe_view (is_fused=true) operators contain kernels that were also individually profiled. Kernel IDs across operator buckets are non-overlapping (verified by inspection), so total attributed duration (1,838,671 ns) does not double-count at the kernel level.",
-    "The model executes 3 full attention layers: Layer 1 attributed via high-confidence torch_profiler to aten::mm (call_index=0) + aten::_efficient_attention_forward (call_index=0). Layers 2 and 3 attributed via NVTX to the mm op_id=4/5/6/21 and op_id=26/27/28/43 groups plus their respective _efficient_attention_forward calls. The prologue NVTX partition contains replayed instances of the same kernel types, consistent with layer deduplication.",
-    "GEMM shapes are [4096,512]x[512,512]: M=4096 (batch=8 x seq=512), N=512 (d_model), K=512 (d_model). These are square-ish GEMMs that should tile efficiently with Tensor Cores if the dtype path is corrected. Arithmetic intensity ≈ 2x4096x512x512 / (2x4096x512 + 512x512 + 4096x512) bytes ≈ 170 FLOP/byte, well above the Blackwell ridge point, meaning these GEMMs are compute-bound and will benefit maximally from Tensor Core engagement.",
-    "OPT-1 (dtype/TF32) is the highest-leverage change. All other optimizations deliver incremental improvement on top of it. Recommended application order: OPT-1 first, verify Tensor Core engagement (tensor_core_active_pct should rise to >50%), then apply OPT-2 and OPT-3 in parallel, then OPT-4 last."
+    "0 operators below 1% threshold omitted (all 13 attributed operators are >= 1% of attributed time).",
+    "device_name = 'NVIDIA RTX PRO 6000 Blackwell Server Edition' (GB202, ~188 SMs, 5th-gen Tensor Cores). warp_cycles_per_instruction is removed on Blackwell (confirmed null throughout); bottleneck reasoning uses eligible_cycles_pct, tensor_core_active_pct, and avg_threads_per_warp instead.",
+    "edge_case_flag fused_kernel_double_count: operators op_id=14 and op_id=36 carry is_fused=true (aten::_efficient_attention_forward fused with aten::_scaled_dot_product_efficient_attention). Their fmha kernels are the same logical SDPA call; not summed twice in the per-kernel reasoning.",
+    "edge_case_flag layer_nvtx_double_count: the 'layer::unique::prologue' NVTX range (913658 ns, 41% of attributed time) is a layer-dedup wrapper that ENCLOSES the same Kernel2 (mm) and fmha kernels that torch_profiler attributes individually to aten::mm and aten::_efficient_attention_forward. Treat the prologue total as overlapping with, not additive to, the individual op totals. The bottleneck mechanism (FP32 SIMT GEMM + FP32 fmha spill) is identical regardless of which attribution layer is read.",
+    "knowledge/hardware-limits.md and knowledge/fx-patterns.md were not present in the repo and no MCP tools (context7, exa-search, sequential-thinking, memory) were available. Fallback applied: FX surgery patterns drawn from embedded knowledge, novel transforms capped at medium confidence. All cited counters and the FP32-SIMT diagnosis are derived directly from profile.json and are unaffected by tool availability.",
+    "All duration_ns values are 2-5x inflated by ncu counter-collection overhead and are used only for relative comparison within this profile, never as absolute latency.",
+    "Dependency DAG: OPT-1 (dtype promotion) -> OPT-2 (QKV fusion) -> OPT-3 (weight pre-transpose). Linear chain, no cycles. OPT-1 is mandatory first because every downstream pass calls register_buffer and the buffer must be allocated at the promoted bf16 dtype.",
+    "Accuracy guard: BF16 promotion changes numerics. Keep LayerNorm statistics in FP32 and validate attention output against the FP32 reference within a tolerance before shipping; if accuracy is insufficient, fall back to TF32 (torch.backends.cuda.matmul.allow_tf32) which still engages Tensor Cores at higher precision."
   ]
 }

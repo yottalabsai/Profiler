@@ -1,67 +1,62 @@
 """
-conv_block_optimized.py — Optimized workload for ConvBlock (VGG-style CNN).
+conv_block_optimized.py — VGG-style CNN with a custom torch.compile() backend.
 
-Custom torch.compile() backend: conv_block_opt
+Source workload: conv_block.py (three Conv2d→BatchNorm2d→ReLU stages, MaxPool,
+AdaptiveAvgPool, Linear head; eval/inference, batch 16).
 
-Implements four profiling-guided optimizations from optimizations.json:
+Backend name (registered with torch._dynamo via @register_backend):
+    conv_block_opt
 
-  OPT-1 (HIGH)   — channels_last memory layout
-                   Eliminates cuDNN NCHW↔NHWC format-conversion kernels.
-                   Applied in get_model_and_input() (non-graph).
+Optimizations implemented (from optimizations.json):
+    OPT-1  Conv-BN fold (high)            — Aten IR pass in _aten_fw_compiler
+    OPT-2  channels_last layout (high)    — non-graph (get_model_and_input) + Aten IR verify pass
+    OPT-3  ReLU → clamp_min epilogue (med)— Aten IR pass in _aten_fw_compiler
+    OPT-4  classifier addmm              — documented no-op (NOT implemented)
 
-  OPT-2 (MEDIUM) — BF16 dtype promotion
-                   Halves DRAM traffic for DRAM-bound BN-ReLU pointwise kernels.
-                   Applied in get_model_and_input() (non-graph) + FX cast pass.
+All graph passes run at the Aten IR level inside _aten_fw_compiler, which
+aot_autograd calls with the fully decomposed graph. nn.Module parameters are
+placeholder nodes at this level; their tensors are positionally matched from
+fw_example_inputs.
 
-  OPT-3 (MEDIUM) — Inductor max-autotune for wave-starvation relief
-                   Enables Inductor's Triton conv autotuner so the 64→128 and
-                   128→256 convolutions can select smaller-tile algorithms that
-                   improve SM occupancy (8.3% → target >20%).
-                   Implemented as Inductor config directives in the backend.
-                   [Stub: does not rewrite the FX graph; only sets config before
-                   delegating to compile_fx.]
-
-  OPT-4 (MEDIUM) — 3-channel conv padding to 4 channels
-                   Pads the 3-channel (K=27) input and matching weight to 4
-                   channels (K=36), enabling cuDNN to select the shared-memory-
-                   staging GEMM path instead of the indexed_wo_smem path.
-                   Implemented as an FX graph pass.
-
-Prerequisite order: OPT-1 → OPT-2 → OPT-3 (per optimizations.json).
-OPT-4 is independent.
+compile_mode is "inductor" (per optimizations.json analysis.compile_mode), so
+this writes a full FX-pass backend.
 """
 from __future__ import annotations
 
 import logging
 import operator
+from functools import partial
 from typing import Callable
 
 import torch
 import torch.fx as fx
 import torch.nn as nn
-import torch.nn.functional as F
 from torch._dynamo import register_backend
+from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import compile_fx  # function, not module
+from torch._subclasses.fake_tensor import unset_fake_temporarily
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants (mirrored from conv_block.py)
-# ---------------------------------------------------------------------------
-DEVICE = "cuda"
-BATCH_SIZE = 16
+DEVICE      = "cuda"
+BATCH_SIZE  = 16
 IN_CHANNELS = 3
-HEIGHT = 64
-WIDTH = 64
+HEIGHT      = 64
+WIDTH       = 64
 NUM_CLASSES = 10
 
+_BN_TARGET = torch.ops.aten._native_batch_norm_legit_no_training.default
+_CONV_TARGETS = frozenset({
+    torch.ops.aten.convolution.default,
+    torch.ops.aten.cudnn_convolution.default,
+})
 
-# ---------------------------------------------------------------------------
-# Model definition (verbatim copy so this file is self-contained)
-# ---------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# Model definition (identical architecture to conv_block.py)
+# ----------------------------------------------------------------------------
 class ConvBnRelu(nn.Module):
     """Conv2d → BatchNorm2d → ReLU building block."""
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 3, stride: int = 1):
@@ -70,7 +65,7 @@ class ConvBnRelu(nn.Module):
             in_ch, out_ch, kernel_size=kernel_size, stride=stride,
             padding=kernel_size // 2, bias=False,
         )
-        self.bn = nn.BatchNorm2d(out_ch)
+        self.bn  = nn.BatchNorm2d(out_ch)
         self.act = nn.ReLU(inplace=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -78,19 +73,12 @@ class ConvBnRelu(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    """
-    Three-stage VGG-style conv pipeline.
-
-    Stage 1: 3 → 64  channels, 64×64 spatial  (memory-bound conv)
-    Stage 2: 64 → 128 channels, 32×32 spatial  (transitional)
-    Stage 3: 128 → 256 channels, 16×16 spatial (compute-bound conv)
-    Then: AdaptiveAvgPool → Linear classifier
-    """
+    """Three-stage VGG-style conv pipeline."""
     def __init__(self):
         super().__init__()
-        self.stage1 = ConvBnRelu(3, 64, kernel_size=3)
+        self.stage1 = ConvBnRelu(3,   64,  kernel_size=3)
         self.stage2 = nn.Sequential(
-            ConvBnRelu(64, 128, kernel_size=3),
+            ConvBnRelu(64,  128, kernel_size=3),
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
         self.stage3 = nn.Sequential(
@@ -107,236 +95,258 @@ class ConvBlock(nn.Module):
         return self.classifier(x)
 
 
-# ---------------------------------------------------------------------------
-# FX Pass: OPT-2 — BF16 cast on graph input (medium confidence)
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# OPT-1: Conv-BN fold (high confidence, Aten IR pass)
+# ----------------------------------------------------------------------------
+def _pass_fold_bn(gm: fx.GraphModule, ph_to_tensor: dict) -> fx.GraphModule:
+    """Fold each eval-mode BatchNorm2d into the preceding convolution.
 
-def _pass_insert_bf16_cast(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    Insert a .to(bfloat16) cast node immediately after the first placeholder
-    (the activation input) in the pre-Inductor FX graph.
+    scale       = bn_weight / sqrt(running_var + eps)
+    W_folded    = conv_weight * scale.view(-1, 1, 1, 1)
+    b_folded    = bn_bias - running_mean * scale   (conv had bias=False)
 
-    Weight placeholders are already BF16 because get_model_and_input() calls
-    model.bfloat16(). This pass handles the runtime input tensor so Dynamo does
-    not need to re-trace if the caller passes a FP32 tensor.
+    aten._native_batch_norm_legit_no_training returns a 3-tuple
+    (output, save_mean, save_rstd); the live output is getitem(bn, 0).
 
-    Only the first (activation) placeholder is cast — weight placeholders that
-    follow are already BF16 and must not be double-cast.
+    Confidence: high — assume the conv→BN adjacency exists; an exception is a
+    real error (warn + return gm unchanged).
     """
     try:
-        matched = False
-        for node in list(gm.graph.nodes):
-            if node.op == "placeholder":
-                # Only cast the first placeholder (the activation input x).
-                # Weight/bias placeholders are static parameters already BF16.
-                with gm.graph.inserting_after(node):
-                    cast_node = gm.graph.call_method(
-                        "to",
-                        args=(node,),
-                        kwargs={"dtype": torch.bfloat16},
-                    )
-                node.replace_all_uses_with(cast_node)
-                # Fix the self-reference: cast_node.args[0] was rewritten above
-                cast_node.args = (node,)
-                matched = True
-                break  # only the first placeholder
+        folded = 0
+        for bn_node in list(gm.graph.nodes):
+            if not (bn_node.op == "call_function" and bn_node.target is _BN_TARGET):
+                continue
 
-        if not matched:
-            logger.warning("[pass_insert_bf16_cast] No placeholder found — pass not applied")
-            return gm
+            conv_node = bn_node.args[0]
+            if not (conv_node.op == "call_function" and conv_node.target in _CONV_TARGETS):
+                continue
 
-        gm.graph.lint()
-        gm.recompile()
-        logger.info("[pass_insert_bf16_cast] Inserted BF16 cast on graph input placeholder")
+            # Conv must be the sole consumer feeding this BN (folding identity
+            # assumes one downstream BN per conv).
+            if len(conv_node.users) != 1:
+                logger.warning(
+                    "[pass_fold_bn] conv %s has %d users — not folding",
+                    conv_node.name, len(conv_node.users),
+                )
+                continue
+
+            # aten._native_batch_norm_legit_no_training(
+            #     input, weight, bias, running_mean, running_var, momentum, eps)
+            bn_weight = ph_to_tensor.get(bn_node.args[1])
+            bn_bias   = ph_to_tensor.get(bn_node.args[2])
+            run_mean  = ph_to_tensor.get(bn_node.args[3])
+            run_var   = ph_to_tensor.get(bn_node.args[4])
+            eps       = bn_node.args[6] if len(bn_node.args) > 6 else 1e-5
+            if any(t is None for t in (bn_weight, bn_bias, run_mean, run_var)):
+                logger.warning("[pass_fold_bn] BN params not in fw_example_inputs — skipping")
+                continue
+
+            # aten.convolution.default args:
+            #   (input, weight, bias, stride, padding, dilation,
+            #    transposed, output_padding, groups)
+            conv_weight = ph_to_tensor.get(conv_node.args[1])
+            conv_bias   = (ph_to_tensor.get(conv_node.args[2])
+                           if conv_node.args[2] is not None else None)
+            if conv_weight is None:
+                logger.warning("[pass_fold_bn] conv weight not in fw_example_inputs — skipping")
+                continue
+
+            # CRITICAL (two distinct fake-tensor hazards):
+            #
+            # (1) conv_weight/bn_* MUST be the REAL parameter tensors, NOT the
+            #     FakeTensors aot_autograd passes as fw_example_inputs. ph_to_tensor
+            #     is built from the REAL dynamo-level example_inputs (see
+            #     _aten_fw_compiler), so these are genuine CUDA tensors.
+            #
+            # (2) The fold runs while compile_fx's FakeTensorMode is still ACTIVE
+            #     on the dispatch stack. fuse_conv_bn_weights internally calls
+            #     aten.zeros_like / arithmetic, which the active FakeTensorMode
+            #     intercepts and rejects ("convert all Tensors to FakeTensors
+            #     first") because the inputs are real. unset_fake_temporarily()
+            #     pops fake mode for the duration of the real-tensor math, so the
+            #     folded weight/bias are computed eagerly and stay real.
+            #
+            # Folding under fake mode (either hazard) bakes a FakeTensor constant
+            # into the graph; Inductor's runtime then fails at .data_ptr()
+            # ("Cannot access data pointer of FakeTensor").
+            with unset_fake_temporarily():
+                fused_w, fused_b = torch.nn.utils.fuse_conv_bn_weights(
+                    conv_weight, conv_bias, run_mean, run_var, eps, bn_weight, bn_bias,
+                )
+                # Detach from autograd and own the storage before registering as
+                # a constant buffer.
+                fused_w = fused_w.detach().clone()
+                fused_b = fused_b.detach().clone()
+                # Keep folded weights in the conv input's memory format so OPT-2
+                # (channels_last) does not re-trigger a one-time layout convert.
+                if conv_weight.is_contiguous(memory_format=torch.channels_last):
+                    fused_w = fused_w.contiguous(memory_format=torch.channels_last)
+
+            w_name = f"_folded_conv_weight_{folded}"
+            b_name = f"_folded_conv_bias_{folded}"
+            gm.register_buffer(w_name, fused_w)
+            gm.register_buffer(b_name, fused_b)
+
+            with gm.graph.inserting_before(conv_node):
+                fw = gm.graph.get_attr(w_name)
+                fb = gm.graph.get_attr(b_name)
+
+            new_conv_args = (conv_node.args[0], fw, fb) + tuple(conv_node.args[3:])
+            with gm.graph.inserting_before(bn_node):
+                new_conv = gm.graph.call_function(
+                    conv_node.target, new_conv_args, dict(conv_node.kwargs),
+                )
+
+            # Re-route getitem(bn, 0) consumers to the folded conv output.
+            for user in list(bn_node.users):
+                if (user.op == "call_function"
+                        and user.target is operator.getitem
+                        and user.args[1] == 0):
+                    user.replace_all_uses_with(new_conv)
+                    gm.graph.erase_node(user)
+
+            if not bn_node.users:
+                gm.graph.erase_node(bn_node)
+            if not conv_node.users:
+                gm.graph.erase_node(conv_node)
+            folded += 1
+
+        if folded:
+            gm.graph.eliminate_dead_code()
+            gm.graph.lint()
+            gm.recompile()
+            logger.info("[pass_fold_bn] Folded %d BatchNorm into Conv2d [Aten IR]", folded)
+        else:
+            logger.warning("[pass_fold_bn] No conv→BN pair found — pass not applied")
     except Exception as e:
-        logger.warning("[pass_insert_bf16_cast] Failed: %s", e)
+        logger.warning("[pass_fold_bn] Failed: %s", e)
     return gm
 
 
-# ---------------------------------------------------------------------------
-# FX Pass: OPT-4 — Pad 3-channel convolutions to 4 channels (medium confidence)
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# OPT-3: ReLU → clamp_min epilogue (medium confidence, Aten IR pass)
+# ----------------------------------------------------------------------------
+def _pass_relu_to_clamp_min(gm: fx.GraphModule) -> fx.GraphModule:
+    """Rewrite aten.relu.default consuming a (folded) conv output to
+    aten.clamp_min.default(x, 0), which Inductor schedules into the conv-output
+    pointwise group rather than a standalone full-tensor launch.
 
-def _pass_pad_shallow_conv(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    For each F.conv2d node whose input has in_channels == 3, insert zero-padding
-    ops to bring input and weight to 4 channels.
+    Depends on OPT-1: after BN folding the conv→relu adjacency exists.
 
-    This allows cuDNN to select the shared-memory-staging GEMM algorithm instead
-    of the indexed_wo_smem path (which uses only 4 warps/block and achieves
-    merely 15% Tensor Core utilisation due to K=27 being below WMMA alignment).
-
-    Padding channel math:
-      input:  [N, 3, H, W]  → [N, 4, H, W]   (pad=(0,0,0,0,0,1) on dim 1)
-      weight: [C_out, 3, kH, kW] → [C_out, 4, kH, kW] (pad last dim of in_ch)
-
-    The extra zero column in the weight tensor ensures mathematical equivalence:
-      output[n, c_out, h, w] = Σ_{k=0..3} Σ_{kh,kw} w[c_out,k,kh,kw]*x[n,k,h',w']
-    For k=3 the padded weight row is 0, so the extra padded input channel
-    contributes exactly 0 to each output element.
-
-    Note: F.conv2d at pre-Inductor level takes args:
-      (input, weight, bias, stride, padding, dilation, groups)
+    Confidence: medium — include the `matched` no-op guard; the win overlaps
+    Inductor's default epilogue fusion, so absence of the pattern is benign.
     """
     try:
         matched = False
         for node in list(gm.graph.nodes):
-            if node.op != "call_function":
+            if not (node.op == "call_function" and node.target is torch.ops.aten.relu.default):
                 continue
-            if node.target not in (F.conv2d, torch.ops.aten.convolution.default,
-                                   torch.ops.aten.cudnn_convolution.default):
+            producer = node.args[0]
+            if not (producer.op == "call_function" and producer.target in _CONV_TARGETS):
                 continue
-
-            input_node = node.args[0]
-            weight_node = node.args[1]
-
-            # Detect in_channels from fake tensor metadata (set by Dynamo)
-            try:
-                in_channels = input_node.meta["val"].shape[1]
-            except (AttributeError, KeyError, IndexError):
-                continue
-
-            if in_channels != 3:
-                continue
-
-            # Insert padding for input: pad last dimension pair of dim-1
-            # torch.nn.functional.pad pads from last dim backwards in pairs.
-            # To pad dim 1 (channel) of a 4-D tensor [N,C,H,W]:
-            #   pad = (0,0, 0,0, 0,1, 0,0)  — right-pad C dim by 1
-            with gm.graph.inserting_before(node):
-                padded_input = gm.graph.call_function(
-                    torch.ops.aten.constant_pad_nd.default,
-                    args=(input_node, [0, 0, 0, 0, 0, 1], 0.0),
+            with gm.graph.inserting_after(node):
+                fused = gm.graph.call_function(
+                    torch.ops.aten.clamp_min.default, (producer, 0),
                 )
-                # Weight pad: [C_out, 3, kH, kW] → [C_out, 4, kH, kW]
-                # Pad the in_channel dim (dim 1, second from end in 4-D weight).
-                # For 4-D weight [C_out, C_in, kH, kW]:
-                #   last dim = kW, second-last = kH, third-last = C_in, fourth-last = C_out
-                # pad = (0,0, 0,0, 0,1, 0,0)  — right-pad C_in by 1
-                padded_weight = gm.graph.call_function(
-                    torch.ops.aten.constant_pad_nd.default,
-                    args=(weight_node, [0, 0, 0, 0, 0, 1, 0, 0], 0.0),
-                )
-
-            # Rebuild the conv node args with padded input and weight
-            new_args = (padded_input, padded_weight) + node.args[2:]
-            node.args = new_args
+            node.replace_all_uses_with(fused)
+            gm.graph.erase_node(node)
             matched = True
-            logger.info(
-                "[pass_pad_shallow_conv] Padded 3-channel conv input and weight to 4 channels"
-            )
 
         if not matched:
-            logger.warning("[pass_pad_shallow_conv] No 3-channel F.conv2d found — pass not applied")
+            logger.warning(
+                "[pass_relu_to_clamp_min] No relu-on-conv pattern found — pass not applied"
+            )
             return gm
-
         gm.graph.lint()
         gm.recompile()
-        logger.info("[pass_pad_shallow_conv] 3→4 channel padding complete")
+        logger.info("[pass_relu_to_clamp_min] Rewrote relu → clamp_min on conv epilogue [Aten IR]")
     except Exception as e:
-        logger.warning("[pass_pad_shallow_conv] Failed: %s", e)
+        logger.warning("[pass_relu_to_clamp_min] Failed: %s", e)
     return gm
 
 
-# ---------------------------------------------------------------------------
-# Backend: conv_block_opt
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# OPT-2 (verification half): assert channels_last propagated, no NCHW reinsert
+# ----------------------------------------------------------------------------
+def _pass_verify_channels_last(gm: fx.GraphModule) -> fx.GraphModule:
+    """Non-mutating verification pass for OPT-2.
 
-@register_backend
-def conv_block_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+    The layout switch itself is non-graph (get_model_and_input). This pass only
+    confirms no aten.clone / aten.contiguous forcing contiguous (NCHW) format
+    was reinserted between conv nodes, which would re-trigger convertTensor
+    reformatting. Never transforms the graph.
     """
-    Custom torch.compile() backend for ConvBlock.
+    try:
+        suspect = 0
+        for n in gm.graph.nodes:
+            if n.op != "call_function":
+                continue
+            if n.target in (torch.ops.aten.clone.default, torch.ops.aten.contiguous.default):
+                mf = n.kwargs.get("memory_format", None)
+                if mf in (None, torch.contiguous_format):
+                    suspect += 1
+        if suspect:
+            logger.warning(
+                "[pass_verify_channels_last] %d clone/contiguous(NCHW) node(s) present — "
+                "channels_last may not be fully propagated", suspect,
+            )
+        else:
+            logger.info("[pass_verify_channels_last] No NCHW re-layout reinserted [Aten IR]")
+    except Exception as e:
+        logger.warning("[pass_verify_channels_last] Failed: %s", e)
+    return gm
 
-    Pass order:
-      1. OPT-2 FX pass: insert BF16 cast on activation input
-      2. OPT-4 FX pass: pad 3-channel conv to 4 channels
-      3. OPT-3 Inductor config: enable max-autotune for conv autotuning
-      4. Delegate to Inductor via compile_fx
 
-    OPT-1 (channels_last) is a non-graph transformation applied in
-    get_model_and_input() — it is not visible in the FX graph.
+# ----------------------------------------------------------------------------
+# Aten IR forward compiler — all graph passes run here
+# ----------------------------------------------------------------------------
+def _aten_fw_compiler(gm: fx.GraphModule, fw_example_inputs, real_inputs=None) -> Callable:
+    """Receives the fully decomposed Aten IR graph from aot_autograd.
+
+    Pass order (Rule 6 + optimizations.json dependency DAG):
+      OPT-1 (fold BN)  -> OPT-3 (relu→clamp_min) -> OPT-2 verify
+    OPT-1 first: node-count-reducing fusion; creates the conv→relu adjacency
+    that OPT-3 depends on. OPT-2's layout switch is non-graph; only its verify
+    half runs here, last, after the graph shape is final.
+
+    `fw_example_inputs` are FakeTensors (aot_autograd traces under FakeTensorMode).
+    Any pass that READS weight VALUES (OPT-1 BN fold) must use `real_inputs` —
+    the genuine Parameter/buffer tensors captured at the dynamo backend level —
+    so the folded constants it materializes are real tensors. fw_example_inputs
+    are still handed to compile_fx unchanged for Inductor's meta tracing.
+
+    real_inputs and fw_example_inputs share the same length and positional order
+    (both correspond 1:1 to the aten graph placeholders); real_inputs falls back
+    to fw_example_inputs only if the backend did not supply it.
     """
-    logger.info("conv_block_opt backend: starting compilation")
+    weight_source = real_inputs if real_inputs is not None else fw_example_inputs
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}
 
-    # Build dedup registry to detect repeated subgraph structure.
-    # ConvBlock has no repeated transformer blocks, so equiv_map will be empty
-    # and we follow the flat-compile path.
-    registry = UniqueSubgraphRegistry(gm)
-    equiv_map = registry.build_partition_equivalence_map()
+    gm = _pass_fold_bn(gm, ph_to_tensor)        # OPT-1 (weight-access pass)
+    gm = _pass_relu_to_clamp_min(gm)            # OPT-3 (op-target pass)
+    gm = _pass_verify_channels_last(gm)         # OPT-2 verification (no-op)
 
-    if not equiv_map:
-        # Flat graph path — no repeated partitions detected.
-        # Apply all manual FX passes directly to the full graph.
-        logger.info("conv_block_opt: no repeated partitions — flat compile path")
+    # compile_fx returns a callable that uses Inductor's BOXED calling
+    # convention: it expects a single list/tuple of inputs, e.g. f([a, b, c]).
+    # aot_autograd's runtime, however, invokes the fw_compiler result with
+    # UNPACKED positional args, f(a, b, c). Without bridging the two, the 18
+    # flat args arrive as one positional list and Inductor's
+    # copy_misaligned_inputs trips on `Expected tensors only, but got: list`.
+    # Re-box the args here so the calling conventions line up.
+    compiled = compile_fx(gm, fw_example_inputs)
 
-        # OPT-2: Insert BF16 cast on activation input
-        gm = _pass_insert_bf16_cast(gm)
+    def _boxed_adapter(*args):
+        if len(args) == 1 and isinstance(args[0], (list, tuple)):
+            return compiled(*args[0])
+        return compiled(*args)
 
-        # OPT-4: Pad 3-channel convolutions to 4 channels
-        gm = _pass_pad_shallow_conv(gm)
-
-        # OPT-3: Configure Inductor for max-autotune (Triton conv autotuning)
-        # This is a stub-level intervention: we set Inductor config flags so that
-        # the conv autotuner searches for smaller-tile algorithms, relieving wave
-        # starvation on the 64→128 and 128→256 convolutions.
-        try:
-            import torch._inductor.config as inductor_config
-            # Enable general autotuning
-            if not inductor_config.max_autotune:
-                inductor_config.max_autotune = True
-                logger.info("conv_block_opt: [OPT-3] enabled max_autotune")
-            # Enable Triton convolution kernel search
-            if hasattr(inductor_config, "max_autotune_conv"):
-                if not inductor_config.max_autotune_conv:
-                    inductor_config.max_autotune_conv = True
-                    logger.info("conv_block_opt: [OPT-3] enabled max_autotune_conv")
-            # Coordinate descent tuning searches nearby tile configs
-            if hasattr(inductor_config, "coordinate_descent_tuning"):
-                if not inductor_config.coordinate_descent_tuning:
-                    inductor_config.coordinate_descent_tuning = True
-                    logger.info("conv_block_opt: [OPT-3] enabled coordinate_descent_tuning")
-        except Exception as e:
-            logger.warning("conv_block_opt: [OPT-3] Inductor config setup failed: %s", e)
-
-        logger.info("conv_block_opt: delegating to Inductor compile_fx")
-        return compile_fx(gm, example_inputs)
-
-    # Dedup path (not expected for ConvBlock — included for robustness)
-    logger.info(
-        "conv_block_opt: %d duplicate partition(s) detected — dedup path",
-        len(equiv_map),
-    )
-
-    for rep_name, rep_mod in registry.unique_reps:
-        _pass_insert_bf16_cast(rep_mod)
-        _pass_pad_shallow_conv(rep_mod)
-        for _, dup_mod in registry.duplicates_of(rep_name):
-            _pass_insert_bf16_cast(dup_mod)
-            _pass_pad_shallow_conv(dup_mod)
-
-    # Collect partition inputs for compile_fx calls
-    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
-
-    for rep_name, rep_mod in registry.unique_reps:
-        inputs = partition_inputs.get(rep_name, example_inputs)
-        compiled = compile_fx(rep_mod, inputs)
-        rep_mod.forward = compiled
-        for _, dup_mod in registry.duplicates_of(rep_name):
-            dup_mod.forward = compiled
-
-    return lambda *args: registry.split(*args)
+    return _boxed_adapter
 
 
-# ---------------------------------------------------------------------------
-# Utility: capture partition inputs (needed for dedup path)
-# ---------------------------------------------------------------------------
-
-def _capture_partition_inputs(
-    split_gm: fx.GraphModule,
-    example_inputs: list,
-) -> dict[str, list]:
+def _capture_partition_inputs(split_gm: fx.GraphModule, example_inputs: list) -> dict:
     """Capture actual input tensors for each partition by running split_gm once."""
-    partition_inputs: dict[str, list] = {}
+    partition_inputs: dict = {}
     hooks = []
     for name, submod in split_gm.named_children():
         if isinstance(submod, fx.GraphModule):
@@ -350,49 +360,63 @@ def _capture_partition_inputs(
     return partition_inputs
 
 
-# ---------------------------------------------------------------------------
-# Workload interface
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Registered backend
+# ----------------------------------------------------------------------------
+@register_backend
+def conv_block_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+    """Custom torch.compile backend for ConvBlock.
 
-def get_model_and_input() -> tuple:
+    ConvBlock has three structurally DISTINCT ConvBnRelu stages (3→64, 64→128,
+    128→256), so no repeated-layer dedup is expected; the flat compile path is
+    taken, preserving cross-layer Inductor fusion. The dedup path (Rule 9) is
+    retained for robustness if the registry detects equivalence classes.
     """
-    Return (optimized_model, input_tensor) ready for torch.compile.
+    logger.info("conv_block_opt backend: starting")
+    registry = UniqueSubgraphRegistry(gm)
+    equiv_map = registry.build_partition_equivalence_map()
 
-    Non-graph optimizations applied here:
+    if not equiv_map:
+        logger.info("conv_block_opt: no repeated layers, flat compile path")
+        # example_inputs are REAL Parameter/Tensor objects at the dynamo level;
+        # thread them to _aten_fw_compiler so weight-reading passes (OPT-1) fold
+        # against real values, not the FakeTensors aot_autograd traces with.
+        fw = partial(_aten_fw_compiler, real_inputs=example_inputs)
+        return aot_autograd(fw_compiler=fw)(gm, example_inputs)
 
-    OPT-1 (HIGH) — channels_last memory layout
-        Converts all Conv2d weights and the activation tensor to channels_last
-        (NHWC) format. cuDNN then receives already-NHWC data and skips all
-        convertTensor_kernel and nhwcToNchwKernel launches (~18 kernels,
-        ~245 µs saved per profile estimate).
+    logger.info("conv_block_opt: %d duplicate partition(s), dedup path", len(equiv_map))
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:
+        inputs = partition_inputs.get(rep_name, example_inputs)
+        fw = partial(_aten_fw_compiler, real_inputs=inputs)
+        compiled = aot_autograd(fw_compiler=fw)(rep_mod, inputs)
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
 
-    OPT-2 (MEDIUM) — BF16 dtype promotion
-        Converts model parameters (weights, BN scale/shift) to bfloat16.
-        BN running_mean and running_var stay float32 (PyTorch's
-        _native_batch_norm_legit_no_training accumulates in FP32 internally).
-        The activation input is also cast to bfloat16 here so the FX pass has
-        a consistent dtype to insert a cast on (handles callers that pass FP32).
+    return lambda *args: registry.split(*args)
+
+
+# ----------------------------------------------------------------------------
+# Workload interface
+# ----------------------------------------------------------------------------
+def get_model_and_input() -> tuple:
+    """Return (raw_model, input_tensor) on CUDA — uncompiled, unwarmed.
+
+    OPT-2 (non-graph half): convert the module and input to channels_last (NHWC)
+    so data stays in cuDNN's preferred layout end-to-end, eliminating the
+    convertTensor NCHW<->NHWC reformatting kernels around every conv.
+    Checked-before-applied per Rule 7 (baseline may already be channels_last).
     """
     assert torch.cuda.is_available(), "CUDA required"
-
     model = ConvBlock().to(DEVICE).eval()
-
-    # OPT-1: channels_last — check before applying (idempotent guard)
-    first_param = next(model.parameters())
-    if not first_param.is_contiguous(memory_format=torch.channels_last):
-        model = model.to(memory_format=torch.channels_last)
-        logger.info("get_model_and_input: applied channels_last to model [OPT-1]")
-
-    # OPT-2: BF16 dtype promotion on parameters
-    model = model.bfloat16()
-    logger.info("get_model_and_input: converted model to bfloat16 [OPT-2]")
-
-    # Build input with both optimizations applied
     x = torch.randn(BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH, device=DEVICE)
-    # OPT-1: channels_last on input
-    x = x.to(memory_format=torch.channels_last)
-    # OPT-2: BF16 input
-    x = x.bfloat16()
+
+    # OPT-2: channels_last (NHWC) layout — non-graph optimization.
+    if not next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
+        model = model.to(memory_format=torch.channels_last)
+    if not x.is_contiguous(memory_format=torch.channels_last):
+        x = x.to(memory_format=torch.channels_last)
 
     return model, x
 

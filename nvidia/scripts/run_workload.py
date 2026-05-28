@@ -289,6 +289,12 @@ def main() -> None:
     assert torch.cuda.is_available(), "CUDA required"
     print(f"[run_workload] GPU: {torch.cuda.get_device_name(0)}", flush=True)
 
+    # Dynamo refuses to trace nn.RNN/GRU/LSTM unless this is enabled. Without it
+    # dynamo silently graph-breaks around the whole RNN module, runs it eagerly,
+    # and never invokes the (dedup or custom) backend -- leaving _state['run_fn']
+    # unset and crashing with KeyError. This setting is a no-op for non-RNN models.
+    torch._dynamo.config.allow_rnn = True
+
     workload = _load_workload(args.workload)
     print(f"[run_workload] Loading workload: {args.workload}", flush=True)
     original_model, x = workload.get_model_and_input()

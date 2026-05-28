@@ -1,229 +1,191 @@
-# Optimization Report: conv_block
+# ConvBlock GPU Optimization Report
 
-**Model:** ConvBlock (VGG-style three-stage CNN)
-**Device:** NVIDIA RTX PRO 6000 Blackwell Server Edition
-**PyTorch:** 2.11.0+cu128
-**Baseline compile mode:** inductor
-**Optimized backend:** `conv_block_opt` (custom `@register_backend`)
-**Report date:** 2026-05-21
-
----
+This optimization eliminated all standalone BatchNorm and per-conv layout/normalization kernels (baseline 30 distinct attributed kernel launches -> 20 in the optimized capture) on the ConvBlock CNN (B=16, NVIDIA RTX PRO 6000 Blackwell Server Edition); the dominant convolution compute time was already Tensor-Core-bound and is unchanged, so the de-duplicated attributed-kernel time is essentially flat (~1.00x) — the win is launch-count and memory-traffic reduction, not GEMM speedup.
 
 ## 1. Hardware Context
 
-| Property | Value |
+| Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| Microarchitecture | Blackwell (sm100 class) |
-| PyTorch version | 2.11.0+cu128 |
-| cuDNN notes | `sm80_xmma_fprop` kernel names appear on Blackwell, indicating torch 2.11+cu128 is using Ampere-generation cuDNN heuristics. Blackwell-native sm100 cuDNN kernels are not yet registered in this build. |
-| Profiling tool | Nsight Compute (application-mode replay, `--replay-mode application`) |
-| ncu overhead | All `duration_ns` values are inflated 2–5x by ncu counter-collection. They are used only for relative within-profile comparison, **not as wall-clock latencies**. |
-| Warp cycles counter | Removed in Blackwell. `eligible_cycles_pct < 20%` is used as the latency-bound indicator throughout. `warp_cycles_per_instruction` is null in all profiles. |
-| `tensor_core_active_pct` null | On Blackwell, this aggregated field is null or zero because the underlying counter was renamed. This does **not** indicate a Tensor Core bottleneck. Use `smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active` per-kernel instead. |
-| Batch size | B=16 throughout. All comparisons in this report are at B=16; no normalization is needed. |
+| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs, GB202 class) |
+| Architecture | Blackwell |
+| PyTorch | 2.11.0+cu128 |
+| Compile mode (baseline) | `inductor` |
+| Compile mode (optimized) | `conv_block_opt` (custom FX backend) |
+| Batch size | 16 (from conv input shapes `[16, 3, 64, 64]`) |
+| Iterations | 2 measure iterations (ncu replay — relative timing only) |
 
----
+> All `duration_ns` values are ncu application-replay timings, inflated 2-5x over real wall-clock. They are valid only for relative ranking within and across these two captures, never as absolute latency.
 
 ## 2. Operator Summary (Baseline)
 
-The baseline model is a three-stage CNN: two convolution blocks (3→64→128 channels on 64×64 spatial, then 128→256 on 32×32) followed by global average pooling and a linear classifier. The baseline compiles with `torch.compile(backend='inductor')` in NCHW layout (FP32/TF32).
+De-duplicated per-op-id entries (the IR nodes the FX passes target). The baseline also contains re-aggregating wrapper entries — `layer::unique::prologue` (460,671 ns, 41 kernels), generic `aten::cudnn_convolution` (324,064 ns), `aten::convolution` (5,888 ns), `aten::addmm` (4,800 ns) — which re-count the same kernels and are excluded here to avoid double-counting. Percentages are relative to the de-duplicated per-call total = 434,303 ns.
 
-Attribution uses two tiers: torch.profiler CUPTI correlation (high confidence) for `aten::cudnn_convolution_0`'s kernels, and NVTX range enclosure (medium confidence) for `layer::unique::prologue` and the explicit per-op NVTX ranges. A `fused_kernel_double_count` edge case is present: `aten::cudnn_convolution_0` and `layer::unique::prologue_0` share kernel IDs k_00020–k_00051. Each kernel fires once on the GPU but is attributed to both operators via different methods. The best unique-execution estimate comes from `layer::unique::prologue_0`.
-
-| Operator | Kernels | Duration (ns) | % of total | Notes |
+| Operator (stage) | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
 |---|---|---|---|---|
-| layer::unique::prologue_0 | 39 | 359,228 | 33.1% | Best unique-execution estimate; NVTX attribution |
-| aten::cudnn_convolution_0 | 17 | 287,644 | 26.5% | Double-counts kernels in prologue_0; excluded from unique budget |
-| aten::cudnn_convolution op_id=33 (64→128ch) | 3 | 86,655 | 8.0% | Explicit NVTX |
-| aten::cudnn_convolution op_id=12 (64→128ch) | 3 | 86,431 | 8.0% | Explicit NVTX |
-| aten::cudnn_convolution op_id=39 (128→256ch) | 3 | 76,287 | 7.0% | Explicit NVTX |
-| aten::cudnn_convolution op_id=18 (128→256ch) | 3 | 75,711 | 7.0% | Explicit NVTX |
-| aten::_native_batch_norm_legit_no_training_0 | 14 | 67,807 | 6.3% | Fused BN-ReLU-Pool via Triton |
-| aten::cudnn_convolution op_id=7 (3→64ch) | 3 | 14,752 | 1.4% | `sm80_xmma_indexed_wo_smem` |
-| aten::cudnn_convolution op_id=28 (3→64ch) | 3 | 14,720 | 1.4% | `sm80_xmma_indexed_wo_smem` |
+| `aten::cudnn_convolution` 64->128 @64x64 (x2 iters) | 47.7 | 207,263 | 6 | Compute-bound (TC 60-65%, sm 58-64%) |
+| `aten::cudnn_convolution` 128->256 @32x32 (x2 iters) | 42.3 | 183,968 | 6 | Compute-bound (TC 60-65%) |
+| `aten::cudnn_convolution` 3->64 @64x64 (x2 iters) | 8.2 | 35,456 | 6 | Memory/layout-bound (TC 0%, convertTensor + small GEMM) |
+| `aten::addmm` classifier 256->10 (x2 iters) | 1.8 | 7,616 | 2 | Latency-bound (occ 8%, eligible 6.8%, SIMT) |
 
----
+On Blackwell, `tensor_core_active_pct` is reported; where it reads `0.0` on a conv stage it means that stage's time is dominated by the non-GEMM convertTensor/normalization kernels, not the implicit-GEMM. Bottleneck class is corroborated by memory throughput % and achieved occupancy.
 
 ## 3. Reading the Metrics
 
-- **`gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed`**: DRAM bandwidth utilisation as a percentage of peak. Values above 70% indicate a bandwidth-bound kernel.
-- **`smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active`**: Fraction of active cycles where the Tensor Core pipeline was busy. Zero for elementwise kernels; >60% indicates high arithmetic utilisation for GEMMs.
-- **`sm__warps_active.avg.pct_of_peak_sustained_active`**: Average active warps per SM as a fraction of capacity. Values below 15% on a GEMM kernel indicate wave starvation (too few CTAs to fill all SMs simultaneously).
-- **`sm__throughput.avg.pct_of_peak_sustained_elapsed`**: Fraction of peak SM throughput achieved.
-- **`eligible_cycles_pct`**: Fraction of cycles where at least one warp was eligible to issue. Values below 20% on Blackwell suggest latency-bound execution (used in place of the removed `warp_cycles_per_instruction`).
-- **`tensor_core_active_pct` in aggregated**: null on Blackwell — this does not describe a bottleneck. See per-kernel `smsp__pipe_tensor_cycles_active` instead.
-
-**Attribution confidence:** `high` = torch.profiler CUPTI External-id join (most reliable). `medium` = NVTX range enclosure using CPU launch timestamp.
-
----
+- **`tensor_core_active_pct`** — Fraction of cycles the Tensor Cores were busy. On the heavy stage-2/stage-3 convs it is 58-66%, confirming those `Kernel`/`sm80_xmma_fprop_implicit_gemm` convs are already efficient compute and are NOT the optimization target. A value of `0.0` on the classifier `gemmSN_TN_kernel` means the GEMM ran on the FP32 SIMT path with Tensor Cores fully idle — but here it is expected (a 16x256x10 GEMM is below the tile threshold), not a fixable signal. `null` on non-GEMM kernels is normal and never a bottleneck.
+- **`achieved_occupancy`** — At ~8% on the classifier addmm (4-block grid against ~188 SMs) the device is almost entirely idle: this is wave starvation, intrinsic to the tiny problem size.
+- **`memory_throughput_pct` / `dram_throughput`** — Several baseline `convertTensor_kernel` and BatchNorm Triton kernels hit 55-73% of peak DRAM with 0% Tensor-Core activity: pure bandwidth spent shuffling layout or applying a frozen affine — exactly the memory-bound waste OPT-1/OPT-2 target.
+- **`eligible_cycles_pct < 20%`** (Blackwell latency-bound rule; `warp_cycles_per_instruction` is removed on Blackwell) — the classifier at 6.8% is latency-bound.
 
 ## 4. Optimizations Applied
 
-| ID | Description | Status | Method |
-|---|---|---|---|
-| OPT-1 | channels_last (NHWC) layout | **APPLIED** | `get_model_and_input()` |
-| OPT-2 | BF16 dtype promotion | **APPLIED** | `get_model_and_input()` + FX pass `_pass_insert_bf16_cast` |
-| OPT-3 | Inductor max_autotune (wave starvation) | **APPLIED** (stub — config flags only) | Inductor config directives before `compile_fx` |
-| OPT-4 | 3-channel conv padding (aligned GEMM path) | **NOT APPLIED** — graceful no-op | FX pass pattern not matched |
+| ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
+|---|---|---|---|---|---|
+| OPT-1 | fusion (Conv-BN fold) | 6 conv nodes + `triton_*_native_batch_*` BN kernels | 28 BN launches, TC 0%, DRAM-bound, largest BN grid 16384 | high | APPLIED |
+| OPT-2 | memory_layout (channels_last / NHWC) | 6 conv nodes + `convertTensor_kernel` (~20) | convertTensor at 73.5% peak DRAM, TC 0%, L1 hit 0% | high | APPLIED |
+| OPT-3 | fusion (ReLU -> clamp_min epilogue) | 3 `aten::relu` post-fold conv epilogues | full-tensor elementwise pass, TC 0%, DRAM-bound | medium | APPLIED |
+| OPT-4 | wave_quantization (classifier addmm) | 2 `aten::addmm` nodes | occ 8%, sm 0.23%, eligible 6.8%, SIMT | high | Not applied (documented no-op) |
 
-**Validation log (Stage 3):**
-- `pass_insert_bf16_cast` (OPT-2): APPLIED — "Inserted BF16 cast on graph input placeholder"
-- `pass_pad_shallow_conv` (OPT-4): NOT APPLIED — "No 3-channel F.conv2d found — pass not applied"
-- OPT-1 (channels_last): APPLIED — `model.to(memory_format=torch.channels_last)` and `x.to(memory_format=torch.channels_last)` in `get_model_and_input()`
-- OPT-3 (max_autotune): APPLIED — `inductor_config.max_autotune = True`, `inductor_config.coordinate_descent_tuning = True`
-
----
+All three actionable passes report `status == APPLIED` in `validation_report.json`: `pass_fold_bn` (folded 3 BatchNorm into Conv2d), `pass_relu_to_clamp_min` (rewrote relu -> clamp_min on conv epilogue), `pass_verify_channels_last` (no NCHW re-layout reinserted). OPT-4 was intentionally not implemented.
 
 ## 5. Implementation Notes
 
-*Verbatim from `implementation_notes.md`*
+# ConvBlock — Optimized Backend Implementation Notes
 
-### Backend Architecture
+Backend name: `conv_block_opt` (registered via `@register_backend`).
+compile_mode: `inductor` (full FX-pass backend). Device: RTX PRO 6000 Blackwell, torch 2.11.0+cu128.
 
-| Pass | ID | Method | Confidence | Reason |
-|---|---|---|---|---|
-| channels_last layout | OPT-1 | `get_model_and_input()` | high | `memory_format` is a tensor property, not visible in FX IR. Must be set before `torch.compile` traces the graph. |
-| BF16 dtype promotion | OPT-2 | `get_model_and_input()` + FX pass | medium | `model.bfloat16()` sets weight dtypes before compilation. FX pass `_pass_insert_bf16_cast` inserts a `.to(bfloat16)` node after the first placeholder so runtime FP32 inputs are cast inside the compiled graph. Both halves are needed: the non-graph step fixes parameter dtypes; the FX pass handles activation dtype at graph execution time. |
-| Inductor max-autotune | OPT-3 | Inductor config directives in backend (stub) | medium | Wave starvation on 64→128 and 128→256 convolutions (`sm__warps_active` = 8.3%). The root cause is large per-CTA tile selection by cuDNN heuristics. The appropriate lever is Inductor's Triton conv autotuner (`max_autotune_conv`), which searches smaller-tile variants. This is a stub: it sets `inductor_config.max_autotune = True` and `max_autotune_conv = True` before delegating to `compile_fx`, but does not rewrite any FX nodes. |
-| 3-channel conv padding | OPT-4 | FX pass `_pass_pad_shallow_conv` | medium | The 3→64 channel convolution dispatches to `sm80_xmma_fprop_implicit_gemm_indexed_wo_smem` (15% TC utilisation, 26% SM throughput) because K=27 < WMMA alignment minimum. Padding input channels from 3 to 4 (K=36) satisfies alignment and enables the shared-memory-staging GEMM path. The extra zero-padded channel contributes exactly 0 to the output. |
+All graph passes run at the **Aten IR** level inside `_aten_fw_compiler`, which `aot_autograd`
+invokes with the fully decomposed graph. `nn.Module` parameters are `placeholder` nodes at this
+level. Their **values** for weight-folding come from the REAL dynamo-level `example_inputs`
+(genuine `Parameter`/buffer tensors), positionally matched 1:1 to the placeholders — NOT from
+`fw_example_inputs`, which are FakeTensors during AOTAutograd tracing.
 
-### Key Design Decisions
+Status: runtime-validated. The compiled forward executes on real CUDA input and matches the eager
+baseline to **max abs diff 6.7e-06** (rtol/atol 1e-3). All 5 tests in the suite pass.
 
-**OPT-1 — non-graph placement:** `memory_format=torch.channels_last` is a tensor-level property. The FX graph sees abstract `aten.convolution.default` nodes regardless of the memory layout of their operands — layout is metadata, not a node type. Setting channels_last before `torch.compile` means Dynamo traces with NHWC-shaped fake tensors, so Inductor's shape inference is accurate and cuDNN receives NHWC data without format-conversion kernel overhead.
+## Backend Architecture
 
-**OPT-2 — two-part implementation:** Parameter dtype (weights, BN scale/shift) is set before compilation so Dynamo traces with BF16 tensor shapes. The FX pass handles activation dtype at graph execution time. Without the FX pass, a caller passing a FP32 input tensor would trigger a dtype mismatch between the first placeholder and the BF16 weight parameters. BN `running_mean` and `running_var` are kept as FP32 buffers by `BatchNorm2d` regardless of model dtype.
+| Pass | Method | Reason |
+|---|---|---|
+| OPT-1 Conv-BN fold | `_aten_fw_compiler` (`_pass_fold_bn`) | Folds eval-mode `aten::_native_batch_norm_legit_no_training` into the preceding conv weights/bias; removes the memory-bound `triton_*_native_batch_*` kernel chain. Weight-access pass — reads BN/conv tensors from `ph_to_tensor`. |
+| OPT-2 channels_last | `get_model_and_input()` + `_aten_fw_compiler` verify (`_pass_verify_channels_last`) | Layout switch (NHWC) is non-graph — applied to module + input. A non-mutating Aten IR verify pass confirms no `clone`/`contiguous(NCHW)` re-layout was reinserted. |
+| OPT-3 ReLU -> clamp_min | `_aten_fw_compiler` (`_pass_relu_to_clamp_min`) | Rewrites `aten::relu` consuming a folded conv output to `aten::clamp_min(x, 0)` so Inductor schedules it into the conv-output pointwise group instead of a standalone launch. |
+| OPT-4 classifier addmm | not applied (documented no-op) | A 16x256x10 GEMM is intrinsically sub-tile/wave-starved; no fusion or layout transform helps. <2% of attributed time. Closed out for budget completeness only. |
 
-**OPT-3 — stub classification:** The wave-starvation bottleneck is a cuDNN tile-selection choice at dispatch time, not a structural FX graph pattern. The pass sets Inductor config flags rather than rewriting nodes. Correctness is guaranteed; speedup is hardware and Triton version dependent.
+## Pass order
 
-**OPT-4 — pass not triggered:** With OPT-1 applied first, Dynamo traces the 3-channel conv as an NHWC operation and may produce a node target other than `F.conv2d` at the pre-Inductor `@register_backend` level. The graceful no-op path was taken correctly.
+`_pass_fold_bn` (OPT-1) -> `_pass_relu_to_clamp_min` (OPT-3) -> `_pass_verify_channels_last` (OPT-2).
+This honors the dependency DAG in `optimizations.json`: OPT-1 is node-count-reducing and creates
+the conv->relu adjacency that OPT-3 matches; the OPT-2 verify pass runs last after the graph shape
+is final. OPT-2's actual layout change happens in `get_model_and_input()` before `torch.compile`.
 
-**Dedup path:** `UniqueSubgraphRegistry` found no repeated partitions in ConvBlock, so the flat compile path was used.
+## Key Design Decisions
 
-**Pass ordering:** OPT-1 before OPT-2 per `prerequisite_for` in `optimizations.json`: channels_last is applied first so BF16 parameters are stored in NHWC layout from the start.
+- **BN fold via `torch.nn.utils.fuse_conv_bn_weights`** (per `code_hint`) rather than hand-rolled
+  arithmetic — it is the maintained helper and handles the `bias=None` conv case (these convs were
+  defined `bias=False`, giving a clean folded-bias slot). Before folding, the pass asserts the conv
+  is the sole consumer of its output (`len(conv_node.users) == 1`), because the folding identity
+  assumes exactly one downstream BN.
 
-### Known Limitations
+- **Tuple-return handling for BN.** `aten::_native_batch_norm_legit_no_training` returns
+  `(output, save_mean, save_rstd)`. The pass does not replace the BN node directly; it re-routes the
+  `getitem(bn, 0)` consumer to the new folded-conv node, then erases the getitem, the dead BN node,
+  the original conv node, and calls `eliminate_dead_code()`.
 
-- BF16 has a narrower mantissa than FP32 (7 vs 23 bits). Validate output accuracy before production deployment.
-- The `sm80_xmma_fprop` kernels on Blackwell indicate torch 2.11+cu128 uses Ampere-generation cuDNN heuristics. Upgrading to a build with native Blackwell/sm100 support may resolve OPT-3 and OPT-4 bottlenecks without code changes.
-- OPT-3 `max_autotune` adds significant first-compilation latency (minutes). Set `TORCHINDUCTOR_CACHE_DIR` to persist the autotuning cache.
-- OPT-4 zero-padded weights must not be saved via `torch.save` for reuse with the original `state_dict` — inference-time use only.
+- **Folded weights kept channels_last.** When the source conv weight is already channels_last
+  (because OPT-2 converted the module first), the folded weight is re-materialized channels_last so
+  OPT-2 does not re-trigger a one-time `convertTensor` layout pass. This is the prerequisite ordering
+  noted in OPT-2 (`apply after OPT-1`).
 
----
+- **OPT-2 split into non-graph + verify.** memory_format is not visible as a transformable FX node,
+  so the layout change lives in `get_model_and_input()` (checked-before-applied per Rule 7). The Aten
+  IR side is verification-only; transforming layout via node surgery would be incorrect at this level.
+
+- **OPT-3 capped at medium confidence.** The `matched` no-op guard is included: Inductor's default
+  epilogue fusion likely already absorbs a trailing relu/clamp_min, so absence of the pattern is
+  benign. The pass guarantees the relu does not survive as a standalone launch after BN folding
+  reshapes the graph.
+
+- **Flat compile path expected.** The three `ConvBnRelu` stages are structurally distinct (3->64,
+  64->128, 128->256), so `UniqueSubgraphRegistry.build_partition_equivalence_map()` returns no
+  duplicates and the flat `aot_autograd(fw_compiler=_aten_fw_compiler)(gm, example_inputs)` path is
+  taken, preserving cross-layer Inductor fusion. The dedup path (Rule 9) is retained for robustness.
+
+## FakeTensor / calling-convention fixes (runtime correctness)
+
+Three interacting hazards had to be resolved for the compiled callable to run on real inputs:
+
+1. **Real vs Fake weight source.** `aot_autograd` passes the fw_compiler FakeTensors as
+   `fw_example_inputs`. Building `ph_to_tensor` from those and folding produced FakeTensor folded
+   weights that, once registered as `get_attr` buffers, baked fake constants into the graph —
+   Inductor's runtime then failed with *"Cannot access data pointer of FakeTensor"* in
+   `copy_misaligned_inputs`. Fix: the backend threads the REAL dynamo-level `example_inputs` into
+   `_aten_fw_compiler` (via `functools.partial(real_inputs=...)`); `ph_to_tensor` is built from those.
+   The reals correspond 1:1 and in-order to the aten placeholders (verified: 18 placeholders <-> 18
+   real `Parameter`/`Tensor` args).
+
+2. **Active FakeTensorMode during the fold.** Even with real inputs, `fuse_conv_bn_weights` runs
+   while `compile_fx`'s `FakeTensorMode` is still on the dispatch stack; its internal
+   `aten.zeros_like`/arithmetic on real tensors is intercepted and rejected. Fix: wrap the fold math
+   in `torch._subclasses.fake_tensor.unset_fake_temporarily()` so the folded weight/bias are computed
+   eagerly and stay real, followed by `.detach().clone()` to own the storage.
+
+3. **Boxed calling convention.** `compile_fx()` returns a callable using Inductor's BOXED convention
+   (one list arg: `f([a, b, c])`), but `aot_autograd`'s runtime invokes the fw_compiler result with
+   UNPACKED positional args (`f(a, b, c)`). Mismatched, the 18 flat args arrive as a single list and
+   `copy_misaligned_inputs` raised *"Expected tensors only, but got: list"*. Fix: `_aten_fw_compiler`
+   returns a small `_boxed_adapter` that re-boxes positional args back into the list form Inductor's
+   callable expects.
+
+## Cache-coherence caveat (baked constants)
+
+Because OPT-1 bakes folded conv+BN weights as constant buffers INTO the compiled artifact, the
+dynamo compile cache (keyed by code object) must not be shared across two different parameter sets.
+Compiling a second distinct `ConvBlock` instance in the same process without `torch._dynamo.reset()`
+reuses the first model's baked-in folded constants (observed: 0.077 abs diff vs 6.7e-06 after reset).
+This is a non-issue for normal single-model usage; the equivalence test calls
+`torch._dynamo.reset()` before compiling its model to fold against the correct weights.
 
 ## 6. Before/After Results
 
-All values are from ncu application-mode replay at B=16. Duration figures are ncu-inflated and valid only for relative comparison within this report. They do not represent wall-clock latency.
+Both captures use batch size 16, so the comparison is valid. Operators are matched by stage signature (shapes), summed across the 2 measure iterations. Baseline figures use the de-duplicated per-op-id entries; the baseline's wrapper/aggregate entries are excluded to avoid double-counting.
 
-### Primary operator comparison
-
-| Operator | Baseline duration (ns) | Optimized duration (ns) | Change |
+| Operator (matched by stage, x2 iters) | Baseline (ns) | Optimized (ns) | Speedup |
 |---|---|---|---|
-| 64→128ch convolution, call 1 (op_id=12 → op_id=7 opt) | 86,431 | 33,344 | **-61%** |
-| 64→128ch convolution, call 2 (op_id=33 → op_id=20 opt) | 86,655 | 33,440 | **-61%** |
-| BN-ReLU fused (dominant pointwise kernel) | ~12,600 | ~6,944 | **~-45%** |
-| Full attributed prologue (unique kernel sum) | 359,228 | ~187,296 | **~-48%** |
+| `aten::cudnn_convolution` 3->64 @64x64 | 35,456 | 35,392 | 1.00x |
+| `aten::cudnn_convolution` 64->128 @64x64 | 207,263 | 205,600 | 1.01x |
+| `aten::cudnn_convolution` 128->256 @32x32 | 183,968 | 184,032 | 1.00x |
+| `aten::addmm` classifier 256->10 | 7,616 | 7,552 | 1.01x |
+| **Total (de-duplicated attributed)** | **434,303** | **432,576** | **1.004x** |
 
-Note on BN-ReLU total: The optimized profile restructures operator attribution — the BN operator accumulates more fused kernels explicitly (including large convolution-fused GEMM kernels) that were folded into the `layer::unique::prologue_0` NVTX range in the baseline. This re-partitioning is an attribution artifact, not a regression. The individual BN-ReLU pointwise kernels drop from 6,944–12,672 ns to 4,032–6,944 ns, consistent with BF16 halving DRAM bytes per element.
+**Kernel-count / launch reduction (the real, measurable effect):**
 
-### Key hardware counter changes
+| Metric | Baseline | Optimized |
+|---|---|---|
+| Distinct kernel-name classes | 13 | 4 |
+| Total attributed kernel launches | 30 | 20 |
+| Standalone BatchNorm Triton kernels (`triton_*_native_batch_*`) | present (21 launches / 127,327 ns inside the `prologue` aggregate range) | 0 — eliminated |
+| `triton_poi_fused_convolution` prologue kernels | 6 (9,920 ns) | 0 — eliminated |
+| Conv implicit-GEMM kernels (per-op-id) | 6 (372,032 ns) | 6 (370,720 ns) |
+| convertTensor (NCHW<->NHWC) (per-op-id) | 12 (54,655 ns) | 12 (54,304 ns) |
+| classifier GEMM (SIMT) | 2 (7,616 ns) | 2 (7,552 ns) |
 
-| Metric | Baseline (64→128ch `Kernel`) | Optimized (64→128ch `Kernel`) | Change |
-|---|---|---|---|
-| sm_warps_active pct | 8.3% | 14.6–14.8% | +6.4 pp |
-| smsp__pipe_tensor_cycles_active pct | 65–73% | 70.7–70.9% | Maintained |
-| SM throughput pct | 57–64% | 60.6–60.7% | Maintained |
-| convertTensor_kernel launches per conv call | 2 | 0 | **Eliminated** |
-| nhwcToNchw `Kernel` launches | 1 per conv call (75,104 ns) | 0 | **Eliminated** |
+**Step B — Speedup attribution.** The de-duplicated, op-id-matched attributed time is effectively flat (1.004x). The reason: the heavy stage-2/stage-3 convolutions were already compute-bound on the Tensor Cores (TC 58-66%), and OPT-1/OPT-2/OPT-3 do not touch the GEMM itself — they remove the cheap memory-bound kernels around it. Those eliminated kernels (the 21 standalone BatchNorm Triton kernels and 6 conv-prologue Triton kernels, ~137 us of replay time) lived in the baseline's `layer::unique::prologue` aggregate range under the original `inductor` capture, not in the per-op-id budget, so they do not show up as a per-operator delta. All three passes are `APPLIED` in `validation_report.json` and the expected kernels disappeared (BatchNorm Triton kernels gone, relu folded into clamp_min/epilogue), so the launch-count reduction is correctly attributed to OPT-1 (BN fold) and OPT-3 (relu epilogue). OPT-4 was not applied and is credited with nothing.
 
-| Metric | Baseline (BN-ReLU dominant kernel) | Optimized (equivalent BN-ReLU kernel) | Change |
-|---|---|---|---|
-| DRAM throughput pct | 79–84% | 60–71% | -10 to -24 pp |
-| Duration of dominant BN kernel (ns) | 12,255–12,672 | ~6,944 | **~-45%** |
-
----
+**Step C — Residual opportunity.** Re-ranking the optimized profile, the two heavy convolution stages (64->128 and 128->256) still dominate at ~205,600 ns and ~184,032 ns. They run at 58-66% Tensor-Core utilization and are compute-bound — no FX-level transform in `optimizations.json` targets them, and none remains unapplied except OPT-4 (a documented no-op). The convertTensor layout kernels (54 us) persist; channels_last removed the redundant per-BN-conv conversions but cuDNN still performs its own boundary reformatting around the implicit-GEMM path. No residual FX-level gain is estimated.
 
 ## 7. What Drove Each Speedup
 
-### OPT-1 — channels_last: primary driver (~61% reduction on 64→128ch convolutions)
+**Conv-BN folding (OPT-1, launch-count reduction, no per-op time delta):** Folds each eval-mode BatchNorm's frozen affine into the preceding conv's weights and bias (`scale = gamma/sqrt(var+eps)`), so the normalization is applied for free inside the conv weights. Evidence: all 21 standalone `triton_*_native_batch_*` kernels (127,327 ns of memory-bound, TC-0% replay time in the baseline) disappear entirely from the optimized capture — the optimized profile contains zero `native_batch` kernels.
 
-The dominant cost in the baseline `layer::unique::prologue_0` was the `Kernel` (nhwcToNchw output re-layout, k_00065, 75,104 ns) and two `convertTensor_kernel` launches per cuDNN convolution call. These three kernels accounted for 60–78% of each cuDNN convolution's total measured time and operated at 0% Tensor Core activity, 64–66% DRAM throughput, grid 1024×1×1 — purely memory-layout overhead with no arithmetic work.
+**channels_last / NHWC (OPT-2, layout consistency):** Converts the module and input to channels_last so activations stay in cuDNN's preferred NHWC layout end-to-end, preventing redundant NCHW<->NHWC round-trips between fused conv stages. Evidence: the 6 `triton_poi_fused_convolution` prologue kernels are gone; the surviving 12 `convertTensor_kernel` launches are cuDNN's own implicit-GEMM boundary reformatting, unchanged in count because the heavy convs still enter/exit the xmma path.
 
-With `model.to(memory_format=torch.channels_last)` applied before compilation, cuDNN receives input and weight tensors already in NHWC format. The profiler confirms the effect in `profile_optimized.json`: zero `convertTensor_kernel` launches and zero nhwcToNchw `Kernel` launches appear for any convolution operator. The 64→128ch convolution duration drops from ~86,543 ns to ~33,392 ns — a 61% reduction driven entirely by eliminating format-conversion kernels.
-
-### OPT-2 — BF16 dtype promotion: secondary driver on BN-ReLU DRAM pressure
-
-The baseline BN-ReLU kernels (`triton_poi_fused__native_batch_norm_legit_no_training_relu_4`, grid 16384×256, 12,255–12,672 ns) were saturating DRAM bandwidth at 79–80% throughput, reading FP32 tensors of size [16, 256, 64, 64]. Switching to BF16 halves bytes-per-element from 4 to 2, halving DRAM traffic for every pointwise kernel.
-
-The optimized BN-ReLU kernels show DRAM throughput of 60–71% (down from 79–84%), and the equivalent 256-channel BN stage drops from ~12,600 ns to ~6,944 ns — approximately the expected 2x improvement for a bandwidth-bound kernel. BN `running_mean` and `running_var` remain FP32 as required by `_native_batch_norm_legit_no_training`'s internal accumulation.
-
-### OPT-3 — max_autotune: marginal contribution to GEMM improvements
-
-The wave starvation bottleneck (`sm__warps_active` 8.3% on the dominant 64→128ch `Kernel`) partially improved to 14.6–14.8% in the optimized profile. This improvement cannot be cleanly attributed to OPT-3 alone because OPT-1 (channels_last) and OPT-2 (BF16) together change the cuDNN algorithm selection path by altering input layout and dtype. The combined OPT-1+OPT-2+OPT-3 effect on the 64→128ch GEMM kernel is a ~2x duration reduction (68–70 ns → 33 ns per kernel invocation). `smsp__pipe_tensor_cycles_active` is maintained at 70–71%, confirming Tensor Core utilisation is not degraded by BF16 conversion.
-
-OPT-4 is explicitly credited with **no speedup** — the pass logged "not applied."
-
----
+**ReLU -> clamp_min epilogue (OPT-3, prevents standalone activation launch):** Rewrites each post-fold `aten::relu` to `aten::clamp_min(x, 0)` so Inductor schedules it into the conv-output pointwise group rather than emitting an independent full-tensor pass. Evidence: no standalone relu/activation kernel survives in the optimized capture; the activation is absorbed into adjacent kernels (confidence medium — Inductor's default epilogue fusion overlaps this benefit).
 
 ## 8. Remaining Opportunities
 
-### OPT-4 — 3-channel conv padding (not applied)
+| ID | Type | Target | Reason Not Applied | Projected Gain |
+|---|---|---|---|---|
+| OPT-4 | wave_quantization | `aten::addmm` classifier 256->10 | Documented no-op: a 16x256x10 GEMM is intrinsically sub-tile and wave-starved; no fusion or layout transform helps. <2% of attributed time. | 0 ns (none) |
 
-The pass `_pass_pad_shallow_conv` logged "No 3-channel F.conv2d found — pass not applied." The 3→64ch convolution dispatches to `sm80_xmma_fprop_implicit_gemm_indexed_wo_smem` (15% Tensor Core utilisation, 26% SM throughput) because K = 3×3×3 = 27 is below the WMMA alignment minimum. Padding input channels from 3 to 4 (K = 36) would allow cuDNN to use the shared-memory-staging GEMM path.
-
-The likely root cause of the miss: with OPT-1 applied first, Dynamo traces the conv in NHWC and lowers it to a different Aten node target than `F.conv2d` or `aten.convolution.default` at the `@register_backend` invocation level in torch 2.11. To activate: inspect the FX graph with `TORCH_LOGS="+dynamo"` to confirm the exact target name, update the pass's target set, and re-run.
-
-**Estimated remaining opportunity:** ~10,000–14,000 ns savings across the two 3→64ch calls. TC utilisation improvement from ~15% toward 40–50%.
-
-### Wave starvation (OPT-3 residual)
-
-The optimized 64→128ch `Kernel` still runs at only 14.6–14.8% `sm__warps_active`. Two levers remain:
-1. **Batch doubling** to B=32 doubles the CTA grid, increasing waves toward ~25–30% SM fill.
-2. **Forcing the Triton conv path** by warming the `TORCHINDUCTOR_CACHE_DIR` autotuning cache to avoid the sm80-generation cuDNN heuristic entirely.
-
-**Estimated additional opportunity:** ~60,000 ns (~5.5% of profiled budget).
-
----
-
-## 9. Reproduction Commands
-
-```bash
-# Environment setup
-pip install -r requirements.txt
-python3 nvidia/scripts/preflight.py
-
-# Baseline profile — Phase A: correlation pass (no nsys)
-PYTHONPATH=/home/ubuntu/Profiler python3 nvidia/scripts/run_workload.py \
-    --workload examples/conv_block/conv_block.py \
-    --output-prefix examples/conv_block/profiler_output/conv_block \
-    --inductor-debug-dir examples/conv_block/profiler_output/conv_block_inductor_debug \
-    --correlation-pass
-
-# Baseline profile — Phase B: NVTX capture under nsys
-nsys profile --trace=cuda,nvtx \
-    --output=examples/conv_block/profiler_output/conv_block \
-    python3 nvidia/scripts/run_workload.py \
-        --workload examples/conv_block/conv_block.py \
-        --output-prefix examples/conv_block/profiler_output/conv_block \
-        --inductor-debug-dir examples/conv_block/profiler_output/conv_block_inductor_debug
-
-# Baseline ncu hardware counters (requires sudo)
-sudo env PYTHONPATH=/home/ubuntu/Profiler \
-    /opt/nvidia/nsight-compute/2025.4.1/ncu \
-    --replay-mode application --set full \
-    --export examples/conv_block/profiler_output/ncu_reps/all_kernels \
-    python3 nvidia/scripts/run_workload.py \
-        --workload examples/conv_block/conv_block.py \
-        --output-prefix examples/conv_block/profiler_output/conv_block
-
-# Validation test suite
-PYTHONPATH=/home/ubuntu/Profiler pytest \
-    examples/conv_block/test_conv_block_optimized.py -v --tb=short
-
-# Optimized re-capture (same three-phase sequence, substitute conv_block_optimized.py)
-# Add --compile-backend conv_block_opt to run_workload.py calls
-```
-
----
-
-*All `duration_ns` values are from ncu application-mode replay and are inflated 2–5x relative to actual GPU execution time. Throughput percentages (`gpu__dram_throughput`, `sm__throughput`, `smsp__pipe_tensor_cycles_active`) are unaffected by replay overhead and are the primary comparables for bottleneck analysis. `tensor_core_active_pct = null` in the aggregated fields is a Blackwell counter-removal artifact and does not describe a performance problem.*
+OPT-4 is the only unapplied proposal and is a deliberate no-op. Applying it would yield no measurable gain. No further FX-level gains are identified in this profile — the dominant convolution stages are already Tensor-Core-bound.
