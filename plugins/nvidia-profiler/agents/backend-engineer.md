@@ -50,24 +50,23 @@ The rules below are the authoritative implementation guide. Read them before wri
 
 ### Rule 1: compile_fx Import
 ```python
-# ALWAYS — imports the callable function
-from torch._inductor.compile_fx import compile_fx
-from torch._functorch.aot_autograd import aot_autograd
+# ALWAYS — imports the callable functions
+from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 
 # NEVER — imports the module → TypeError: 'module' object is not callable
 from torch._inductor import compile_fx
 ```
 
-`compile_fx` is called inside `_aten_fw_compiler`, not directly from the backend function. `aot_autograd` wraps each partition or the full graph to expose the Aten IR graph to passes.
+Graph passes run inside `_aten_inner_compile`, which `compile_fx` calls as its `inner_compile` hook with the fully decomposed Aten IR graph. `compile_fx_inner` is the post-AOTAutograd leaf compiler (Aten → Triton) that you delegate to after running the passes. Do **not** use `aot_autograd(fw_compiler=...)` — see the rationale under Rule 9.
 
 ### Rule 2: Weight Node Detection (Aten IR level)
 
-All passes run inside `_aten_fw_compiler`, which `aot_autograd` calls with the fully decomposed Aten IR graph. ALL `nn.Module` parameters are still `placeholder` nodes at this level — AOTAutograd does not resolve them to constants. Their actual tensors are in `fw_example_inputs`, positionally matched to placeholder nodes in graph order.
+All passes run inside `_aten_inner_compile`, which `compile_fx` calls (as its `inner_compile` hook) with the fully decomposed Aten IR graph. ALL `nn.Module` parameters are still `placeholder` nodes at this level — AOTAutograd does not resolve them to constants. Their actual tensors are positionally matched to placeholder nodes in graph order. **Note:** the `example_inputs` `inner_compile` receives may be FakeTensors (Inductor traces under FakeTensorMode), so weight-VALUE-reading passes use the `real_inputs` threaded from the backend (see Rule 9), not the FakeTensors.
 
 ```python
 # CORRECT — build the lookup at the start of any pass that reads weight values
 placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}  # weight_source = real_inputs
 
 # For aten.addmm.default(bias, x, t_node): weight placeholder is inside aten.t.default
 t_node    = addmm_node.args[2]          # aten.t.default node
@@ -79,7 +78,7 @@ if node.args[0].op == 'get_attr':
     weight = gm.get_parameter(node.args[0].target)   # KeyError or AttributeError
 ```
 
-Aten IR forms of common layers (what `_aten_fw_compiler` actually sees):
+Aten IR forms of common layers (what `_aten_inner_compile` actually sees):
 - `nn.Linear` (with bias) → `aten.addmm.default(bias_ph, x, aten.t.default(weight_ph))`
 - `nn.Linear` (no bias) → `aten.mm.default(x, aten.t.default(weight_ph))`
 - `x @ y` → `aten.mm.default`
@@ -157,19 +156,36 @@ Read `optimizations.json analysis.compile_mode`:
 
 ### Rule 9: Dedup-Aware Backend Structure
 
-ALWAYS import and use `UniqueSubgraphRegistry`. All graph passes run inside `_aten_fw_compiler` at Aten IR level. The backend function must follow this structure exactly:
+ALWAYS import and use `UniqueSubgraphRegistry`. All graph passes run inside `_aten_inner_compile` at Aten IR level, installed via `compile_fx`'s `inner_compile` hook (Strategy D). The backend function must follow this structure exactly:
 
 ```python
-from torch._functorch.aot_autograd import aot_autograd
+import functools
+from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
-def _aten_fw_compiler(gm: fx.GraphModule, fw_example_inputs) -> Callable:
-    """All graph passes run here at Aten IR level."""
+def _aten_inner_compile(gm: fx.GraphModule, example_inputs, *, real_inputs=None, **kwargs) -> Callable:
+    """Inductor `inner_compile` hook. `compile_fx` calls this with the fully decomposed
+    Aten IR graph (after AOTAutograd). Run all graph passes here, then delegate to the
+    real `compile_fx_inner` (Aten -> Triton).
+
+    `example_inputs` here may be FakeTensors (Inductor traces under FakeTensorMode), so
+    weight-VALUE-reading passes use `real_inputs` (genuine params/inputs threaded from the
+    backend) for the ph_to_tensor lookup. Forward `**kwargs` verbatim to stay forward-compatible.
+    """
+    weight_source = real_inputs if real_inputs is not None else example_inputs
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-    ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}
     gm = _pass_...(gm, ph_to_tensor)   # weight-access passes (QKV fusion, BN fold, etc.)
     gm = _pass_...(gm)                  # op-target passes (BF16 casts, SDPA replacement, etc.)
-    return compile_fx(gm, fw_example_inputs)
+    return compile_fx_inner(gm, example_inputs, **kwargs)
+
+def _compile_with_aten_passes(gm: fx.GraphModule, example_inputs) -> Callable:
+    """Compile a (sub)graph through Inductor with the Aten-IR passes installed via
+    inner_compile. `compile_fx` owns AOTAutograd, the decomp table, the boxed calling
+    convention, and the partitioner — we only swap the leaf compiler. No global state,
+    no second AOTAutograd."""
+    inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
+    return compile_fx(gm, example_inputs, inner_compile=inner)
 
 @register_backend
 def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
@@ -180,16 +196,16 @@ def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     if not equiv_map:
         # No repeated layers detected — flat compile preserves cross-layer Inductor fusion
         logger.info("{model_name_snake}_opt: no repeated layers, flat compile path")
-        return aot_autograd(fw_compiler=_aten_fw_compiler)(gm, example_inputs)
+        return _compile_with_aten_passes(gm, example_inputs)
 
     logger.info(f"{model_name_snake}_opt: {len(equiv_map)} duplicate partition(s), dedup path")
 
-    # Compile each unique rep via aot_autograd; passes run inside _aten_fw_compiler.
+    # Compile each unique rep via compile_fx (passes run inside _aten_inner_compile).
     # Share the compiled callable with all structural duplicates.
     partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
     for rep_name, rep_mod in registry.unique_reps:
         inputs = partition_inputs.get(rep_name, example_inputs)
-        compiled = aot_autograd(fw_compiler=_aten_fw_compiler)(rep_mod, inputs)
+        compiled = _compile_with_aten_passes(rep_mod, inputs)
         rep_mod.forward = compiled
         for _, dup_mod in registry.duplicates_of(rep_name):
             dup_mod.forward = compiled
@@ -198,29 +214,33 @@ def {model_name_snake}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     return lambda *args: registry.split(*args)
 ```
 
+**Do NOT use `aot_autograd(fw_compiler=compile_fx)`.** On torch 2.11 it raises `AssertionError: Expected tensors only, but got list` inside `copy_misaligned_inputs` — a boxing/calling-convention mismatch from plugging the top-level `compile_fx` into AOTAutograd's `fw_compiler` slot. The `inner_compile` seam above lets `compile_fx` own AOTAutograd, the decomposition table, the boxed calling convention, and the fwd/bwd partitioner; it is **scoped** to each `compile_fx` call (no process-global state to leak across compiles) and stays forward-compatible by forwarding `**kwargs`.
+
+**Weight-value-reading caveat:** op-target passes (bf16 casts, SDPA/activation replacement) are clean. Weight-VALUE-reading passes (BN fold, QKV concat) need real parameter tensors — the `real_inputs` threading above supplies them, but the placeholder↔real-tensor positional correspondence after AOTAutograd lifts params can require a `FakeTensorProp` pass to repopulate `meta['val']` before `compile_fx_inner`. See `examples/depthwise_separable_conv/depthwise_separable_conv_optimized.py` for the reference handling.
+
 **Return value note:** `registry.split` is a `GraphModule` whose child partitions have their `.forward` patched with Inductor-compiled callables. `lambda *args: registry.split(*args)` routes each forward call through this assembled graph via `nn.Module.__call__`.
 
 **Classify each optimization before writing code:**
-- Graph passes (any target) → `_aten_fw_compiler` at Aten IR level
+- Graph passes (any target) → `_aten_inner_compile` at Aten IR level
 - Non-graph (dtype, layout, batch shape) → `get_model_and_input()` only
 
 Refer to `knowledge/fx-patterns.md` for the standard backend pattern, the `_capture_partition_inputs` utility, and all canonical pass implementations at Aten IR level.
 
 ### Rule 10: IR Level — All Passes at Aten IR
 
-Every graph pass runs inside `_aten_fw_compiler` at Aten IR level. The profiler measures operators at the `aten::` level, and `optimizations.json` expresses all targets as `aten::` names. There is no "pre-Inductor pass" category.
+Every graph pass runs inside `_aten_inner_compile` at Aten IR level. The profiler measures operators at the `aten::` level, and `optimizations.json` expresses all targets as `aten::` names. There is no "pre-Inductor pass" category.
 
 **Decision table:**
 
 | Optimization | IR level | Location |
 |---|---|---|
-| BF16 casts on `aten::addmm` / `aten::mm` | Aten IR | `_aten_fw_compiler` |
-| SDPA kernel replacement | Aten IR | `_aten_fw_compiler` |
-| Conv channels_last annotation | Aten IR | `_aten_fw_compiler` (target `aten.convolution.default`) |
-| QKV weight fusion | Aten IR | `_aten_fw_compiler` (target `aten.addmm.default` triplets) |
-| Conv-BN fold | Aten IR | `_aten_fw_compiler` (target `aten._native_batch_norm_legit_no_training.default`) |
-| Pre-transposed weights | Aten IR | `_aten_fw_compiler` (target `aten.t.default` → `aten.mm.default`) |
-| Activation substitution | Aten IR | `_aten_fw_compiler` (target `aten.tanh.default`) |
+| BF16 casts on `aten::addmm` / `aten::mm` | Aten IR | `_aten_inner_compile` |
+| SDPA kernel replacement | Aten IR | `_aten_inner_compile` |
+| Conv channels_last annotation | Aten IR | `_aten_inner_compile` (target `aten.convolution.default`) |
+| QKV weight fusion | Aten IR | `_aten_inner_compile` (target `aten.addmm.default` triplets) |
+| Conv-BN fold | Aten IR | `_aten_inner_compile` (target `aten._native_batch_norm_legit_no_training.default`) |
+| Pre-transposed weights | Aten IR | `_aten_inner_compile` (target `aten.t.default` → `aten.mm.default`) |
+| Activation substitution | Aten IR | `_aten_inner_compile` (target `aten.tanh.default`) |
 | dtype, memory_format, batch shape | Non-graph | `get_model_and_input()` only |
 
 **Multi-output Aten ops** (`native_layer_norm`, `_native_batch_norm_legit_no_training`, `_scaled_dot_product_efficient_attention`, `scaled_dot_product_flash_attention`) return tuples. Do NOT replace the op node directly:
@@ -282,7 +302,7 @@ Write to `{workload_dir}/profiler_output/implementation_notes.md`. This file is 
 
 ### Backend Architecture
 
-One-row-per-pass table. Columns: `Pass` (OPT-N description), `Method` (`get_model_and_input()`, `_aten_fw_compiler`, or stub), `Reason` (one sentence why). Include every pass from `optimizations.json fx_steps[]`; mark stubs as "stub — not applied".
+One-row-per-pass table. Columns: `Pass` (OPT-N description), `Method` (`get_model_and_input()`, `_aten_inner_compile`, or stub), `Reason` (one sentence why). Include every pass from `optimizations.json fx_steps[]`; mark stubs as "stub — not applied".
 
 ### Key Design Decisions
 
