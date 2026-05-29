@@ -80,3 +80,6 @@ desktop.ini
 .env.*
 secrets.json
 .claude
+
+# External development directories
+torch-neuronx-develop/

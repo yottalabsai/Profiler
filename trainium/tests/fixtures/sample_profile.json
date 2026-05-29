@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "capture_metadata": {
+    "model_name": "test_model",
+    "torch_version": "2.1.0",
+    "neuron_sdk_version": "2.18.0",
+    "compile_mode": "neuron",
+    "nrt_session_dir": "/tmp/trainium_profile/inst_pid_12345/1700000000",
+    "capture_timestamp_utc": "2024-01-01T00:00:00+00:00",
+    "device_name": "trn1.2xlarge",
+    "neuroncore_count": 2
+  },
+  "operators": [
+    {
+      "operator_id": "aten::linear_0",
+      "operator_name": "aten::linear",
+      "call_index": 0,
+      "is_fused": false,
+      "fused_with": [],
+      "nrt_event": {
+        "event_name": "nrt_op_linear_0",
+        "neuroncore_id": 0,
+        "start_ns": 1000000,
+        "end_ns": 1005000,
+        "event_category": "privateuse1_driver"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00000",
+          "kernel_name": "nrt_op_linear_0",
+          "demangled_name": null,
+          "stream_id": 0,
+          "device_id": 0,
+          "start_ns": 1000000,
+          "end_ns": 1005000,
+          "duration_ns": 5000,
+          "grid_dim": null,
+          "block_dim": null,
+          "metrics": {"raw": {}},
+          "attribution_method": "nrt_correlation",
+          "confidence": "high",
+          "nrt_event": {
+            "event_name": "nrt_op_linear_0",
+            "neuroncore_id": 0,
+            "start_ns": 1000000,
+            "end_ns": 1005000,
+            "event_category": "privateuse1_driver"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 5000,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00000",
+        "total_dma_bytes_read": null,
+        "total_dma_bytes_written": null,
+        "memory_utilization_pct": null,
+        "ddr_throughput_pct": null,
+        "tensor_engine_utilization_pct": null,
+        "vector_engine_utilization_pct": null,
+        "stall_cycles_pct": null,
+        "total_execution_cycles": null,
+        "operations_per_cycle": null,
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "sm_throughput_pct": null,
+        "achieved_occupancy": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null
+      }
+    }
+  ],
+  "unattributed_kernels": [
+    {
+      "kernel_id": "k_00002",
+      "kernel_name": "nrt_op_unknown_0",
+      "demangled_name": null,
+      "stream_id": 1,
+      "device_id": 0,
+      "start_ns": 1008000,
+      "end_ns": 1009000,
+      "duration_ns": 1000,
+      "grid_dim": null,
+      "block_dim": null,
+      "metrics": {"raw": {}},
+      "attribution_method": "unattributed",
+      "confidence": "unattributed",
+      "nrt_event": null
+    }
+  ],
+  "warnings": []
+}

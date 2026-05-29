@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.0",
+  "capture_metadata": {
+    "model_name": "test_model",
+    "torch_version": "2.1.0",
+    "compile_mode": "neuron",
+    "nrt_session_dir": "/tmp/trainium_profile/inst_pid_12345/1700000000",
+    "capture_timestamp_utc": "2024-01-01T00:00:00+00:00",
+    "device_name": "trn1.2xlarge",
+    "neuroncore_count": 2,
+    "input_shapes": {"x": [1, 768]}
+  },
+  "kernels": [
+    {
+      "kernel_id": "k_00000",
+      "kernel_name": "nrt_op_linear_0",
+      "stream_id": 0,
+      "device_id": 0,
+      "start_ns": 1000000,
+      "end_ns": 1005000,
+      "duration_ns": 5000,
+      "grid_dim": null,
+      "block_dim": null,
+      "attribution": {
+        "method": "nrt_correlation",
+        "source_operators": ["aten::linear"],
+        "nrt_event": {
+          "event_name": "nrt_op_linear_0",
+          "neuroncore_id": 0,
+          "start_ns": 1000000,
+          "end_ns": 1005000,
+          "event_category": "privateuse1_driver"
+        },
+        "confidence": "high",
+        "is_fused": false,
+        "all_enclosing_ops": []
+      },
+      "kineto_correlation_id": 42,
+      "layer_partition": null,
+      "is_unique_partition": false
+    },
+    {
+      "kernel_id": "k_00001",
+      "kernel_name": "nrt_op_relu_0",
+      "stream_id": 0,
+      "device_id": 0,
+      "start_ns": 1006000,
+      "end_ns": 1007000,
+      "duration_ns": 1000,
+      "grid_dim": null,
+      "block_dim": null,
+      "attribution": {
+        "method": "nrt_correlation",
+        "source_operators": ["aten::relu"],
+        "nrt_event": {
+          "event_name": "nrt_op_relu_0",
+          "neuroncore_id": 0,
+          "start_ns": 1006000,
+          "end_ns": 1007000,
+          "event_category": "privateuse1_driver"
+        },
+        "confidence": "high",
+        "is_fused": false,
+        "all_enclosing_ops": []
+      },
+      "kineto_correlation_id": 43,
+      "layer_partition": null,
+      "is_unique_partition": false
+    },
+    {
+      "kernel_id": "k_00002",
+      "kernel_name": "nrt_op_unknown_0",
+      "stream_id": 1,
+      "device_id": 0,
+      "start_ns": 1008000,
+      "end_ns": 1009000,
+      "duration_ns": 1000,
+      "grid_dim": null,
+      "block_dim": null,
+      "attribution": {
+        "method": "unattributed",
+        "source_operators": [],
+        "nrt_event": null,
+        "confidence": "unattributed",
+        "is_fused": false,
+        "all_enclosing_ops": []
+      },
+      "kineto_correlation_id": null,
+      "layer_partition": null,
+      "is_unique_partition": false
+    }
+  ],
+  "warnings": []
+}

@@ -217,16 +217,24 @@ def get_model_and_input():
         x = x.to(torch.bfloat16)
     return model, x
 
-# FX graph passes registered as a torch.compile() backend
+# Passes run at Aten IR level inside _aten_inner_compile (compile_fx's inner_compile hook).
+# example_inputs here may be FakeTensors; use real_inputs for weight-value-reading passes.
+def _aten_inner_compile(gm, example_inputs, *, real_inputs=None, **kwargs):
+    weight_source = real_inputs if real_inputs is not None else example_inputs
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}
+    gm = pass_fuse_qkv(gm, ph_to_tensor)           # weight-access pass
+    gm = pass_replace_sdpa(gm)                      # op-target pass
+    gm = pass_pretranspose_weights(gm, ph_to_tensor)
+    return compile_fx_inner(gm, example_inputs, **kwargs)
+
 @register_backend
 def my_backend(gm, example_inputs):
-    gm = pass_fuse_qkv(gm)
-    gm = pass_replace_sdpa(gm)
-    gm = pass_pretranspose_weights(gm)
-    return compile_fx(gm, example_inputs)
+    inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
+    return compile_fx(gm, example_inputs, inner_compile=inner)
 ```
 
-Each FX pass is implemented defensively: it inspects the graph for the expected pattern before mutating, logs `INFO` on success or `WARNING` if the pattern is not found (graceful degradation).
+All FX passes run at the **Aten IR** level. The `@register_backend` function receives the functional-level graph (`torch.mm`, `F.linear`, etc.), but passes must target `torch.ops.aten.*` nodes — these only appear after AOTAutograd decomposes the graph. The canonical injection point is `_aten_inner_compile`, installed as `compile_fx`'s `inner_compile` hook. Each pass is implemented defensively: it inspects the graph for the expected pattern before mutating, logs `INFO` on success or `WARNING` if the pattern is not found (graceful degradation).
 
 ---
 
@@ -367,7 +375,7 @@ GPU database covering 11 architectures (A100, H100, H200, B100, B200, RTX 4090, 
 
 ### `knowledge/fx-patterns.md`
 
-Canonical FX graph pass implementations for every supported transformation type: QKV fusion, SDPA replacement, BatchNorm fold, pre-transposed weights, activation substitution, and more. Includes weight node detection patterns for Inductor-traced graphs and graph mutation discipline (lint, recompile). The `backend-engineer` agent references this for correct pass structure.
+Canonical FX graph pass implementations for every supported transformation type: QKV fusion, SDPA replacement, BatchNorm fold, pre-transposed weights, activation substitution, and more. All patterns operate at the **Aten IR** level — targeting `torch.ops.aten.*` nodes inside `_aten_inner_compile` (not functional-level ops visible in the graph `@register_backend` receives). Includes the Aten IR op mapping table, `real_inputs` threading for weight-value-reading passes (because `inner_compile`'s `example_inputs` may be FakeTensors), and the standard `_aten_inner_compile` / `compile_fx_inner` / `_compile_with_aten_passes` backend skeleton. The `backend-engineer` agent uses this as the authoritative implementation reference.
 
 ### `knowledge/edge-cases.md`
 
