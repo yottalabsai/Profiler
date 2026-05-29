@@ -52,9 +52,9 @@ def test_get_model_and_input():
     assert tuple(x.shape) == _EXPECTED_INPUT_SHAPE, f"Unexpected input shape: {tuple(x.shape)}"
     assert str(x.dtype).split(".")[-1] == _EXPECTED_DTYPE, f"Unexpected dtype: {x.dtype}"
     assert next(model.parameters()).is_cuda, "Model parameters must be on CUDA"
-    # OPT-2 non-graph lever: input must be channels_last.
+    # OPT-3 non-graph lever: input must be channels_last.
     assert x.is_contiguous(memory_format=torch.channels_last), (
-        "Input must be channels_last (NHWC) for OPT-2 layout propagation"
+        "Input must be channels_last (NHWC) for OPT-3 layout propagation"
     )
 
 

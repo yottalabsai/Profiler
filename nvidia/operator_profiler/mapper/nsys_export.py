@@ -110,7 +110,12 @@ def query_kernels(db_path: str | Path) -> list[KernelRow]:
                 """
                 SELECT
                     k.correlationId,
-                    s.value                      AS kernel_name,
+                    -- Prefer demangledName: nsys stores a TRUNCATED shortName
+                    -- (e.g. "triton_tem_fused_addmm_relu_t__1...") that does not
+                    -- match the full kernel name ncu reports, breaking the
+                    -- (kernel_name, invocation_index) join in the orchestrator.
+                    -- demangledName holds the full, untruncated name.
+                    COALESCE(sd.value, ss.value) AS kernel_name,
                     k.start                      AS start_ns,
                     k.end                        AS end_ns,
                     k.streamId                   AS stream_id,
@@ -120,7 +125,8 @@ def query_kernels(db_path: str | Path) -> list[KernelRow]:
                     COALESCE(r.globalTid, 0)     AS host_tid,
                     COALESCE(r.start, 0)         AS cpu_launch_start_ns
                 FROM CUPTI_ACTIVITY_KIND_KERNEL AS k
-                LEFT JOIN StringIds AS s ON s.id = k.shortName
+                LEFT JOIN StringIds AS sd ON sd.id = k.demangledName
+                LEFT JOIN StringIds AS ss ON ss.id = k.shortName
                 LEFT JOIN CUPTI_ACTIVITY_KIND_RUNTIME AS r
                        ON r.correlationId = k.correlationId
                 ORDER BY k.start ASC

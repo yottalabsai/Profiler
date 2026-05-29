@@ -3,21 +3,21 @@
     "model": "sdpa_attention",
     "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "compile_mode": "inductor",
-    "dtype": "float32",
-    "total_profiled_wall_time_ms": 2.221429,
+    "dtype": "fp32",
+    "total_profiled_wall_time_ms": 2.665,
     "edge_case_flags": ["fused_kernel_double_count"],
     "time_budget": {
       "layer::unique::prologue": { "pct": 41.13, "duration_ns": 913658, "kernel_count": 16 },
       "aten::mm_0": { "pct": 13.46, "duration_ns": 299007, "kernel_count": 4 },
       "aten::_efficient_attention_forward_0": { "pct": 6.19, "duration_ns": 137408, "kernel_count": 1 },
-      "aten::_efficient_attention_forward (op_id=14, fused)": { "pct": 6.18, "duration_ns": 137375, "kernel_count": 1 },
-      "aten::_efficient_attention_forward (op_id=36, fused)": { "pct": 6.18, "duration_ns": 137311, "kernel_count": 1 },
+      "aten::_efficient_attention_forward (op_id=14)": { "pct": 6.18, "duration_ns": 137375, "kernel_count": 1 },
+      "aten::_efficient_attention_forward (op_id=36)": { "pct": 6.18, "duration_ns": 137311, "kernel_count": 1 },
       "aten::mm (op_id=4)": { "pct": 3.37, "duration_ns": 74880, "kernel_count": 1 },
       "aten::mm (op_id=5)": { "pct": 3.37, "duration_ns": 74879, "kernel_count": 1 },
       "aten::mm (op_id=6)": { "pct": 3.36, "duration_ns": 74656, "kernel_count": 1 },
-      "aten::mm (op_id=21)": { "pct": 3.35, "duration_ns": 74528, "kernel_count": 1 },
+      "aten::mm (op_id=21)": { "pct": 3.36, "duration_ns": 74528, "kernel_count": 1 },
+      "aten::mm (op_id=43)": { "pct": 3.36, "duration_ns": 74528, "kernel_count": 1 },
       "aten::mm (op_id=27)": { "pct": 3.35, "duration_ns": 74495, "kernel_count": 1 },
-      "aten::mm (op_id=43)": { "pct": 3.35, "duration_ns": 74528, "kernel_count": 1 },
       "aten::mm (op_id=26)": { "pct": 3.35, "duration_ns": 74432, "kernel_count": 1 },
       "aten::mm (op_id=28)": { "pct": 3.34, "duration_ns": 74272, "kernel_count": 1 }
     }
@@ -28,175 +28,174 @@
       "priority": 1,
       "operators": [
         "aten::mm_0 (4 nodes)",
-        "aten::mm op_id=4 (1 node)",
-        "aten::mm op_id=5 (1 node)",
-        "aten::mm op_id=6 (1 node)",
-        "aten::mm op_id=21 (1 node)",
-        "aten::mm op_id=26 (1 node)",
-        "aten::mm op_id=27 (1 node)",
-        "aten::mm op_id=28 (1 node)",
-        "aten::mm op_id=43 (1 node)"
+        "aten::mm op_id=4/5/6/21/26/27/28/43 (8 nodes)",
+        "aten::_efficient_attention_forward op_id=14/36 (2 nodes)"
       ],
       "bottleneck": {
-        "description": "Every projection GEMM is the cuBLAS FP32 SIMT kernel 'Kernel2' with tensor cores completely idle. The model runs in pure float32 (torch.randn default, no autocast), so cuBLAS routes mm to the FP32 FMA/SIMT path instead of the tensor-core HGEMM path. The kernel is neither compute-bound nor memory-bound at the SIMT level (sm_throughput ~36%, dram_throughput ~7.5%, eligible_cycles ~58%); it is simply running on units that deliver a small fraction of the device's matmul throughput. Each [4096,512]x[512,512] projection takes ~74,800ns. The grid is [64,1,2] = 128 CTAs, which does not even fill one wave on this ~188-SM Blackwell part (Waves/SM = ceil(128/188) = 1, ~68% of a single wave occupied), so the SIMT kernel also leaves most SMs idle.",
+        "description": "Every GEMM in the block runs on the CUDA-core (SIMT) path with the Tensor Cores completely idle, and the attention kernel uses an FP32 CUTLASS fallback that spills heavily to local memory. The model is FP32 end-to-end (nn.Linear default dtype; kernel name fmha_cutlassF_f32_aligned). On Blackwell, FP32 inputs route cuBLAS GEMM to the SIMT path and route SDPA to the sm80-targeted CUTLASS mem-efficient fallback rather than a Tensor-Core FlashAttention kernel. This single dtype decision is the root cause of the dominant cost: ~17 'Kernel2' GEMM launches at ~74.5k ns each, plus 3+ fmha launches at ~137k ns each.",
         "evidence": {
-          "kernel": "Kernel2 (cuBLAS FP32 SIMT GEMM)",
-          "total_launches": 12,
-          "total_duration_ns": 895677,
-          "fraction_of_op_time_pct": 40.3,
+          "kernel": "Kernel2 (cuBLAS SIMT GEMM) and fmha_cutlassF_f32_aligned_64x64_rf_sm80",
+          "total_launches": 20,
+          "total_duration_ns": 1635000,
+          "fraction_of_op_time_pct": 73.6,
           "counters": {
-            "tensor_core_active_pct": 0.0,
-            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
-            "sm_throughput_pct": 36.0,
-            "dram_throughput_pct": 7.5,
-            "eligible_cycles_pct": 58.0,
-            "achieved_occupancy": 16.5,
-            "ipc_active": 0.58,
-            "registers_per_thread": 210.0
+            "Kernel2.smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
+            "Kernel2.tensor_core_active_pct": 0.0,
+            "Kernel2.sm__throughput.avg.pct_of_peak_sustained_elapsed": 36.0,
+            "Kernel2.dram__throughput.avg.pct_of_peak_sustained_elapsed": 7.5,
+            "Kernel2.achieved_occupancy": 16.5,
+            "Kernel2.registers_per_thread": 210,
+            "fmha.tensor_core_active_pct": 58.7,
+            "fmha.local_memory_spills (l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum)": 757760,
+            "fmha.eligible_cycles_pct": 33.9,
+            "fmha.achieved_occupancy": 14.1
           }
         }
       },
       "transformation": {
         "type": "dtype_promotion",
-        "description": "Insert dtype casts so the projection GEMMs route to tensor-core HGEMM. Cast the operands of each torch.ops.aten.mm.default node to bfloat16 before the mm and cast the result back to float32 for downstream consumers (LayerNorm / residual). On Blackwell this moves the matmul off the FP32 SIMT path onto the tensor-core HGEMM path, which has roughly an order of magnitude higher matmul throughput. A lighter-weight alternative that avoids any numeric change to the graph is to enable TF32 (torch.backends.cuda.matmul.allow_tf32 = True), which lets the FP32 inputs use the TF32 tensor-core path with no FX surgery; prefer bf16 casts when accuracy budget allows because TF32 has lower throughput than bf16 HGEMM. This pass is the root enabler: it must run before any pass that registers a fused/pre-transposed weight buffer, because such buffers are allocated at the runtime dtype.",
-        "location": "Inductor post_grad_custom_pre_pass (Aten IR), per torch 2.11 injection note in memory",
+        "description": "Cast the attention block's activations and weights to bf16 (or, if numerics require it, enable TF32 for the matmuls only). In bf16, aten.mm.default routes to the Tensor-Core cuBLAS path (HMMA), taking tensor_core_active_pct from 0% to high, and aten._scaled_dot_product_efficient_attention.default becomes eligible for the Tensor-Core FlashAttention backend, eliminating the 757,760 local-memory spills of the FP32 sm80 CUTLASS fallback. At the Aten IR level this is an insert-cast pass: wrap each aten.mm.default input and the q/k/v feeding _scaled_dot_product_efficient_attention with aten._to_copy.default(dtype=bf16), and cast back at the block output. Because this is the cheapest sweeping win and a structural prerequisite for QKV fusion (which calls register_buffer at the runtime dtype), it must run first.",
+        "location": "post_grad FX graph, all aten.mm.default and aten._scaled_dot_product_efficient_attention.default nodes",
         "fx_steps": [
-          "for node in list(gm.graph.nodes):",
-          "    if node.op == 'call_function' and node.target == torch.ops.aten.mm.default:",
-          "        lhs, rhs = node.args",
-          "        with gm.graph.inserting_before(node):",
-          "            lhs_bf16 = gm.graph.call_function(torch.ops.aten._to_copy.default, (lhs,), {'dtype': torch.bfloat16})",
-          "            rhs_bf16 = gm.graph.call_function(torch.ops.aten._to_copy.default, (rhs,), {'dtype': torch.bfloat16})",
-          "        node.args = (lhs_bf16, rhs_bf16)",
-          "        with gm.graph.inserting_after(node):",
-          "            out_fp32 = gm.graph.call_function(torch.ops.aten._to_copy.default, (node,), {'dtype': torch.float32})",
-          "        node.replace_all_uses_with(out_fp32)",
-          "        out_fp32.args = (node,)  # restore the self-edge broken by replace_all_uses_with",
-          "gm.graph.lint(); gm.recompile()"
+          "for node in graph.find_nodes(op='call_function', target=torch.ops.aten.mm.default):",
+          "    for inp in node.all_input_nodes:",
+          "        with graph.inserting_before(node):",
+          "            cast = graph.call_function(torch.ops.aten._to_copy.default, (inp,), {'dtype': torch.bfloat16})",
+          "        node.replace_input_with(inp, cast)",
+          "    with graph.inserting_after(node):",
+          "        back = graph.call_function(torch.ops.aten._to_copy.default, (node,), {'dtype': torch.float32})",
+          "    node.replace_all_uses_with(back); back.replace_input_with(back, node)",
+          "for sdpa in graph.find_nodes(op='call_function', target=torch.ops.aten._scaled_dot_product_efficient_attention.default):",
+          "    q,k,v = sdpa.args[0], sdpa.args[1], sdpa.args[2]",
+          "    for t in (q,k,v):",
+          "        with graph.inserting_before(sdpa):",
+          "            sdpa.replace_input_with(t, graph.call_function(torch.ops.aten._to_copy.default,(t,),{'dtype': torch.bfloat16}))",
+          "graph.lint(); gm.recompile()"
         ],
-        "code_hint": "Register via torch._inductor.config.post_grad_custom_pre_pass. Guard the result-cast self-edge as shown so replace_all_uses_with does not rewrite the cast's own input. If only TF32 is desired, skip the FX pass and set torch.backends.cuda.matmul.allow_tf32 = True before compile."
+        "code_hint": "Alternatively, the lowest-risk variant: leave the graph FP32 and set torch.backends.cuda.matmul.allow_tf32=True + torch.backends.cudnn.allow_tf32=True so the Kernel2 GEMMs use the TF32 Tensor-Core path without an Aten-IR cast pass. bf16 is the higher-upside option and also fixes the SDPA backend selection."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 627000,
-        "duration_reduction_pct_of_total": 28.2,
+        "relative_duration_reduction_ns": 900000,
+        "duration_reduction_pct_of_total": 40.0,
         "kernel_launches_eliminated": 0,
-        "memory_traffic_reduction": "Weights and activations read as bf16 halve GEMM operand traffic; primary win is throughput (tensor-core HGEMM), estimated ~70% per-GEMM time reduction vs FP32 SIMT. Absolute ns are ncu-inflated 2-5x; treat reduction as relative."
+        "memory_traffic_reduction": "Halves GEMM operand/result traffic (fp32->bf16) and eliminates the 757,760-wavefront local-memory spill stream in the attention kernel by switching from the sm80 CUTLASS fallback to a Tensor-Core attention backend."
       },
       "confidence": "high",
       "prerequisite_for": ["OPT-2", "OPT-3"],
-      "notes": "Mechanism is unambiguous: tensor_core_active_pct=0 and smsp__pipe_tensor_cycles_active=0 on every Kernel2 launch prove FP32 SIMT dispatch. bf16 changes numerics slightly; if the workload requires FP32 accuracy use the TF32 flag variant. Estimate covers the 12 attributed Kernel2 launches; the prologue NVTX range also contains Kernel2 launches that double-count the measured ops (see global_notes), so realized wall-clock gain tracks the unique GEMM count, not the inflated kernel total."
+      "notes": "duration_ns values are ncu-inflated (2-5x) and used here only for relative ranking. The decisive evidence is smsp__pipe_tensor_cycles_active=0 on every Kernel2 GEMM and the _f32_*_sm80 kernel name with 757,760 local spills. If model accuracy is sensitive, prefer TF32-only for the matmuls and keep SDPA in fp32, accepting a smaller win."
     },
     {
       "id": "OPT-2",
       "priority": 2,
       "operators": [
-        "aten::mm op_id=4 (1 node)",
-        "aten::mm op_id=5 (1 node)",
-        "aten::mm op_id=6 (1 node)"
+        "aten::mm op_id=4 (q_proj)",
+        "aten::mm op_id=5 (k_proj)",
+        "aten::mm op_id=6 (v_proj)"
       ],
       "bottleneck": {
-        "description": "The q_proj, k_proj and v_proj are three independent torch.ops.aten.mm.default nodes that share the same LHS (the ln_pre output, [4096,512]) and each multiply a distinct [512,512] weight. They launch as three separate Kernel2 GEMMs (~74,800ns each, ~224,400ns total) with identical small grids of [64,1,2]=128 CTAs. With ~188 SMs each GEMM occupies under one wave, so three serial sub-wave launches waste both launch overhead and SM occupancy, and the shared LHS activation is re-read from L2/DRAM three times.",
+        "description": "The q_proj, k_proj, and v_proj projections appear as three independent aten.mm.default nodes (op_id 4/5/6 in one block, 26/27/28 in another) all consuming the same ln_pre output and all with identical shape [4096,512]x[512,512]. Each launches a separate Kernel2 with grid [64,1,2] = 128 blocks. On a 188-SM Blackwell part, 128 blocks fills only ~0.68 of one wave, leaving SMs idle (achieved_occupancy 16.5%). Three small back-to-back GEMMs pay three launch latencies and three sub-wave launches instead of one well-shaped GEMM.",
         "evidence": {
-          "kernel": "Kernel2 (cuBLAS FP32 SIMT GEMM, q/k/v projections)",
+          "kernel": "Kernel2 (q/k/v projection GEMMs)",
           "total_launches": 3,
           "total_duration_ns": 224415,
           "fraction_of_op_time_pct": 10.1,
           "counters": {
-            "grid_dim_blocks": 128,
-            "estimated_waves_per_sm": 1,
-            "sm_throughput_pct": 36.0,
+            "grid_dim": "[64,1,2] = 128 blocks vs 188 SMs (0.68 waves)",
             "achieved_occupancy": 16.5,
+            "sm__throughput.avg.pct_of_peak_sustained_elapsed": 36.0,
             "tensor_core_active_pct": 0.0
           }
         }
       },
       "transformation": {
         "type": "fusion",
-        "description": "Concatenate the q/k/v weight tensors along the output dimension into a single [512,1536] weight buffer and replace the three aten.mm.default nodes with one aten.mm.default producing [4096,1536], then split the result with three aten.slice.Tensor nodes feeding the existing view/transpose chains. This collapses three sub-wave kernel launches into one larger GEMM (grid grows ~3x toward filling a full wave), reads the shared LHS activation once, and amortizes launch overhead. Must run after OPT-1: the concatenated weight is materialized via register_buffer at the runtime dtype, so dtype promotion must already have set bf16 (otherwise the buffer is allocated FP32 and cannot be recast).",
-        "location": "Inductor post_grad_custom_pre_pass (Aten IR), after OPT-1",
+        "description": "Concatenate the three projection weights into one [512,1536] buffer and replace the three aten.mm.default nodes with a single aten.mm.default of shape [4096,512]x[512,1536], then split the output into q/k/v via three aten.slice.Tensor views. This collapses 3 kernel launches to 1 per attention block and triples the GEMM N dimension (512->1536), producing 3x the output column tiles so the single launch covers ~2 waves and raises SM occupancy. Must run after OPT-1: the fused QKV weight is created via register_buffer, which allocates at the runtime dtype and cannot be recast after dtype promotion has run.",
+        "location": "post_grad FX graph, the three sibling aten.mm.default nodes sharing the ln_pre output",
         "fx_steps": [
-          "Identify the three aten.mm.default nodes whose first arg is the same ln_pre output node and whose second args are the q/k/v weight get_attr nodes.",
-          "Create a fused weight: torch.cat([Wq, Wk, Wv], dim=1) -> register on the module as a buffer, expose as a get_attr node 'qkv_weight'.",
-          "with gm.graph.inserting_before(q_mm): fused = gm.graph.call_function(torch.ops.aten.mm.default, (shared_lhs, qkv_weight_node))",
-          "with gm.graph.inserting_after(fused):",
-          "    q = gm.graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 0, 512))",
-          "    k = gm.graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 512, 1024))",
-          "    v = gm.graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 1024, 1536))",
-          "q_mm.replace_all_uses_with(q); k_mm.replace_all_uses_with(k); v_mm.replace_all_uses_with(v)",
-          "gm.graph.erase_node(q_mm); gm.graph.erase_node(k_mm); gm.graph.erase_node(v_mm)",
-          "gm.graph.lint(); gm.recompile()"
+          "qmm, kmm, vmm = <the three sibling aten.mm.default nodes sharing input act node>",
+          "wq, wk, wv = qmm.args[1], kmm.args[1], vmm.args[1]   # transposed weight nodes",
+          "with graph.inserting_before(qmm):",
+          "    w_cat = graph.call_function(torch.ops.aten.cat.default, ([wq, wk, wv],), {'dim': 1})",
+          "    fused = graph.call_function(torch.ops.aten.mm.default, (qmm.args[0], w_cat))",
+          "    q = graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 0, 512))",
+          "    k = graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 512, 1024))",
+          "    v = graph.call_function(torch.ops.aten.slice.Tensor, (fused, 1, 1024, 1536))",
+          "qmm.replace_all_uses_with(q); kmm.replace_all_uses_with(k); vmm.replace_all_uses_with(v)",
+          "graph.erase_node(qmm); graph.erase_node(kmm); graph.erase_node(vmm)",
+          "graph.lint(); gm.recompile()"
         ],
-        "code_hint": "If OPT-1 emitted per-mm bf16 casts on the LHS, dedupe them so the shared LHS is cast once before the fused mm. Pre-concatenate weights at buffer-registration time, not per forward."
+        "code_hint": "Pre-concatenating weights as a registered buffer once (rather than aten.cat at runtime) avoids the per-call concat cost; register the [512,1536] buffer in the pass setup after dtype promotion fixes the buffer dtype."
       },
       "estimated_impact": {
         "relative_duration_reduction_ns": 110000,
         "duration_reduction_pct_of_total": 5.0,
-        "kernel_launches_eliminated": 2,
-        "memory_traffic_reduction": "Shared LHS activation ([4096,512]) read once instead of three times; better wave utilization on the larger [4096,512]x[512,1536] GEMM. Estimate is the launch+wave savings net of the larger single GEMM, applied per attention block."
+        "kernel_launches_eliminated": 4,
+        "memory_traffic_reduction": "The shared ln_pre activation [4096,512] is read once instead of three times; one result write instead of three. Better SM occupancy from a single ~2-wave launch vs three 0.68-wave launches."
       },
-      "confidence": "medium",
+      "confidence": "high",
       "prerequisite_for": ["OPT-3"],
-      "notes": "Estimate is per-block; the profile shows q/k/v as op_id 4/5/6 in one block. Realized gain scales with block count. Confidence is medium because the exact get_attr wiring of the q/k/v weights depends on how Inductor names the parameters post-grad; the transform is a well-established QKV fusion pattern."
+      "notes": "Two QKV triplets are visible (op_id 4/5/6 and 26/27/28), confirming Inductor did NOT fuse them. Eliminated launches counted across both triplets (2 per triplet x 2 triplets = 4)."
     },
     {
       "id": "OPT-3",
       "priority": 3,
       "operators": [
-        "aten::_efficient_attention_forward_0 (1 node)",
-        "aten::_efficient_attention_forward op_id=14 (1 node)",
-        "aten::_efficient_attention_forward op_id=36 (1 node)"
+        "aten::_efficient_attention_forward op_id=14",
+        "aten::_efficient_attention_forward op_id=36",
+        "aten::_efficient_attention_forward_0"
       ],
       "bottleneck": {
-        "description": "SDPA lowered to the FP32 CUTLASS memory-efficient attention kernel 'fmha_cutlassF_f32_aligned_64x64_rf_sm80'. Because q/k/v are float32, the SDPA dispatcher cannot select the FlashAttention backend (Flash requires fp16/bf16), so it falls back to the FP32 CUTLASS kernel built for sm80 (Ampere), running on a Blackwell GPU. The kernel spills heavily: l1tex__t_output_wavefronts_pipe_lsu_mem_local = 757,760 local-memory wavefronts with 168 registers/thread, and achieved_occupancy is only 14%. eligible_cycles ~34% indicates the SMs frequently have no warp eligible to issue. Each call costs ~137,400ns, the single most expensive kernel in the profile.",
+        "description": "SDPA is dispatching to the memory-efficient CUTLASS backend (fmha_cutlassF_f32_aligned_64x64_rf_sm80) rather than FlashAttention. The kernel shows 757,760 local-memory spill wavefronts, registers_per_thread=168, achieved_occupancy 14%, and eligible_cycles_pct 33.9% (latency-bound by Blackwell's <20%-adjacent criterion). The transpose(1,2) on q/k/v in the source produces a non-contiguous, head-strided layout; combined with FP32, the dispatcher rejects the FlashAttention backend and falls back to the spilling sm80 mem-efficient kernel. Each launch is ~137k ns, the single largest per-launch cost in the profile.",
         "evidence": {
           "kernel": "fmha_cutlassF_f32_aligned_64x64_rf_sm80",
           "total_launches": 3,
           "total_duration_ns": 412094,
           "fraction_of_op_time_pct": 18.5,
           "counters": {
-            "tensor_core_active_pct": 58.7,
+            "local_memory_spills (l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum)": 757760,
+            "registers_per_thread": 168,
             "achieved_occupancy": 14.1,
             "eligible_cycles_pct": 33.9,
-            "local_memory_spills": 757760,
-            "registers_per_thread": 168.0,
-            "dram_throughput_pct": 11.0,
-            "ipc_active": 0.34
+            "tensor_core_active_pct": 58.7,
+            "kernel_name_indicator": "_f32_..._sm80 (Ampere FP32 CUTLASS fallback, not FlashAttention)"
           }
         }
       },
       "transformation": {
-        "type": "dtype_promotion",
-        "description": "Once q/k/v are bf16 (via OPT-1 propagating into the projection outputs, plus OPT-2's fused projection emitting bf16), the SDPA backend selector dispatches to the FlashAttention kernel instead of the FP32 CUTLASS sm80 fallback. At the Aten IR the relevant node is torch.ops.aten._scaled_dot_product_efficient_attention.default (Inductor's lowering of F.scaled_dot_product_attention, op_id 7/29); ensure its q/k/v inputs arrive in bf16 and that no intervening _to_copy upcasts them back to fp32 before the SDPA node. With bf16 inputs Flash uses Blackwell tensor cores fully, keeps the softmax/scores in shared memory/registers without the FP32 register pressure, and eliminates the 757k local-memory spills, raising occupancy. Per the structural DAG, SDPA backend selection must come after QKV fusion so the attention pattern (single fused QKV feeding the SDPA node) is fully formed when the pass walks the graph; and after dtype promotion so the inputs are bf16.",
-        "location": "Inductor post_grad_custom_pre_pass (Aten IR), after OPT-1 and OPT-2",
+        "type": "memory_layout",
+        "description": "After dtype promotion (OPT-1) makes q/k/v bf16 and QKV fusion (OPT-2) produces them from one GEMM, insert aten.clone with contiguous_format on the q/k/v inputs to aten._scaled_dot_product_efficient_attention.default so they present the contiguous [B,H,T,D] layout the FlashAttention backend requires. With bf16 + contiguous heads, the dispatcher selects the Tensor-Core FlashAttention kernel, eliminating the 757,760-wavefront spill stream and raising occupancy. Must run after OPT-2 because the SDPA-rewrite pass walks the graph for q/k/v producer nodes, which only exist in their final form once QKV fusion + slicing has created them.",
+        "location": "post_grad FX graph, inputs to aten._scaled_dot_product_efficient_attention.default",
         "fx_steps": [
-          "Locate node n with n.target == torch.ops.aten._scaled_dot_product_efficient_attention.default.",
-          "For each of n.args[0:3] (q,k,v): trace the producer; if it is an aten._to_copy.default to float32, rewire to consume the bf16 source so SDPA sees bf16 q/k/v.",
-          "Verify is_causal/scale kwargs are preserved on the node (no scale override needed; default scale = 1/sqrt(head_dim=64)).",
-          "Insert a single aten._to_copy.default(out, dtype=float32) after n only if the downstream out_proj path was left in fp32 by OPT-1; otherwise keep the bf16 output flowing into the (now bf16) out_proj mm.",
-          "gm.graph.lint(); gm.recompile()"
+          "for sdpa in graph.find_nodes(op='call_function', target=torch.ops.aten._scaled_dot_product_efficient_attention.default):",
+          "    new_args = list(sdpa.args)",
+          "    for i in (0,1,2):  # q,k,v",
+          "        src = new_args[i]",
+          "        with graph.inserting_before(sdpa):",
+          "            cont = graph.call_function(torch.ops.aten.clone.default, (src,), {'memory_format': torch.contiguous_format})",
+          "        new_args[i] = cont",
+          "    sdpa.args = tuple(new_args)",
+          "graph.lint(); gm.recompile()"
         ],
-        "code_hint": "Do not hand-write a Flash kernel; let the existing SDPA lowering pick the Flash backend by ensuring bf16 inputs. The win comes from backend dispatch, not from replacing the operator. Confirm post-compile that the emitted kernel name changes away from fmha_cutlassF_f32_aligned_*."
+        "code_hint": "Validate the backend switch by re-profiling: a successful switch replaces fmha_cutlassF_f32_aligned_*_sm80 with a flash/efficient bf16 kernel and drops l1tex local-spill wavefronts toward 0. If the dispatcher still picks mem-efficient, gate with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION) at the module level."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 290000,
-        "duration_reduction_pct_of_total": 13.0,
+        "relative_duration_reduction_ns": 200000,
+        "duration_reduction_pct_of_total": 9.0,
         "kernel_launches_eliminated": 0,
-        "memory_traffic_reduction": "Eliminates 757,760 local-memory spill wavefronts and the FP32 register-pressure path; bf16 Flash kernel estimated ~70% faster than the FP32 CUTLASS fallback. Absolute ns ncu-inflated; relative comparison only."
+        "memory_traffic_reduction": "Eliminates the local-memory spill traffic (757,760 wavefronts per launch) by moving from the register-spilling sm80 FP32 fallback to a Tensor-Core FlashAttention kernel that keeps the attention tile in shared memory/registers."
       },
       "confidence": "medium",
       "prerequisite_for": [],
-      "notes": "Mechanism (FP32 -> Flash via bf16) is high-confidence; rated medium because the realized backend selection depends on the SDPA dispatcher accepting the bf16 head_dim=64 shapes on this Blackwell driver/torch 2.11 build, and on no upcast sneaking back in before the SDPA node. The 'sm80' suffix on the current kernel confirms an Ampere-targeted FP32 fallback is running on Blackwell, leaving substantial headroom."
+      "notes": "Confidence capped at medium: web search (exa) and a local fx-patterns.md were unavailable, so the backend-selection claim is from kernel-name evidence and dispatcher heuristics, not a cited pattern. The bulk of this win is unlocked by OPT-1; this pass secures the FlashAttention path that OPT-1 makes eligible."
     }
   ],
   "global_notes": [
-    "0 operators below 1% threshold omitted (combined 0% of attributed time); all 13 operators with non-null aggregated metrics are >= 1%.",
-    "knowledge/hardware-limits.md and knowledge/fx-patterns.md were not present in the repo. Per documented fallback, FX surgery APIs and hardware specs were sourced from model knowledge: assumed NVIDIA RTX PRO 6000 Blackwell ~ 188 SMs (GB202 class) for Waves/SM, and warp_cycles_per_instruction is null throughout (consistent with its removal on Blackwell), so eligible_cycles_pct was used as the latency-bound indicator.",
-    "capture_metadata.measure_iters is not present in this profile, so the warm_up_inflation flag could not be evaluated by the kernel_count-divisibility rule; it was treated as not detected. The 9 init kernels in warnings[] were already excluded from attribution.",
-    "fused_kernel_double_count flag set: operators op_id=14 and op_id=36 have is_fused=true (aten::_efficient_attention_forward fused with aten::_scaled_dot_product_efficient_attention). Their kernel time is the same fmha launch counted under both the efficient-attention and the SDPA lowering names; do not sum them as independent work.",
-    "Layer-dedup double-count caveat: the 'layer::unique::prologue' NVTX range (41% of attributed time, 16 kernels k_00009-k_00029) overlaps the standalone high-confidence torch_profiler ops (aten::mm_0, aten::_efficient_attention_forward_0). The prologue wraps a full-block pass while individual aten ops are also attributed for the measured iterations, so total_attributed_ns (2.22ms) over-counts real wall time. Per-operator pct is reported as-is for ranking, but realized speedups should be scored against the unique GEMM/attention kernel counts, not the inflated totals.",
-    "All kernels run on stream_id=7 (no multi_stream_overlap); kernel-name duration CV is <5% (no dynamic_shapes); 4/35 kernels unattributed = 11% (below the 0.3 high_unattributed threshold); timestamps are well-formed (no clock_domain issue).",
-    "Root-cause summary: the entire workload runs in float32, which forces (a) every projection GEMM onto the cuBLAS FP32 SIMT path with tensor cores at 0%, and (b) SDPA onto the FP32 CUTLASS sm80 fallback instead of FlashAttention. OPT-1 (dtype promotion / TF32) is the single highest-leverage change and the prerequisite for OPT-2 and OPT-3.",
-    "Dependency DAG: OPT-1 -> OPT-2 -> OPT-3 (linear chain, no cycles). OPT-2 and OPT-3 both register/derive buffers at runtime dtype so they must follow OPT-1; OPT-3 (SDPA backend selection) must follow OPT-2 (QKV fusion) per the structural constraint that SDPA passes walk the graph after the QKV output nodes exist.",
-    "MCP tools (context7, exa-search, memory, sequential-thinking) were not invoked in this environment; novel/uncertain transforms were capped at medium confidence accordingly. FX API usage follows current torch.fx.Graph/Node surgery conventions (inserting_before/after, replace_all_uses_with, erase_node, lint, recompile)."
+    "FALLBACK: knowledge/hardware-limits.md and knowledge/fx-patterns.md were not present in the repo. Used built-in Blackwell limits (RTX PRO 6000 Blackwell ~ 188 SMs, GB202 class) and built-in FX surgery patterns. SM count is an assumption; wave-quantization math in OPT-2 uses 188 SMs.",
+    "Blackwell: warp_cycles_per_instruction is null across all operators (metric removed on this architecture). Used eligible_cycles_pct as the latency-bound indicator instead (fmha at 33.9% is latency/occupancy-limited).",
+    "0 operators below the 1% threshold were omitted (all 13 attributed operators are >=1% of attributed time).",
+    "DOUBLE-COUNT WARNING: the 'layer::unique::prologue' NVTX range (913,658 ns, 41% of attributed time, medium-confidence NVTX attribution) wraps the same physical kernels that the high-confidence torch_profiler ops (aten::mm_0, aten::_efficient_attention_forward_0) attribute with distinct kernel_ids. The true distinct workload is ~17 Kernel2 GEMMs (~74.5k ns each) + 3-4 fmha launches (~137k ns each) + tiny LayerNorm triton kernels. Time-budget percentages are therefore inflated by the layer wrapper; rankings rely on per-kernel counter evidence, not the wrapper total.",
+    "edge_case_flag fused_kernel_double_count: aten::_efficient_attention_forward op_id=14 and op_id=36 have is_fused=true (fused with their _scaled_dot_product_efficient_attention parent). Their single fmha kernel is the SDPA realization; not separately optimizable beyond OPT-3.",
+    "measure_iters is absent from capture_metadata, so warm_up_inflation could not be evaluated; 9 warm-up/init kernels are already excluded via the warnings[] list.",
+    "Dependency DAG (no cycles): OPT-1 (dtype) -> OPT-2 (QKV fusion, register_buffer at runtime dtype) -> OPT-3 (SDPA layout/backend, needs final q/k/v producer nodes). Apply strictly in priority order 1,2,3."
   ]
 }

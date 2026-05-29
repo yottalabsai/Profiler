@@ -3,272 +3,362 @@ conv_block_optimized.py — Custom torch.compile() backend for ConvBlock.
 
 Registered backend: ``conv_block_opt``
 
-Implements the three optimizations from optimizations.json. The dependency DAG is
-OPT-1 -> {OPT-2, OPT-3} (OPT-2 and OPT-3 are independent of each other):
+Implements the three optimizations from optimizations.json. Dependency DAG
+(from the proposal): OPT-1 -> OPT-2 -> OPT-3 (OPT-3 is subsumed by OPT-2).
 
-  OPT-1  conv_bn_folding   — Fold the frozen (eval-mode) BatchNorm2d affine into
-                             the preceding Conv2d weight + bias. Eliminates the whole
-                             ``__native_batch_*`` Triton kernel family. Numerically
-                             exact with frozen running stats. Confidence: high.
-                             Prerequisite for OPT-2 and OPT-3.
-  OPT-2  memory_layout     — channels_last (NHWC) for model + input so cuDNN runs its
-                             native-NHWC implicit-GEMM and drops the convertTensor_kernel
-                             NCHW<->NHWC relayout shuffles. Confidence: medium.
-  OPT-3  relu_epilogue_fusion — Once OPT-1 removes BN, the ReLU has a single pointwise
-                             conv producer, so Inductor's scheduler folds it into the
-                             conv epilogue (one Triton kernel, no extra DRAM pass).
-                             Confidence: medium.
+  OPT-1  fusion         — Conv-BatchNorm folding (inference). In eval() with frozen
+                          running stats, BatchNorm2d is a pure per-channel affine.
+                          After AOTAutograd decomposition the eval BN does NOT survive
+                          as aten._native_batch_norm_legit_no_training; Inductor lowers
+                          it to a decomposed elementwise affine epilogue on the conv
+                          output:
+                              sub(conv, unsqueeze(unsqueeze(running_mean)))
+                              mul(., unsqueeze(unsqueeze(rstd)))      # rstd=1/sqrt(var+eps)
+                              mul(., unsqueeze(unsqueeze(gamma)))     # affine (optional)
+                              add(., unsqueeze(unsqueeze(beta)))      # affine (optional)
+                          This pass detects that chain and folds gamma/sqrt(var+eps)
+                          into the conv weight and (beta - mean*scale) into a synthesized
+                          conv bias as *structural* graph nodes (FakeTensor-safe — never
+                          reads weight values), then rewires the affine tail back to a new
+                          conv. Inductor constant-folds the weight math, so the standalone
+                          BN normalize/broadcast Triton kernels (triton_*_fused__native_
+                          batch_3..9) are deleted. Confidence: high. Prereq for OPT-2/3.
+  OPT-2  memory_layout  — channels_last (NHWC) propagation so cuDNN runs its native-NHWC
+                          implicit-GEMM and drops the convertTensor_kernel NCHW<->NHWC
+                          relayout shuffles. Primary lever is the eager-side model + input
+                          .to(memory_format=channels_last) in get_model_and_input(); the
+                          graph pass strips now-redundant aten.clone/_to_copy(channels_last)
+                          layout copies. Confidence: medium. Applied after OPT-1.
+  OPT-3  first_conv     — The 3->64 first conv is tensor-core-ineligible by construction
+                          (C_in=3). Per the proposal this is SUBSUMED by OPT-2 (its
+                          convertTensor feeders are removed by channels_last) and channel
+                          padding is explicitly NOT recommended. Implemented as a
+                          detection-only stub (low confidence): it locates the 3-channel
+                          conv and logs that OPT-2 covers it. No transformation.
 
-IR-level mechanics (torch 2.11, Blackwell, per repo memory notes):
-  - The supported torch-2.11 injection point for Aten-IR FX passes is Inductor's
-    ``post_grad_custom_pre_pass`` hook (the ``aot_autograd`` fw_compiler path is
-    broken on 2.11). We install our Aten-IR pass chain there and delegate the
-    AOTAutograd + lowering pipeline to ``compile_fx``.
-  - At both the Dynamo graph level and the post-grad Aten level, ALL nn.Module
-    parameters/buffers are lifted to *placeholder* nodes (verified for this model:
-    conv weights and BN running_mean/var/weight/bias are all placeholders, no
-    get_attr / real tensors are attached to the GraphModule, and post-grad inputs
-    are FakeTensors with no readable storage). A weight-VALUE-reading conv-BN fold
-    is therefore not materializable inside the graph pass.
+IR-level mechanics (torch 2.11, RTX PRO 6000 Blackwell, per repo memory notes):
+  The graph torch.compile hands a @register_backend function is the *functional*
+  Dynamo graph, NOT Aten IR. Aten IR (aten.convolution, the BN affine decomposition)
+  only appears after AOTAutograd decomposition, inside Inductor. The supported torch
+  2.11 injection point for Aten-IR passes is Inductor's ``post_grad_custom_pre_pass``
+  hook (the aot_autograd fw_compiler path is broken on 2.11). We install the pass chain
+  there and delegate AOTAutograd + lowering to ``compile_fx``. Graph inputs are
+  FakeTensors with no readable storage, so the BN fold is a *structural* rewrite — it
+  materializes folded weights as aten.mul / aten.reshape graph nodes on the parameter
+  placeholders, which Inductor then constant-folds.
 
-  Resolution for OPT-1 (the high-confidence, highest-value pass): the conv-BN fold
-  is applied as a numerically-exact EAGER module transform in get_model_and_input()
-  via torch.nn.utils.fuse_conv_bn_eval, BEFORE tracing. This guarantees the BN
-  kernels never reach Inductor. A named post-grad graph pass (_pass_fold_bn) is ALSO
-  installed: it structurally folds any eval-mode batch_norm that survives into the
-  conv epilogue and otherwise logs a graceful no-op. Both mechanisms carry the OPT-1
-  label so the optimization is realised whichever path the graph takes.
-
-compile_mode = "inductor" (from optimizations.json): standard FX-pass approach.
+compile_mode = "inductor" (from optimizations.json): standard FX pass approach.
 """
 from __future__ import annotations
 
-import copy
 import logging
-import operator
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 import torch.fx as fx
-import torch.nn as nn
 import torch._inductor.config as inductor_config
 from torch._dynamo import register_backend
 from torch._inductor.compile_fx import compile_fx  # function, not module
-from torch.nn.utils import fuse_conv_bn_eval
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 
+# Engage TF32 Tensor Cores for any residual FP32 matmul/conv tile path (cheap, global).
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 # --------------------------------------------------------------------------- #
-# Aten IR targets.
-# eval-mode BatchNorm decomposes to _native_batch_norm_legit_no_training (3-tuple).
-# Conv may appear as aten.convolution.default or aten.cudnn_convolution.default.
+# Aten IR targets. Conv may appear as aten.convolution.default or
+# aten.cudnn_convolution.default. The eval-mode BN affine reaches the post-grad
+# graph as a decomposed sub/mul/mul/add chain with unsqueeze-broadcast params.
 # --------------------------------------------------------------------------- #
-_BN_TARGETS = frozenset(
-    {
-        torch.ops.aten._native_batch_norm_legit_no_training.default,
-    }
-)
-_CONV_TARGETS = frozenset(
-    {
-        torch.ops.aten.convolution.default,
-        torch.ops.aten.cudnn_convolution.default,
-    }
-)
-_RELU_TARGETS = frozenset(
-    {
-        torch.ops.aten.relu.default,
-        torch.ops.aten.relu_.default,
-    }
-)
-_CLAMP_MIN = torch.ops.aten.clamp_min.default
+_CONV = torch.ops.aten.convolution.default
+_CONV_CUDNN = torch.ops.aten.cudnn_convolution.default
+_CONV_TARGETS = frozenset({_CONV, _CONV_CUDNN})
+
+_UNSQUEEZE = torch.ops.aten.unsqueeze.default
+_SUB = torch.ops.aten.sub.Tensor
+_ADD = torch.ops.aten.add.Tensor
+_MUL = torch.ops.aten.mul.Tensor
+_RESHAPE = torch.ops.aten.reshape.default
+_CLONE = torch.ops.aten.clone.default
+_TO_COPY = torch.ops.aten._to_copy.default
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def _is_conv(n) -> bool:
+    return getattr(n, "op", None) == "call_function" and n.target in _CONV_TARGETS
+
+
+def _unwrap_unsqueeze(n) -> Optional[fx.Node]:
+    """Walk back through a chain of aten.unsqueeze.default to the broadcast source.
+
+    BatchNorm params reach the affine chain via two unsqueeze(-1) ops that turn a
+    [C] vector into a [C,1,1] broadcastable tensor. Return the underlying source node.
+    """
+    cur = n
+    while (
+        getattr(cur, "op", None) == "call_function"
+        and cur.target is _UNSQUEEZE
+        and cur.args
+    ):
+        cur = cur.args[0]
+    return cur if isinstance(cur, fx.Node) else None
 
 
 # =========================================================================== #
-# OPT-1 (graph-pass half) — fold a surviving eval-mode BatchNorm into its conv
-# epilogue, structurally, at the Aten IR level. Confidence: high.
-#
-# The eager fold in get_model_and_input() normally removes every BN before
-# tracing, so this pass is expected to be a graceful no-op. It is retained so
-# that OPT-1 also exists as a named in-graph transform and so it still fires if
-# the model is compiled without the eager pre-fold (e.g. a future caller that
-# does not route through this file's get_model_and_input).
-#
-# Folding is done structurally: BN's per-channel affine
-#   y = (x - mean) * rsqrt(var + eps) * gamma + beta
-# is rewritten over the conv output using the BN parameter PLACEHOLDER nodes as
-# Aten arithmetic (reshape + mul + add). No host-side weight read is required, so
-# this is FakeTensor-safe. Inductor's pointwise scheduler then absorbs the affine
-# (and the following relu, OPT-3) into the conv's epilogue, eliminating the
-# standalone __native_batch_* reduction/element-wise kernels.
+# OPT-1 — Conv-BatchNorm folding (inference). Confidence: high.
+# Prerequisite for OPT-2/OPT-3. Any exception => WARNING + return graph unchanged.
 # =========================================================================== #
-def _pass_fold_bn(g: fx.Graph) -> int:
+def _pass_fold_conv_bn(g: fx.Graph) -> int:
+    """Fold the decomposed inference-BatchNorm affine epilogue into the preceding conv.
+
+    Post-grad shape of ``Conv2d(bias=False) -> BatchNorm2d(eval)``:
+
+        conv  = aten.convolution(x, W, None, ...)
+        sub   = aten.sub(conv, unsqueeze(unsqueeze(running_mean)))
+        mul_a = aten.mul(sub,  unsqueeze(unsqueeze(rstd)))        # rstd = 1/sqrt(var+eps)
+        mul_b = aten.mul(mul_a, unsqueeze(unsqueeze(gamma)))      # optional (affine)
+        out   = aten.add(mul_b, unsqueeze(unsqueeze(beta)))       # optional (affine)
+
+    Fold:  scale = rstd * gamma ;  W_folded = W * scale[:, None, None, None]
+           bias_folded = (bias - mean) * scale + beta   (conv bias defaults to 0 here)
+
+    Emitted as *graph nodes* on the existing parameter placeholders, so it is
+    FakeTensor-safe; Inductor constant-folds the weight arithmetic at lower time,
+    deleting the per-conv BN normalize/broadcast passes from the trace.
+    """
     folded = 0
-    for bn in list(g.nodes):
-        if not (bn.op == "call_function" and bn.target in _BN_TARGETS):
+    for conv in list(g.nodes):
+        if not _is_conv(conv):
             continue
-
-        # _native_batch_norm_legit_no_training(input, weight, bias, running_mean,
-        #                                      running_var, momentum, eps)
-        conv = bn.args[0]
-        if not (
-            getattr(conv, "op", None) == "call_function" and conv.target in _CONV_TARGETS
-        ):
-            logger.warning(
-                "[OPT-1 fold_bn] batch_norm at %s not directly preceded by conv "
-                "(%s) — skipping", bn.name, getattr(conv, "target", None)
-            )
-            continue
+        # conv output must feed exactly the BN sub() (single consumer) to fold safely.
         if len(conv.users) != 1:
-            logger.warning(
-                "[OPT-1 fold_bn] conv %s feeds %d users (not just BN) — skipping",
-                conv.name, len(conv.users),
-            )
+            continue
+        sub = next(iter(conv.users))
+        if not (sub.op == "call_function" and sub.target is _SUB and sub.args[0] is conv):
             continue
 
-        weight = bn.args[1]
-        bias = bn.args[2]
-        running_mean = bn.args[3]
-        running_var = bn.args[4]
-        eps = bn.args[6] if len(bn.args) > 6 else 1e-5
-
-        # The live output of the 3-tuple batch_norm is getitem(bn, 0).
-        out_getitem = None
-        for user in bn.users:
-            if (
-                user.op == "call_function"
-                and user.target is operator.getitem
-                and user.args[1] == 0
-            ):
-                out_getitem = user
-                break
-        if out_getitem is None:
-            logger.warning(
-                "[OPT-1 fold_bn] no getitem(bn,0) consumer for %s — skipping", bn.name
-            )
+        mean_src = _unwrap_unsqueeze(sub.args[1])
+        if mean_src is None:
             continue
 
-        # Build the per-channel affine over the conv output as Aten nodes.
-        # scale = gamma * rsqrt(var + eps);  shift = beta - mean * scale
-        # y = conv_out * scale[None,:,None,None] + shift[None,:,None,None]
-        with g.inserting_before(out_getitem):
-            var_eps = g.call_function(torch.ops.aten.add.Scalar, (running_var, eps))
-            rstd = g.call_function(torch.ops.aten.rsqrt.default, (var_eps,))
-            scale = g.call_function(torch.ops.aten.mul.Tensor, (weight, rstd))
-            mean_scale = g.call_function(
-                torch.ops.aten.mul.Tensor, (running_mean, scale)
-            )
-            shift = g.call_function(torch.ops.aten.sub.Tensor, (bias, mean_scale))
-            # reshape to broadcast over NCHW: [C] -> [1, C, 1, 1]
-            scale_v = g.call_function(
-                torch.ops.aten.reshape.default, (scale, [1, -1, 1, 1])
-            )
-            shift_v = g.call_function(
-                torch.ops.aten.reshape.default, (shift, [1, -1, 1, 1])
-            )
-            scaled = g.call_function(torch.ops.aten.mul.Tensor, (conv, scale_v))
-            affine = g.call_function(torch.ops.aten.add.Tensor, (scaled, shift_v))
+        # sub -> mul(rstd)
+        if len(sub.users) != 1:
+            continue
+        mul_a = next(iter(sub.users))
+        if not (mul_a.op == "call_function" and mul_a.target is _MUL):
+            continue
+        rstd_arg = mul_a.args[1] if mul_a.args[0] is sub else mul_a.args[0]
+        rstd_src = _unwrap_unsqueeze(rstd_arg)
+        if rstd_src is None:
+            continue
 
-        out_getitem.replace_all_uses_with(affine)
-        g.erase_node(out_getitem)
-        if not bn.users:
-            g.erase_node(bn)
+        # Optional gamma mul and beta add following mul_a.
+        gamma_src = None
+        beta_src = None
+        affine_tail = mul_a  # last node of the affine chain to rewire
+        if len(mul_a.users) == 1:
+            nxt = next(iter(mul_a.users))
+            if nxt.op == "call_function" and nxt.target is _MUL:
+                gamma_arg = nxt.args[1] if nxt.args[0] is mul_a else nxt.args[0]
+                gamma_src = _unwrap_unsqueeze(gamma_arg)
+                affine_tail = nxt
+                if len(nxt.users) == 1:
+                    nxt2 = next(iter(nxt.users))
+                    if nxt2.op == "call_function" and nxt2.target is _ADD:
+                        beta_arg = nxt2.args[1] if nxt2.args[0] is nxt else nxt2.args[0]
+                        beta_src = _unwrap_unsqueeze(beta_arg)
+                        affine_tail = nxt2
+            elif nxt.op == "call_function" and nxt.target is _ADD:
+                beta_arg = nxt.args[1] if nxt.args[0] is mul_a else nxt.args[0]
+                beta_src = _unwrap_unsqueeze(beta_arg)
+                affine_tail = nxt
+
+        conv_w = conv.args[1]
+        conv_b = conv.args[2] if len(conv.args) > 2 else None
+        c_out = None
+        try:
+            c_out = int(conv_w.meta["val"].shape[0])
+        except Exception:
+            pass
+
+        # The rstd/mean/gamma/beta sources are computed *after* the conv in the
+        # decomposed graph, so the folded weight/bias and the replacement conv must
+        # be inserted just before the affine-chain tail (where every dependency is
+        # already defined) to keep the graph topologically ordered.
+        with g.inserting_before(affine_tail):
+            # scale = rstd * gamma  (shape [C_out])
+            if gamma_src is not None:
+                scale = g.call_function(_MUL, (rstd_src, gamma_src))
+            else:
+                scale = rstd_src
+            # W_folded = W * scale.reshape(C_out, 1, 1, 1)
+            scale_w = g.call_function(_RESHAPE, (scale, [-1, 1, 1, 1]))
+            w_folded = g.call_function(_MUL, (conv_w, scale_w))
+
+            # bias_folded = (bias - mean) * scale + beta   (conv bias optional/None)
+            if conv_b is not None:
+                bias_centered = g.call_function(_SUB, (conv_b, mean_src))
+            else:
+                bias_centered = g.call_function(_MUL, (mean_src, -1.0))
+            b_scaled = g.call_function(_MUL, (bias_centered, scale))
+            if beta_src is not None:
+                b_folded = g.call_function(_ADD, (b_scaled, beta_src))
+            else:
+                b_folded = b_scaled
+
+            # Emit a replacement conv consuming the folded weight + synthesized bias.
+            new_conv_args = list(conv.args)
+            new_conv_args[1] = w_folded
+            if len(new_conv_args) > 2:
+                new_conv_args[2] = b_folded
+            else:
+                new_conv_args.append(b_folded)
+            new_conv = g.call_function(_CONV, tuple(new_conv_args))
+
+        # The affine-chain output now equals the new conv output; rewire consumers.
+        affine_tail.replace_all_uses_with(new_conv)
+        g.eliminate_dead_code()
         folded += 1
+        if c_out is not None:
+            logger.info(
+                "[OPT-1 fold_conv_bn] Folded BatchNorm into conv (C_out=%d) [Aten IR]",
+                c_out,
+            )
+        else:
+            logger.info("[OPT-1 fold_conv_bn] Folded BatchNorm into conv [Aten IR]")
 
     if folded:
-        g.eliminate_dead_code()
         g.lint()
-        logger.info(
-            "[OPT-1 fold_bn] Folded %d eval-mode BatchNorm into conv epilogue "
-            "[Aten IR] (affine fused by Inductor scheduler)", folded
-        )
     else:
-        # At post_grad_custom_pre_pass, eval-mode BatchNorm has normally ALREADY been
-        # decomposed + constant-folded by Inductor (verified: only aten.convolution
-        # and aten.relu survive for this model), and the eager fuse_conv_bn_eval
-        # pre-fold removes it at the source. Either way no standalone BN node reaches
-        # this pass. Report the state honestly.
-        n_bn = sum(
-            1 for n in g.nodes
-            if n.op == "call_function" and n.target in _BN_TARGETS
-        )
-        logger.info(
-            "[OPT-1 fold_bn] 0 standalone eval-mode BatchNorm node(s) present "
-            "(%d matched targets) — BN already folded by the eager pre-fold "
-            "and/or Inductor's own batchnorm decomposition; no graph rewrite needed",
-            n_bn,
+        logger.warning(
+            "[OPT-1 fold_conv_bn] No conv->BN affine chain found — pass not applied"
         )
     return folded
 
 
 # =========================================================================== #
-# OPT-3 — ReLU epilogue fusion. Confidence: medium.
-#
-# Detection + verification only. Inductor's pointwise scheduler already fuses a
-# relu/clamp_min(0) into its single producing conv epilogue once OPT-1 has removed
-# the BN reduction kernels that previously broke the producer chain. There is no
-# structural rewrite to make at the Aten level (forcing a fusion node would fight
-# the scheduler); this pass confirms the fusion is legal and logs it, degrading
-# gracefully if the pattern is absent.
+# OPT-2 — channels_last propagation: strip redundant layout-copy nodes.
+# Confidence: medium. Primary lever is the eager-side conversion in
+# get_model_and_input(); this pass removes graph-level NCHW<->NHWC copies that are
+# already no-ops once producer/consumer agree on layout. Applied after OPT-1 so the
+# folded conv weights are the nodes whose layout is re-evaluated.
 # =========================================================================== #
-def _pass_relu_epilogue_fusion(g: fx.Graph) -> int:
-    fusable = 0
-    for relu in list(g.nodes):
-        is_relu = relu.op == "call_function" and (
-            relu.target in _RELU_TARGETS
-            or (relu.target is _CLAMP_MIN and relu.args[1] == 0)
-        )
-        if not is_relu:
+def _pass_strip_layout_copies(g: fx.Graph) -> int:
+    """Erase aten.clone / aten._to_copy(memory_format=channels_last) whose input is
+    already channels_last contiguous, so Inductor does not emit a standalone
+    convertTensor / layout-copy kernel around each conv."""
+    stripped = 0
+    for node in list(g.nodes):
+        if not (node.op == "call_function" and node.target in (_CLONE, _TO_COPY)):
+            continue
+        if node.kwargs.get("memory_format", None) is not torch.channels_last:
+            continue
+        src = node.args[0]
+        try:
+            meta = src.meta["val"]
+            if meta.is_contiguous(memory_format=torch.channels_last):
+                node.replace_all_uses_with(src)
+                stripped += 1
+        except Exception:
             continue
 
-        producer = relu.args[0]
-        # After OPT-1 the conv output reaches relu through the folded affine add;
-        # walk back over pointwise affine (mul/add) nodes to find the conv.
-        cur = producer
-        for _ in range(4):
-            if not (getattr(cur, "op", None) == "call_function"):
-                break
-            if cur.target in _CONV_TARGETS:
-                break
-            if cur.target in (
-                torch.ops.aten.add.Tensor,
-                torch.ops.aten.mul.Tensor,
-                operator.getitem,
-            ) and cur.args:
-                cur = cur.args[0]
-            else:
-                break
-
-        if getattr(cur, "op", None) == "call_function" and cur.target in _CONV_TARGETS:
-            if len(producer.users) == 1:
-                fusable += 1
-
-    if fusable:
+    if stripped:
+        g.eliminate_dead_code()
+        g.lint()
         logger.info(
-            "[OPT-3 relu_epilogue_fusion] %d relu node(s) have a single pointwise "
-            "conv producer — legal epilogue-fusion candidate(s); Inductor scheduler "
-            "fuses relu into the conv epilogue (no standalone relu DRAM pass)", fusable
+            "[OPT-2 strip_layout_copies] Removed %d redundant channels_last copy node(s) "
+            "[Aten IR]",
+            stripped,
         )
     else:
-        logger.warning(
-            "[OPT-3 relu_epilogue_fusion] No relu-on-single-conv-producer pattern "
-            "found — pass not applied (BN may not be folded, or no relu present)"
+        logger.info(
+            "[OPT-2 strip_layout_copies] No redundant channels_last copy nodes — "
+            "layout handled eager-side in get_model_and_input()"
         )
-    return fusable
+    return stripped
 
 
 # =========================================================================== #
-# Aten-IR pass chain installed as Inductor's post_grad_custom_pre_pass. Order
-# respects the DAG: OPT-1 first (prerequisite), then OPT-3. OPT-2 (channels_last)
-# is a non-graph layout change applied in get_model_and_input() per Rule 7.
+# OPT-3 — first conv (3->64) handling. Confidence: low => detection-only stub.
+# Per optimizations.json the 3-channel first conv is tensor-core-ineligible by
+# construction and is SUBSUMED by OPT-2 (channels_last removes its convertTensor
+# feeders). Channel padding (3->4) is explicitly NOT recommended as a first move.
+# This pass locates the first conv and logs that OPT-2 covers it; never transforms.
 # =========================================================================== #
+def _pass_first_conv_stub(g: fx.Graph) -> None:
+    for conv in g.nodes:
+        if not _is_conv(conv):
+            continue
+        c_in = None
+        try:
+            c_in = int(conv.args[1].meta["val"].shape[1])
+        except Exception:
+            continue
+        if c_in == 3:
+            logger.info(
+                "[OPT-3 first_conv] 3->C first conv detected (tensor-core-ineligible "
+                "at C_in=3) — subsumed by OPT-2 channels_last (its convertTensor feeders "
+                "are removed); channel padding NOT applied per proposal [Aten IR]"
+            )
+            return
+    logger.warning(
+        "[OPT-3 first_conv] No 3-channel first conv found — stub not applicable"
+    )
+
+
+# =========================================================================== #
+# Aten-IR pass chain, installed as Inductor's post_grad_custom_pre_pass. Runs on
+# the decomposed, functionalized Aten graph just before lowering. Order respects the
+# DAG OPT-1 -> OPT-2 -> OPT-3 from optimizations.json.
+# =========================================================================== #
+def _repropagate_meta(g: fx.Graph) -> None:
+    """Re-run FakeTensorProp so the nodes inserted by OPT-1 acquire ``meta['val']``.
+
+    Downstream Inductor post-grad passes read ``node.meta['val']`` on the new
+    fold/conv nodes; without re-propagation those reads raise KeyError. The fake mode
+    and fake placeholder inputs are recovered from the existing placeholder meta, so
+    this stays inside the active FakeTensorMode.
+    """
+    gm = g.owning_module
+    if gm is None:
+        return
+    placeholders = [n for n in g.nodes if n.op == "placeholder"]
+    fake_inputs = []
+    fake_mode = None
+    for ph in placeholders:
+        val = ph.meta.get("val", None)
+        if val is None:
+            return  # cannot reconstruct inputs — skip (graph already had full meta)
+        fake_inputs.append(val)
+        fm = getattr(val, "fake_mode", None)
+        if fm is not None:
+            fake_mode = fm
+
+    from torch.fx.passes.fake_tensor_prop import FakeTensorProp
+
+    if fake_mode is not None:
+        with fake_mode:
+            FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(*fake_inputs)
+    else:
+        FakeTensorProp(gm).propagate_dont_convert_inputs(*fake_inputs)
+
+
 def _aten_pass_chain(g: fx.Graph) -> fx.Graph:
     try:
-        _pass_fold_bn(g)                # OPT-1 (high) — must run first
-        _pass_relu_epilogue_fusion(g)   # OPT-3 (medium) — needs BN removed
-    except Exception as exc:  # never crash the compile
-        logger.warning("[conv_block_opt] Aten pass chain failed: %s", exc)
+        folded = _pass_fold_conv_bn(g)   # OPT-1 (high) — must run first
+        if folded:
+            # New fold/conv nodes need meta['val'] before OPT-2 reads strides and
+            # before downstream Inductor post-grad passes run.
+            _repropagate_meta(g)
+        _pass_strip_layout_copies(g)     # OPT-2 (medium) — re-eval layout post-fold
+        _pass_first_conv_stub(g)         # OPT-3 (low) — detection only
+    except Exception as e:  # never crash the compile
+        logger.warning("[conv_block_opt] Aten pass chain failed: %s", e)
     return g
 
 
@@ -297,10 +387,10 @@ def _capture_partition_inputs(split_gm: fx.GraphModule, example_inputs: list) ->
 def conv_block_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     """Custom torch.compile backend for ConvBlock.
 
-    Installs the Aten-IR pass chain (OPT-1 fold_bn, OPT-3 relu epilogue fusion)
-    via Inductor's post_grad_custom_pre_pass, then delegates AOTAutograd + lowering
-    to compile_fx. OPT-2 (channels_last) and the numerically-exact OPT-1 eager fold
-    are applied in get_model_and_input() (non-graph, Rule 7).
+    Installs the Aten-IR pass chain (OPT-1 fold_conv_bn, OPT-2 strip_layout_copies,
+    OPT-3 first_conv stub) via Inductor's post_grad_custom_pre_pass, then delegates
+    AOTAutograd + lowering to compile_fx. OPT-2's primary (non-graph) lever is the
+    channels_last conversion in get_model_and_input() (Rule 7).
 
     Dedup-aware per Rule 9: ConvBlock has three structurally distinct conv stages
     (3->64, 64->128, 128->256) plus a classifier, so there are no repeated layers
@@ -331,12 +421,12 @@ def conv_block_opt(gm: fx.GraphModule, example_inputs) -> Callable:
 
 # =========================================================================== #
 # Workload interface — non-graph optimizations live here (Rule 7).
-#   OPT-1 (eager conv-BN fold): numerically-exact fold of every Conv2d->BatchNorm2d
-#          pair via torch.nn.utils.fuse_conv_bn_eval before tracing. This removes
-#          the entire __native_batch_* kernel family at the source.
 #   OPT-2 (channels_last): model + input cast to torch.channels_last so cuDNN runs
 #          native-NHWC implicit-GEMM and drops the convertTensor_kernel relayouts.
-#          Applied AFTER OPT-1 per the DAG (OPT-2 depends on the OPT-1 weight fold).
+#          This is the primary lever for OPT-2; the graph pass only cleans up
+#          residual copies. Idempotent — checked before converting (Rule 7).
+# OPT-1 (conv-BN fold) is realized as the OPT-1 graph pass at compile time, NOT here;
+# leaving the BN in the module lets the post-grad fold pass demonstrably remove it.
 # =========================================================================== #
 DEVICE = "cuda"
 BATCH_SIZE = 16
@@ -345,53 +435,22 @@ HEIGHT = 64
 WIDTH = 64
 
 
-def _fold_conv_bn_eager(model: nn.Module) -> nn.Module:
-    """OPT-1 (non-graph): fold every eval-mode Conv2d->BatchNorm2d into the conv.
-
-    Walks the module tree; for each ConvBnRelu block whose conv is bias-free and
-    bn is in eval with frozen running stats, replaces conv with the fused conv
-    (bias absorbs the BN shift) and replaces bn with nn.Identity. Numerically
-    exact to fp32 rounding (verified ~9e-6 max abs diff)."""
-    from conv_block import ConvBnRelu
-
-    folded = 0
-    for mod in model.modules():
-        if isinstance(mod, ConvBnRelu) and isinstance(mod.bn, nn.BatchNorm2d):
-            bn = mod.bn
-            if bn.training or bn.running_mean is None or bn.running_var is None:
-                logger.warning(
-                    "[OPT-1 eager fold] BatchNorm not in eval with frozen stats — "
-                    "skipping a block to stay numerically exact"
-                )
-                continue
-            mod.conv = fuse_conv_bn_eval(mod.conv, bn)
-            mod.bn = nn.Identity()
-            folded += 1
-    logger.info("[OPT-1 eager fold] Folded %d Conv2d->BatchNorm2d pair(s)", folded)
-    return model
-
-
 def get_model_and_input() -> tuple:
-    """Return (optimized_model, input_tensor) on CUDA — uncompiled, unwarmed.
+    """Return (model, input_tensor) on CUDA — uncompiled, unwarmed.
 
-    Applies the two non-graph optimizations: OPT-1 (eager conv-BN fold) then OPT-2
-    (channels_last). The graph passes (OPT-1 fold_bn no-op verification, OPT-3 relu
-    epilogue fusion) run inside the conv_block_opt backend at compile time.
+    Applies OPT-2's non-graph half: channels_last for both the model weights and the
+    input (idempotent — checked before converting per Rule 7). OPT-1 (conv-BN fold)
+    and the OPT-2 graph cleanup / OPT-3 detection run inside the conv_block_opt backend
+    at compile time.
     """
     assert torch.cuda.is_available(), "CUDA required"
     from conv_block import ConvBlock
 
     model = ConvBlock().to(DEVICE).eval()
-
-    # OPT-1 — numerically-exact eager conv-BN fold (prerequisite for OPT-2/OPT-3).
-    model = _fold_conv_bn_eager(model)
-
     x = torch.randn(BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH, device=DEVICE)
 
-    # OPT-2 — channels_last (NHWC). Check current state first (Rule 7); apply after
-    # OPT-1 so the folded conv weights are the ones recast to channels_last.
-    first_param = next(model.parameters())
-    if not first_param.is_contiguous(memory_format=torch.channels_last):
+    # OPT-2 (channels_last propagation) — eager-side, only if not already NHWC.
+    if not next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
         model = model.to(memory_format=torch.channels_last)
         logger.info("[OPT-2 channels_last] Model cast to channels_last (NHWC)")
     if not x.is_contiguous(memory_format=torch.channels_last):

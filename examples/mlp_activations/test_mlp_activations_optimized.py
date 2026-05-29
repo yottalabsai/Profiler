@@ -5,6 +5,11 @@ Run with:  pytest test_mlp_activations_optimized.py -v -s
 
 The workload module imports `mlp_activations` (the baseline) by bare module name,
 so this test prepends the workload directory to sys.path.
+
+Backend passes exercised: OPT-1 (BF16 matmul promotion), OPT-2 (Inductor epilogue
+fusion config), OPT-3 (FP8 candidate detection — log only). The forward-pass test
+asserts the backend logger ran and the output is finite (BF16 internal compute,
+FP32 model output).
 """
 import os
 import sys

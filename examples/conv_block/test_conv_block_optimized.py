@@ -2,9 +2,9 @@
 test_conv_block_optimized.py — validation suite for the conv_block_opt backend.
 
 Four tests:
-  1. module imports cleanly
+  1. module imports cleanly (also registers the backend at import time)
   2. backend is registered with torch._dynamo
-  3. get_model_and_input returns a CUDA tensor with expected shape/dtype
+  3. get_model_and_input returns a CUDA tensor with the expected shape/dtype/layout
   4. compiled forward pass triggers the backend and produces finite output
 """
 import logging
@@ -27,12 +27,13 @@ def test_backend_registration():
 
 
 def test_get_model_and_input():
-    """Input is on CUDA with the expected shape and dtype.
+    """Input is on CUDA with the expected shape, dtype, and channels_last layout.
 
-    Expected from optimizations.json / conv_block.py: batch 16, 3 channels,
-    64x64, fp32 (torch.randn default). channels_last is a memory-format change
-    (OPT-2), so the logical shape/dtype are unchanged but the tensor must be
-    channels_last contiguous.
+    Expected from optimizations.json / conv_block.py: batch 16, 3 channels, 64x64,
+    fp32 (torch.randn default). channels_last (OPT-2) is a memory-format change, so the
+    logical shape/dtype are unchanged but the input must be channels_last contiguous.
+    OPT-1 (conv-BN fold) is realized as an in-graph post-grad pass at compile time, so
+    the eager module still contains its BatchNorm2d layers here — this is expected.
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -45,13 +46,10 @@ def test_get_model_and_input():
     # OPT-2: input should be channels_last after get_model_and_input.
     assert x.is_contiguous(memory_format=torch.channels_last), \
         "input should be channels_last (OPT-2)"
-    # OPT-1: every Conv2d should now carry a fused bias and BN should be Identity.
-    import torch.nn as nn
-    bns = [m for m in model.modules() if isinstance(m, nn.BatchNorm2d)]
-    assert not bns, "BatchNorm2d should be folded away by OPT-1 (eager fold)"
-    convs = [m for m in model.modules() if isinstance(m, nn.Conv2d)]
-    assert convs and all(c.bias is not None for c in convs), \
-        "folded convs should carry a fused bias (OPT-1)"
+    # OPT-2: model parameters should be channels_last contiguous too.
+    p = next(model.parameters())
+    assert p.is_contiguous(memory_format=torch.channels_last), \
+        "model params should be channels_last (OPT-2)"
 
 
 def test_compiled_forward_pass(caplog):
