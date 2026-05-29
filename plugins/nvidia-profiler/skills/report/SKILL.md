@@ -68,6 +68,12 @@ When both profiles are present:
 
 **Before comparison**, verify both profiles share the same batch size (`capture_metadata.batch_size`). If they differ, skip this section and add: "Batch size mismatch between baseline and optimized captures — comparison skipped. Re-capture with matching batch sizes."
 
+**Cross-session check.** Compute a cross-session flag from the two profiles' `capture_metadata`: it is true when EITHER `device_name` differs, OR the gap between the two `capture_timestamp_utc` values exceeds **6 hours**. **If the flag is false, add nothing and proceed normally.** If it is true, do NOT skip the section — the numbers are still meaningful, just less certain — and prepend this caveat block to Section 6:
+
+> ⚠️ **Cross-session capture.** Baseline and optimized profiles were captured {Xh apart | on different GPUs (A vs B)}. GPU clock state (boost/thermal) can differ between sessions, so small speedups may reflect clock variation rather than the optimization. For a clean comparison, re-capture both profiles back-to-back in one session with locked clocks (`nvidia-smi -lgc`).
+
+If either `capture_timestamp_utc` is missing or unparseable, fall back to the `device_name` check alone and note that the timestamp gap was unavailable.
+
 **Step A — Operator matching**
 
 Match operators across profiles by `operator_name` (NOT `operator_id` — it changes between captures). When N baseline entries collapse to 1 optimized entry due to fusion, sum the baseline durations and compare the sum to the single optimized entry. Report a single row labeled e.g. `aten::linear (fused ×3)` with combined baseline, optimized, and speedup.
@@ -108,6 +114,7 @@ These make reports inaccurate and misleading:
 - **Do NOT** claim `tensor_core_active_pct = null` is a bottleneck — it's expected for non-GEMM kernels and on Blackwell
 - **Do NOT** state absolute latency values as wall-clock times — ncu replay values are 2–5× longer than real execution; always add the caveat
 - **Do NOT** describe future work without clearly labeling it as "not yet implemented" in the optimization table
+- **Do NOT** report a small speedup as a definitive win while the cross-session caveat is active — it may be clock variation, not the optimization
 
 ## Post-Generation
 

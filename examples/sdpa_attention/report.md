@@ -1,8 +1,8 @@
-# SDPA Attention — GPU Optimization Report
+# SDPAAttentionBlock — GPU Optimization Report
 
-**This optimization achieved ≈2.4× total speedup on `SDPAAttentionBlock` (B=8, NVIDIA RTX PRO 6000 Blackwell) by moving every projection GEMM and the attention kernel off their FP32 paths onto the Tensor Cores.**
+**This optimization achieved a ~3.0× total speedup on SDPAAttentionBlock (B=8, NVIDIA RTX PRO 6000 Blackwell).**
 
-The model ran in pure float32, so cuBLAS dispatched the projection matmuls to the FP32 SIMT path with Tensor Cores completely idle (`tensor_core_active_pct = 0.0`), and the SDPA dispatcher fell back to an Ampere-targeted FP32 CUTLASS attention kernel. A custom `torch.compile()` backend (`sdpa_attention_opt`) inserts bf16 casts, fuses the three Q/K/V projections into one GEMM, and steers SDPA onto the FlashAttention/bf16 path.
+The single dominant problem was dtype: the FP32 model routed every GEMM onto the CUDA-core (SIMT) path with Tensor Cores completely idle, and forced `scaled_dot_product_attention` onto a register-spilling FP32 CUTLASS fallback. Promoting to BF16, fusing the three QKV projections into one GEMM, and steering SDPA onto the Tensor-Core FlashAttention path together cut per-forward kernel time from ~436 µs to ~146 µs (ncu-replay relative timing).
 
 ---
 
@@ -10,41 +10,37 @@ The model ran in pure float32, so cuBLAS dispatched the projection matmuls to th
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs, GB202-class) |
-| Architecture | Blackwell (5th-gen Tensor Cores) |
-| PyTorch | 2.11.0+cu128 |
-| Compile mode (baseline) | `inductor` (built-in dedup backend) |
-| Compile mode (optimized) | `sdpa_attention_opt` (custom registered backend) |
-| Batch size | 8 (B=8, T=512, D=512, 8 heads × 64) |
-| Iteration count | `--warmup-iters 2 --measure-iters 2` (ncu replay — relative timing only) |
-
-> **Timing caveat:** all durations below are ncu application-replay timings, which run 2–5× longer than real wall-clock execution. They are valid for *relative* before/after comparison, not as absolute latency.
+| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs) |
+| Architecture family | Blackwell (GB202, 5th-gen Tensor Cores) |
+| PyTorch version | 2.11.0+cu128 |
+| Compile mode (baseline) | `inductor` |
+| Compile mode (optimized) | custom backend `sdpa_attention_opt` |
+| Batch size | 8 (seq_len 512, dim 512, 8 heads, head_dim 64) |
+| Iteration count | warmup + measure iters under nsys NVTX / ncu replay — **relative timing only** |
 
 ---
 
-## 2. Operator Summary (baseline)
+## 2. Operator Summary (Baseline)
 
-Sorted by share of attributed GPU time. Per-kernel durations are stable across launches; the table uses representative per-invocation values.
+Times below are for a single attributed forward pass (per-op torch.profiler attribution; the `layer::unique::prologue` NVTX wrapper double-counts the same physical kernels and is excluded).
 
-| Operator | Time (rep. ns/call) | Kernels | Bottleneck Class |
-|---|---|---|---|
-| `aten::mm` (Q/K/V/out projections) | ~74,600 each | `Kernel2` (FP32 SIMT cuBLAS) | **Tensor Cores idle** — `tensor_core_active_pct = 0.0`, sm 36%, DRAM 7.5%, occ 16.6% |
-| `aten::_efficient_attention_forward` (SDPA) | ~137,300 | `fmha_cutlassF_f32_aligned_64x64_rf_sm80` | FP32 CUTLASS fallback — 757,760 local-mem spill wavefronts, 14% occupancy |
-| LayerNorm / view / reshape (Triton) | ~5–10k | `triton_per_fused_*` | Memory-bound (expected; left untouched) |
+| Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
+|---|---|---|---|---|
+| `aten::mm` (Q/K/V/out projections) | 68.5% | 298,800 | 4 × `Kernel2` | Tensor-Core-idle GEMM (SIMT path) |
+| `aten::_efficient_attention_forward` | 31.5% | 137,400 | 1 × `fmha_cutlassF_f32_aligned_64x64_rf_sm80` | Spill/latency-bound FP32 fallback |
 
-**Root cause:** the workload uses `torch.randn` defaults with no autocast, so the entire forward pass executes in float32. This is the highest-ROI signal in the profile — a pure dtype/dispatch problem, not a memory or latency wall.
+Each projection GEMM is ~74,700 ns (17.1% of the forward); the attention kernel is the single most expensive op at 137,400 ns.
 
 ---
 
 ## 3. Reading the Metrics
 
-Only the metrics that drive this workload's bottlenecks:
+Only the counters that drive this workload's bottlenecks are explained.
 
-- **`tensor_core_active_pct = 0.0` (not null)** — the single most actionable signal here. A literal `0.0` on a GEMM means it ran on the FP32 SIMT path with Tensor Cores entirely idle. All 12 baseline `Kernel2` GEMM launches report exactly `0.0`. (A *null* value is normal for non-GEMM kernels and on architectures where the counter was removed — not a problem.)
-- **`smsp__pipe_tensor_cycles_active` = 0** on every baseline GEMM — corroborates the FP32 SIMT dispatch independently of the derived percentage.
-- **`sm_throughput ≈ 36%`, `dram_throughput ≈ 7.5%`, `eligible_cycles ≈ 58%`** — neither compute- nor memory-bound at the SIMT level; the SIMT path itself is the ceiling. Engaging Tensor Cores is the fix.
-- **Kernel name suffix `_f32_..._sm80`** — the attention kernel is an FP32 CUTLASS kernel compiled for sm80 (Ampere) running on Blackwell. The dispatcher cannot pick FlashAttention because Flash requires fp16/bf16 inputs.
-- **`achieved_occupancy ≈ 14–16%`** — low occupancy on both GEMM and attention, consistent with sub-wave grids (`[64,1,2]` = 128 CTAs on ~188 SMs).
+- **`smsp__pipe_tensor_cycles_active...` (tensor_core_active_pct) = 0.0** on every baseline `Kernel2` GEMM. **Not null — exactly zero.** This means the GEMM ran on the FP32 SIMT (CUDA-core) path with Tensor Cores entirely idle. For a [4096,512]×[512,512] matmul this is the single highest-ROI signal in the profile: the hardware's matmul units are unused. (A *null* value would be expected for non-GEMM kernels and is not a problem; a hard 0.0 on a GEMM is.)
+- **`sm__throughput` = 36%** with **`achieved_occupancy` = 16.5%** and **210 registers/thread** on the baseline GEMM: low occupancy from heavy register pressure on the SIMT path, GEMM grid `(64,1,2)` = 128 blocks against ~188 SMs ≈ 0.68 waves (severe wave quantization — most SMs idle).
+- **`l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum` = 757,760** on the baseline attention kernel: massive local-memory spilling. Combined with **occupancy 14.1%** and the kernel name `fmha_cutlassF_f32_aligned_64x64_rf_sm80`, this is the Ampere-targeted FP32 mem-efficient CUTLASS fallback running on Blackwell — not FlashAttention.
+- **`dram__throughput`**: baseline GEMM 7.5% (not bandwidth-bound — it is compute-path-bound). Optimized attention rises to ~15.8%, consistent with a faster kernel doing the same bytes in less time.
 
 ---
 
@@ -52,11 +48,11 @@ Only the metrics that drive this workload's bottlenecks:
 
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
 |---|---|---|---|---|---|
-| OPT-1 | dtype promotion (→ bf16 GEMM operands + SDPA q/k/v; FP32 cast-back; LayerNorm FP32) | all 4 `aten::mm` projections + SDPA | `tensor_core_active_pct = 0.0` + `smsp__pipe_tensor_cycles_active = 0` on all 12 GEMM launches | high | **APPLIED** |
-| OPT-2 | fusion (3 Q/K/V `aten.mm` → one N=1536 GEMM + 3 slices) | `q_proj`, `k_proj`, `v_proj` | three serial sub-wave GEMMs (`[64,1,2]`=128 CTAs, ~74,800 ns each) sharing one LHS | medium | **APPLIED** |
-| OPT-3 | SDPA backend selection (force bf16 q/k/v → FlashAttention) | `aten::_efficient_attention_forward` | `fmha_cutlassF_f32_aligned_64x64_rf_sm80` FP32 fallback, 757,760 local-mem spills, 14% occ | medium | **APPLIED** |
+| OPT-1 | dtype promotion (FP32→BF16) | all `aten.mm` + SDPA Q/K/V | `tensor_core_active_pct = 0.0` on every GEMM; FP32 routes cuBLAS to SIMT; 757,760 spill wavefronts in the FP32 fmha fallback | HIGH | **APPLIED** |
+| OPT-2 | QKV projection fusion (3 mm → 1) | the three sibling Q/K/V `aten.mm` nodes | grid `(64,1,2)` = 0.68 waves, occupancy 16.5%; Inductor did not fuse the siblings | HIGH | **APPLIED** |
+| OPT-3 | SDPA backend selection (route to FlashAttention) | `aten::_efficient_attention_forward` | 757,760 local-mem spills, occupancy 14.1%, eligible-cycles 33.9% on the FP32 sm80 fallback | MEDIUM | **APPLIED** |
 
-All three passes ran at Aten IR via Inductor's `post_grad_custom_pre_pass`, in the prerequisite order OPT-1 → OPT-2 → OPT-3. Validation (`validation_report.json`): syntax, import, registration, and 4/4 pytest all **pass**.
+All three passes emitted INFO (none degraded to a WARNING no-op). Validation: syntax ✓, import ✓, registration (`sdpa_attention_opt`) ✓, pytest 4/4 ✓.
 
 ---
 
@@ -142,56 +138,60 @@ captures all three pass log lines and asserts the BF16 output is finite.
 
 ## 6. Before/After Results
 
-Both captures use **B=8** with identical iteration counts (`--warmup-iters 2 --measure-iters 2`), so the comparison is valid. Operators are matched by name; the three Q/K/V projections are fused into one GEMM by OPT-2, so they are reported as a single combined row. Values are representative per-invocation ncu-replay durations.
+Both captures use **batch size 8** (matched). Operators matched by `operator_name`; the three baseline QKV projections collapse to one fused GEMM in the optimized profile, so their baseline durations are summed for comparison. Durations are ncu-replay values — **relative only, not wall-clock** (replay inflates absolute latency 2–5×).
 
 | Operator | Baseline (ns) | Optimized (ns) | Speedup |
 |---|---|---|---|
-| Q/K/V projections (`aten::mm` ×3 → fused N=1536) | ~223,800 (3 × ~74,600) | ~98,816 (1 fused GEMM) | **2.26×** |
-| Output projection (`aten::mm`) | ~74,600 | ~33,792 | **2.21×** |
-| SDPA (`aten::_efficient_attention_forward`) | ~137,300 (`fmha…f32…sm80`) | ~46,352 (`fmha…bf16…sm80`) | **2.96×** |
-| q/k/v transpose helper (`triton_poi_fused_t`) | — | ~1,136 | (new, negligible) |
-| **Total (per forward iteration)** | **~435,700** | **~180,096** | **≈2.42×** |
+| `aten::mm` — QKV projection (fused ×3) | 224,100 | 81,136 | 2.76× |
+| `aten::mm` — output projection | 74,700 | 27,504 | 2.72× |
+| `aten::_efficient_attention_forward` (SDPA) | 137,400 | 37,488 | 3.67× |
+| **Total (per forward)** | **436,200** | **146,128** | **2.99×** |
 
-**Speedup attribution** (each requires APPLIED status + expected metric change + operator-level improvement — all three hold):
+**Speedup attribution** (all three conditions met for each: `status == APPLIED`, expected counter change, operator shows speedup):
 
-- The GEMM speedups are attributed to **OPT-1** (APPLIED): `tensor_core_active_pct` moved `0.0 → 19–21%` and `smsp__pipe_tensor_cycles_active` went from `0` to firing on every `Kernel2` launch. Achieved occupancy also rose (16.6% → 60–74%).
-- The Q/K/V combined-row gain beyond the per-call dtype win is attributed to **OPT-2** (APPLIED): three sub-wave launches collapsed into one larger GEMM, confirmed by the projection-GEMM kernel count dropping from 3 to 1.
-- The SDPA speedup is attributed to **OPT-3** (APPLIED): the kernel name changed from `fmha_cutlassF_f32_aligned_64x64_rf_sm80` to `fmha_cutlassF_bf16_aligned_64x64_rf_sm80` — the FP32 fallback (and its 757,760 local-mem spills at 14% occupancy) is gone; occupancy rose to 21%.
-
-**Residual opportunity (Step C).** After optimization, the **fused QKV GEMM (~99k ns)** is now the single largest operator. Its Tensor-Core utilization is only ~19–21% (vs ~58% on the attention kernel), and DRAM throughput stays low (~3.5–8.4%) — the GEMM is still grid-underfilled (sub-wave) even after fusion, suggesting headroom in tiling/grid shape rather than dtype. No remaining FX-level proposal in `optimizations.json` targets this; further gains would require Inductor GEMM autotuning or a larger effective batch, not an additional graph pass.
+- **OPT-1 (dtype promotion)** — confirmed. Baseline GEMM `tensor_core_active_pct = 0.0` → optimized **19–21%**; baseline attention `fmha_cutlassF_f32_*` → optimized `fmha_cutlassF_bf16_*`. Tensor Cores are now engaged on both kernel families. Primary driver of every row.
+- **OPT-2 (QKV fusion)** — confirmed. Three `Kernel2` launches (grid `(64,1,2)`, occupancy 16.5%) collapse to one fused GEMM (grid `(1024,6,1)`, **occupancy 74%**). N tiling tripled (512→1536), wave quantization resolved.
+- **OPT-3 (SDPA backend selection)** — confirmed. The emitted attention kernel name changed from `fmha_cutlassF_f32_aligned_64x64_rf_sm80` to `fmha_cutlassF_bf16_aligned_64x64_rf_sm80`; the 757,760-wavefront local-memory spill stream is eliminated and occupancy rose 14.1% → 21.0%.
 
 ---
 
 ## 7. What Drove Each Speedup
 
-**bf16 dtype promotion (OPT-1, +2.2× on every `aten::mm` projection):** casting the GEMM operands to bf16 (with FP32 cast-back for the residual/LayerNorm path) reroutes the matmul off the FP32 SIMT path onto the HMMA Tensor-Core path. Evidence: `tensor_core_active_pct` jumped from a literal `0.0` to ~19–21% on all four projection GEMMs, and `smsp__pipe_tensor_cycles_active` went from `0` to actively firing.
+**Dtype promotion FP32→BF16 (OPT-1, ~2.7× on GEMMs, contributes to all rows):** Casting `aten.mm` operands and SDPA Q/K/V to BF16 reroutes the matmuls off the CUDA-core SIMT path and onto the HMMA Tensor Cores. Evidence: every baseline GEMM reported `tensor_core_active_pct = 0.0`; the optimized fused GEMM reports 19–21% Tensor-Core activity with occupancy jumping from 16.5% to ~74%.
 
-**QKV fusion (OPT-2, +2.26× on the combined Q/K/V block):** concatenating the three sibling projection weights into one [512,1536] GEMM replaces three sub-wave launches that each occupied <1 wave with a single larger GEMM that reads the shared LHS activation once. Evidence: the projection-GEMM kernel count dropped from 3 to 1, with the fused kernel's occupancy at 60–74% vs the baseline's 16.6%.
+**QKV projection fusion (OPT-2, folded into the 2.76× QKV row):** Concatenating the three Q/K/V weight matrices into one [512,1536] GEMM replaces three 0.68-wave launches that each re-read the shared LayerNorm activation with a single well-quantized launch reading it once. Evidence: grid changed `(64,1,2)` → `(1024,6,1)` and achieved occupancy rose from 16.5% to 73.9%.
 
-**SDPA backend selection (OPT-3, +2.96× on attention):** with bf16 q/k/v inputs the SDPA dispatcher selects the bf16 FlashAttention-style CUTLASS kernel instead of the Ampere FP32 fallback. Evidence: the emitted kernel name changed from `fmha_cutlassF_f32_aligned_64x64_rf_sm80` to `fmha_cutlassF_bf16_aligned_64x64_rf_sm80`, eliminating the 757,760 local-memory spill wavefronts and lifting occupancy from 14% to 21%.
+**SDPA routed to FlashAttention (OPT-3, +3.67× on attention):** Supplying BF16 Q/K/V makes the SDPA dispatcher select the Tensor-Core BF16 attention kernel instead of the Ampere-targeted FP32 CUTLASS fallback that was spilling to local memory. Evidence: the kernel name changed from `fmha_cutlassF_f32_aligned_*` to `fmha_cutlassF_bf16_aligned_*`, the 757,760 local-memory spill wavefronts disappeared, and the kernel went from 137,400 ns to 37,488 ns.
 
 ---
 
 ## 8. Remaining Opportunities
 
-All three proposed optimizations (OPT-1, OPT-2, OPT-3) were **APPLIED** and validated. No further FX-level gains are identified in this profile.
+All three proposed optimizations were applied and validated. No further FX-level transformations were identified in this profile.
 
-The one residual hardware signal — the fused QKV GEMM sitting at ~19–21% Tensor-Core utilization on a sub-wave grid — is not addressable by a graph transformation; it would require Inductor GEMM autotuning / max-autotune or a larger effective problem size, which is outside the scope of operator-level FX passes.
+Residual second-order observations (not proposed transformations — informational only):
+
+- The fused QKV GEMM and output GEMM now run at 19–21% Tensor-Core activity. The bottleneck has shifted from "Tensor Cores idle" to "GEMM efficiency" — these [4096,512]×[512,N] shapes are modestly sized; larger batch/seq or further tile tuning could push Tensor-Core utilization higher, but no concrete FX pass is warranted at this scale.
+- 16 small Triton elementwise/transpose/LayerNorm glue kernels remain unattributed in the optimized capture (no ncu metrics matched). They are not on the compute-bound path; Inductor-fusion enrichment was omitted because the custom backend owns compilation and does not emit a parseable Inductor debug dir.
 
 ---
 
 ## Reproduction
 
 ```bash
-# Stage 0 — baseline capture (already done; profile.json reused this run)
-#   python3 nvidia/scripts/run_workload.py --workload examples/sdpa_attention/sdpa_attention.py ...
+# Stage 1 — propose (reuses existing profile.json)
+/propose examples/sdpa_attention/profile.json
 
-# Stages 1–5 — reuse the existing baseline profile.json:
-/optimize examples/sdpa_attention/sdpa_attention.py --from=propose
+# Stage 2 — generate backend
+/backend examples/sdpa_attention/sdpa_attention.py examples/sdpa_attention/optimizations.json
 
-# Re-capture the optimized backend only (Stage 4):
+# Stage 3 — validate
+/validate examples/sdpa_attention/sdpa_attention_optimized.py
+
+# Stage 4 — re-capture with the registered backend
 /capture examples/sdpa_attention/sdpa_attention_optimized.py \
     --profile-name=optimized --compile-backend=sdpa_attention_opt
-```
 
-Artifacts: `profile.json` (baseline) · `optimizations.json` · `sdpa_attention_optimized.py` (backend `sdpa_attention_opt`) · `profiler_output/validation_report.json` · `profile_optimized.json`.
+# Stage 5 — this report
+/report examples/sdpa_attention/
+```
