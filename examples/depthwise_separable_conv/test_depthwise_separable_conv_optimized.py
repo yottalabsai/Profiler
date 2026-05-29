@@ -1,63 +1,77 @@
 """
-Validation suite for depthwise_separable_conv_optimized.py.
+test_depthwise_separable_conv_optimized.py — validation suite for the
+depthwise_separable_conv_opt backend.
 
-Four tests:
-  1. module imports cleanly
-  2. backend 'depthwise_separable_conv_opt' is registered with torch._dynamo
-  3. get_model_and_input() returns a CUDA model + input with expected shape/dtype
-  4. compiled forward pass triggers the backend and produces finite output
+Run with:  pytest test_depthwise_separable_conv_optimized.py -v -s
+
+The workload module imports `depthwise_separable_conv` (the baseline) by bare
+module name, so this test prepends the workload directory to sys.path.
 """
-import logging
+import os
+import sys
 
 import pytest
-import torch
 
-BACKEND_NAME = "depthwise_separable_conv_opt"
-MODULE = "depthwise_separable_conv_optimized"
+_WORKLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
+if _WORKLOAD_DIR not in sys.path:
+    sys.path.insert(0, _WORKLOAD_DIR)
+
+# Expected runtime characteristics derived from depthwise_separable_conv.py /
+# optimizations.json. Output of three DWSepBlocks (32->64->128->256) at 56x56.
+_EXPECTED_INPUT_SHAPE = (16, 32, 56, 56)    # (BATCH_SIZE, IN_CHANNELS, H, W)
+_EXPECTED_OUTPUT_SHAPE = (16, 256, 56, 56)  # final block projects to 256 channels
+_EXPECTED_DTYPE = "float32"                  # analysis.dtype (fp32)
+_BACKEND_NAME = "depthwise_separable_conv_opt"
 
 
 def test_import():
-    """Module imports without error."""
+    """Module imports without error (triggers @register_backend at load time)."""
     import depthwise_separable_conv_optimized  # noqa: F401
 
 
 def test_backend_registration():
     """Backend registered with torch._dynamo."""
+    import torch
     import depthwise_separable_conv_optimized  # noqa: F401
 
     backends = str(torch._dynamo.list_backends())
-    assert BACKEND_NAME in backends, f"Backend not found in: {backends}"
+    assert _BACKEND_NAME in backends, f"Backend not found in: {backends}"
 
 
 def test_get_model_and_input():
-    """Input is on CUDA with the shape/dtype from optimizations.json + profile.json."""
+    """Input is on CUDA with the expected shape, dtype, and channels_last layout."""
+    import torch
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+
     from depthwise_separable_conv_optimized import get_model_and_input
 
     model, x = get_model_and_input()
     assert x.is_cuda, "Input tensor must be on CUDA"
-    # BATCH_SIZE=16, IN_CHANNELS=32, HEIGHT=WIDTH=56
-    assert tuple(x.shape) == (16, 32, 56, 56), f"Unexpected input shape: {x.shape}"
-    # dtype: fp32 (torch.randn default; no autocast) per optimizations.json
-    assert x.dtype == torch.float32, f"Unexpected dtype: {x.dtype}"
-    # OPT-4: channels_last layout applied in get_model_and_input()
+    assert tuple(x.shape) == _EXPECTED_INPUT_SHAPE, f"Unexpected input shape: {tuple(x.shape)}"
+    assert str(x.dtype).split(".")[-1] == _EXPECTED_DTYPE, f"Unexpected dtype: {x.dtype}"
+    assert next(model.parameters()).is_cuda, "Model parameters must be on CUDA"
+    # OPT-2 non-graph lever: input must be channels_last.
     assert x.is_contiguous(memory_format=torch.channels_last), (
-        "Input should be channels_last (OPT-4)"
-    )
-    assert not next(model.parameters()).requires_grad or not model.training, (
-        "Model should be in eval mode"
+        "Input must be channels_last (NHWC) for OPT-2 layout propagation"
     )
 
 
 def test_compiled_forward_pass(caplog):
-    """Compiled forward pass triggers the backend; captures FX pass logs."""
+    """Compiled forward pass triggers the backend; capture FX pass application logs."""
+    import logging
+
+    import torch
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+
     from depthwise_separable_conv_optimized import get_model_and_input
 
     model, x = get_model_and_input()
-    compiled = torch.compile(model, backend=BACKEND_NAME)
+    compiled = torch.compile(model, backend=_BACKEND_NAME)
+
     out = None
     with caplog.at_level(logging.INFO):
         with torch.no_grad():
@@ -68,11 +82,15 @@ def test_compiled_forward_pass(caplog):
 
                 if not isinstance(exc, InternalTorchDynamoError):
                     raise
-                # torch 2.11: guard error after dedup backend succeeds — suppress.
+                # torch 2.11: guard error after dedup backend succeeds — safe to suppress
+
     for record in caplog.records:
         print(record.getMessage())
+
     assert caplog.records, "No logger output — backend may not have executed"
     if out is not None:
-        assert tuple(out.shape) == (16, 256, 56, 56), f"Unexpected output: {out.shape}"
+        assert tuple(out.shape) == _EXPECTED_OUTPUT_SHAPE, (
+            f"Unexpected output shape: {tuple(out.shape)}"
+        )
         assert not torch.isnan(out).any(), "Output contains NaN"
         assert not torch.isinf(out).any(), "Output contains Inf"

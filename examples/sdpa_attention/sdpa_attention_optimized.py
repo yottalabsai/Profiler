@@ -6,19 +6,30 @@ Registered backend: ``sdpa_attention_opt``
 Implements three FX graph passes at the Aten IR level. Each pass corresponds to
 one optimization from optimizations.json (linear chain OPT-1 -> OPT-2 -> OPT-3):
 
-  OPT-1  dtype_promotion  — BF16 cast of aten.mm operands and SDPA Q/K/V inputs,
-                            routing FP32-SIMT GEMMs and the FP32 fmha kernel onto
-                            the Tensor-Core (HMMA) path. LayerNorm kept in FP32.
-                            Confidence: high. Prerequisite for OPT-2 and OPT-3.
-                            A global TF32 fallback is also enabled at import.
+  OPT-1  dtype_promotion  — BF16 cast of every aten.mm operand pair and of the
+                            SDPA Q/K/V inputs, routing the FP32-SIMT projection
+                            GEMMs (cuBLAS "Kernel2", tensor cores 0%) onto the
+                            Tensor-Core HGEMM path. The mm result is cast back to
+                            FP32 so downstream FP32 consumers (LayerNorm, residual
+                            add) are unaffected. LayerNorm reductions stay FP32.
+                            Confidence: high. Root enabler / prerequisite for
+                            OPT-2 and OPT-3. A global TF32 fallback is also set at
+                            import (code_hint) for any residual FP32 matmul.
   OPT-2  fusion           — fuse the 3 sibling Q/K/V aten.mm projections (shared
                             post-LayerNorm activation) into one [4096,512]@[512,1536]
-                            GEMM + 3x aten.slice. Confidence: high. After OPT-1.
-  OPT-3  memory_layout    — speculative weight pre-transpose, gated behind OPT-2.
-                            Confidence: low -> detection + WARNING, no transform
-                            (cuBLAS on Blackwell typically absorbs the transpose;
-                            constant pre-transpose is not materializable from the
-                            FakeTensor graph inputs at this IR level).
+                            GEMM + 3x aten.slice. Reads the shared activation once,
+                            grows the grid toward a full wave, amortizes launch
+                            overhead. Confidence: medium. Runs after OPT-1 so the
+                            fused weight is concatenated/cast at the BF16 runtime
+                            dtype.
+  OPT-3  sdpa_backend_sel — ensure the SDPA node's Q/K/V arrive in BF16 and that
+                            no intervening upcast reverts them to FP32, so the SDPA
+                            dispatcher selects the FlashAttention backend instead of
+                            the FP32 CUTLASS sm80 fallback (fmha_cutlassF_f32_*),
+                            eliminating the 757k local-memory spill wavefronts. The
+                            bf16 cast is emitted by OPT-1; this pass verifies/repairs
+                            the q/k/v cast and guards against a re-upcast. Confidence:
+                            medium. Runs after OPT-1 and OPT-2.
 
 IR-level mechanics (torch 2.11):
   The graph torch.compile hands a @register_backend function is the *functional*
@@ -26,9 +37,9 @@ IR-level mechanics (torch 2.11):
   Aten IR. Aten IR (`aten.mm`, `aten._scaled_dot_product_efficient_attention`,
   `aten.permute`) only appears after AOTAutograd decomposition, inside Inductor.
   The supported torch 2.11 injection point for Aten-IR passes is Inductor's
-  ``post_grad_custom_pre_pass`` hook, which runs on the fully decomposed,
-  functionalized Aten graph immediately before lowering. We install our pass
-  chain there and delegate the AOTAutograd + lowering pipeline to ``compile_fx``.
+  ``post_grad_custom_pre_pass`` hook (the aot_autograd fw_compiler path is broken
+  on 2.11 — boxed-args AssertionError / native_layer_norm decomp collision). We
+  install our pass chain there and delegate AOTAutograd + lowering to ``compile_fx``.
 
   At this post-grad level a bias-free ``nn.Linear`` weight transpose appears as
   ``aten.permute.default(weight_placeholder, [1, 0])`` (not ``aten.t.default``),
@@ -83,8 +94,8 @@ def _pass_promote_dtype(g: fx.Graph) -> int:
     inputs run in BF16. Each mm's operands are cast to BF16 and the mm result is
     cast back to FP32 so downstream FP32 consumers (LayerNorm, residual add) are
     unaffected. SDPA Q/K/V are cast to BF16 in place so the efficient/flash kernel
-    selects its BF16 variant, removing the FP32 register spill. LayerNorm is never
-    touched, so its reductions stay in FP32 (accuracy guard)."""
+    selects its BF16 (FlashAttention) variant, removing the FP32 register spill.
+    LayerNorm is never touched, so its reductions stay in FP32 (accuracy guard)."""
     mm_count = 0
     for n in list(g.nodes):
         if n.op == "call_function" and n.target is _MM:
@@ -150,7 +161,7 @@ def _mm_weight_permute(mm: fx.Node):
 
 # ---------------------------------------------------------------------------
 # OPT-2 — QKV fusion: merge 3 sibling aten.mm projections sharing one activation
-# into one wide GEMM + 3 aten.slice. Confidence: high (graceful no-op if absent).
+# into one wide GEMM + 3 aten.slice. Confidence: medium (graceful no-op if absent).
 # Runs after OPT-1, so operands are already wrapped in BF16 convert nodes.
 # ---------------------------------------------------------------------------
 def _pass_fuse_qkv(g: fx.Graph) -> bool:
@@ -229,41 +240,64 @@ def _pass_fuse_qkv(g: fx.Graph) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# OPT-3 — weight pre-transpose. Confidence: LOW => detection + WARNING only.
-# Gated behind OPT-2: the fused QKV weight is already concatenated/permuted by
-# OPT-2, so the only remaining permute(placeholder)->mm is the output projection.
-# A genuine constant pre-transpose is not materializable here (graph inputs are
-# FakeTensors with no readable storage), and modern cuBLAS on Blackwell usually
-# absorbs the transpose internally, so this pass reports candidates and no-ops.
+# OPT-3 — SDPA backend selection. Confidence: medium (graceful no-op if absent).
+# Goal: the SDPA node's Q/K/V must reach it in BF16 with no intervening upcast,
+# so the dispatcher selects FlashAttention rather than the FP32 CUTLASS sm80
+# fallback (fmha_cutlassF_f32_aligned_*), which spills 757k local-memory
+# wavefronts. OPT-1 already inserts the BF16 q/k/v casts; this pass verifies them
+# and repairs any q/k/v leg that is not BF16 (e.g. a stray convert-to-fp32 sitting
+# directly on a SDPA input). It does NOT hand-write a Flash kernel — the win comes
+# entirely from backend dispatch on bf16 inputs. Runs after OPT-1 and OPT-2.
 # ---------------------------------------------------------------------------
-def _pass_pretranspose_weights(g: fx.Graph) -> None:
-    candidates = 0
-    for n in g.nodes:
-        if not (n.op == "call_function" and n.target is _MM):
-            continue
-        w = n.args[1]
-        inner = w.args[0] if getattr(w, "op", None) == "call_function" and w.args else None
-        if (
-            inner is not None
-            and getattr(inner, "op", None) == "call_function"
-            and inner.target is _PERMUTE
-            and getattr(inner.args[0], "op", None) == "placeholder"
-        ):
-            candidates += 1
+def _node_emits_bf16(n) -> bool:
+    """True if node n is a prims.convert_element_type producing bfloat16."""
+    return (
+        getattr(n, "op", None) == "call_function"
+        and n.target is _CONVERT
+        and len(n.args) >= 2
+        and n.args[1] is _PROMOTE_DTYPE
+    )
 
-    if candidates:
-        logger.warning(
-            "[OPT-3 pretranspose] Detected %d permute(weight)->mm candidate(s) "
-            "(e.g. output projection). Speculative/low-confidence: constant "
-            "pre-transpose is not materializable from FakeTensor graph inputs and "
-            "cuBLAS on Blackwell typically absorbs the transpose — no transform applied.",
-            candidates,
-        )
-    else:
-        logger.info(
-            "[OPT-3 pretranspose] No remaining permute(weight)->mm candidates "
-            "(QKV weights already fused by OPT-2) — pass not applied"
-        )
+
+def _pass_select_sdpa_backend(g: fx.Graph) -> bool:
+    """Ensure each SDPA node consumes BF16 Q/K/V. If a q/k/v leg is not already a
+    BF16 convert (e.g. left in FP32, or upcast back to FP32 before the node), wrap
+    it in a fresh prims.convert_element_type -> bfloat16 so the SDPA dispatcher can
+    pick the FlashAttention backend on this Blackwell build."""
+    matched = False
+    for n in list(g.nodes):
+        if not _is_sdpa(n):
+            continue
+        matched = True
+        repaired = 0
+        for idx in range(3):  # q, k, v
+            arg = n.args[idx]
+            if _node_emits_bf16(arg):
+                continue
+            # Not BF16 (or an fp32 upcast crept in): force a BF16 cast on this leg.
+            with g.inserting_before(n):
+                bf = g.call_function(_CONVERT, (arg, _PROMOTE_DTYPE))
+            n.update_arg(idx, bf)
+            repaired += 1
+        if repaired:
+            logger.info(
+                "[OPT-3 sdpa_backend] Repaired %d non-BF16 SDPA input leg(s) on '%s' "
+                "to force FlashAttention dispatch [Aten IR]",
+                repaired,
+                n.name,
+            )
+        else:
+            logger.info(
+                "[OPT-3 sdpa_backend] SDPA node '%s' Q/K/V already BF16 — Flash "
+                "backend will be selected (FP32 CUTLASS sm80 fallback avoided)",
+                n.name,
+            )
+
+    if not matched:
+        logger.warning("[OPT-3 sdpa_backend] No SDPA node found — pass not applied")
+        return False
+    g.lint()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -273,10 +307,10 @@ def _pass_pretranspose_weights(g: fx.Graph) -> None:
 # ---------------------------------------------------------------------------
 def _aten_pass_chain(g: fx.Graph) -> fx.Graph:
     try:
-        promoted = _pass_promote_dtype(g)  # OPT-1 (high) — must run first
+        promoted = _pass_promote_dtype(g)  # OPT-1 (high) — root enabler, runs first
         if promoted:
-            _pass_fuse_qkv(g)  # OPT-2 (high) — fusion before layout pass
-        _pass_pretranspose_weights(g)  # OPT-3 (low) — detection only
+            _pass_fuse_qkv(g)  # OPT-2 (medium) — fusion after dtype promotion
+        _pass_select_sdpa_backend(g)  # OPT-3 (medium) — SDPA bf16 dispatch guard
     except Exception as e:  # never crash the compile
         logger.warning("[sdpa_attention_opt] Aten pass chain failed: %s", e)
     return g

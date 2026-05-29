@@ -1,7 +1,7 @@
 {
   "name": "profiler-plugin",
   "description": "End-to-end GPU optimization workflow for PyTorch models. Pass workload.py → get profile.json → optimizations.json → custom torch.compile() backend via operator-level FX graph passes.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Logan Chu"
   },

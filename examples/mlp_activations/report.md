@@ -1,210 +1,176 @@
 # Optimization Report — `mlp_activations`
 
-**This optimization achieved a 6.8× per-launch speedup on the GEMM kernels of `mlp_activations` (B=256, NVIDIA RTX PRO 6000 Blackwell) by moving every matmul off the idle FP32 SIMT path onto the bf16 tensor-core datapath — tensor-core utilization went from 0.0 % to 31.4 %.**
-
----
+> **This optimization achieved ~6.1× total speedup on `mlp_activations` (B=256, RTX PRO 6000 Blackwell Server Edition)** by promoting all four GEMMs from the FP32 SIMT path to the BF16 Tensor-Core MMA path and fusing each bias+activation epilogue onto the Triton GEMM template.
 
 ## 1. Hardware Context
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| Architecture | Blackwell |
-| PyTorch | 2.11.0+cu128 (CUDA 12.8) |
-| Compile mode (baseline) | `inductor` (built-in dedup backend) |
-| Compile mode (optimized) | `mlp_activations_opt` (custom registered backend) |
+| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (GB202, 188 SMs) |
+| Architecture family | **Blackwell** |
+| PyTorch | 2.11.0+cu128 |
+| Compile mode (baseline) | `inductor` |
+| Compile mode (optimized) | custom backend `mlp_activations_opt` |
 | Batch size | 256 |
-| Model | 4-layer MLP: Linear(512→2048)→ReLU → Linear(2048→2048)→GELU → Linear(2048→2048)→SiLU → Linear(2048→512)→Tanh |
-| Timing basis | ncu application-replay (relative timing only — values are 2–5× longer than real wall-clock; use for ratios, not absolute latency) |
+| Workload | 4 heterogeneous `Linear`+activation layers: ReLU → GELU → SiLU → Tanh; shapes 512→2048→2048→2048→512 |
+| Iteration count | 2 measure iters (**ncu replay — relative timing only**) |
 
----
+All durations below are nsys-timeline kernel durations (`duration_ns`), reported **per measure iteration**. Treat them as relative magnitudes for ranking, not wall-clock.
 
 ## 2. Operator Summary (baseline)
 
-Durations are the sum of per-kernel `duration_ns` (no kernel-level double-counting — all 40 kernels carry distinct `kernel_id`s). The `aten::mm` and `layer::unique::prologue` rows are two attribution *views* of the same GEMM-dominated forward pass; together they hold every `Kernel2` GEMM launch.
+De-duplicated time budget over the 8 distinct GEMMs + the bias/activation epilogue (the `aten::mm` and `layer::unique::prologue` aggregate buckets are excluded — they re-count the same kernels). Sorted by share of attributed time.
 
 | Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
 |---|---|---|---|---|
-| `aten::mm` | 72.4 % | 1,618,653 | 15 | **Tensor-core-idle GEMM** (tc=0.0 %, SM 17.7 %, DRAM 6.9 %, occ 12.8 %) |
-| `layer::unique::prologue` | 26.9 % | 600,894 | 17 | GEMM + fused activation epilogue (tc=0.0 %, SM 8.3 %, DRAM 18.8 %) |
-| `aten::addmm` | 0.7 % | 15,552 | 8 | Memory-bound (DRAM 23.2 %, occ 27.4 %) |
-| **Total** | **100 %** | **2,235,099** | **40** | |
+| `aten::mm` op_id=9 — fc4 (2048×512) | 15.4% | 137,440 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=19 — fc4 (2048×512) | 15.3% | 136,704 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=5 — fc2 (2048×2048) | 14.1% | 125,536 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=15 — fc3 (2048×2048) | 14.0% | 125,152 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=17 — fc2/fc3 (2048×2048) | 14.0% | 124,927 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=7 — fc3 (2048×2048) | 13.9% | 124,031 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=13 — fc1 (512×2048) | 5.7% | 50,944 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::mm` op_id=3 — fc1 (512×2048) | 5.7% | 50,592 | 1 | Compute-bound, SIMT (TC idle) |
+| `aten::addmm` — bias + ReLU/GELU/SiLU/Tanh epilogues | 1.7% | 15,552 | 8 | Memory/launch-bound (pointwise) |
 
-The entire workload is GEMM-bound: ~99 % of attributed time is `Kernel2` matmul launches, and **every one runs with Tensor Cores completely idle.**
-
----
+**Total attributed budget:** 890,878 ns across 2 iterations. The 8 GEMMs are ~98% of the budget; the activation epilogue is ~1.7%.
 
 ## 3. Reading the Metrics
 
-Only the counters that drive this workload's bottleneck are explained here.
+Only the counters that drive the identified bottleneck are explained here.
 
-- **`tensor_core_active_pct` (a.k.a. `smsp__pipe_tensor_cycles_active`) = 0.0** — the highest-ROI signal in this profile. A literal `0.0` (not `null`) on a GEMM kernel means the matmul executed on the FP32 SIMT CUDA-core path with the tensor-core datapath untouched. On Blackwell an FP32 `mm` never routes to tensor cores; the fix is to run the GEMM in bf16. A `null` here (seen on activation/copy kernels) is expected — those aren't matmuls — and is **not** a problem.
-- **`sm__throughput` (% of peak)** — SM pipe utilization. The baseline GEMMs sit at 6–23 %: neither compute-saturated nor idle, the classic signature of a register-pressure-limited SIMT kernel (200–210 regs/thread caps occupancy).
-- **`sm__warps_active` (achieved occupancy)** — 8–17 % on the baseline GEMMs. Low occupancy from register pressure, not from launch shape.
-- **`gpu__dram_throughput` (% of peak)** — 3–9 % on the GEMMs confirms the kernel is **not** memory-bound; the lost time is the wasted matmul datapath, not bandwidth.
-
----
+- **`smsp__pipe_tensor_cycles_active … = 0.0` (not null)** — the decisive signal. On all 8 baseline GEMMs the Tensor-Core pipe is *exactly zero* active cycles: cuBLAS routed FP32 dense matmul onto the FFMA/SIMT path and the Blackwell MMA units sat idle. A `0.0` here (as opposed to a `null`, which is expected for non-GEMM kernels) is the highest-ROI optimization signal available — it means the entire compute budget is being spent on the slow path.
+- **`gpu__dram_throughput … = 3–9%`** on the GEMMs — DRAM is nearly idle, so these kernels are **not** memory-bound. Combined with TC=0, that confirms a pure SIMT-compute bottleneck, not a bandwidth one.
+- **`sm__warps_active … = 8–17%`** with **`launch__registers_per_thread = 200–210`** — the SIMT GEMM is so register-heavy it caps achieved occupancy in the low teens, leaving the 188 SMs latency-starved. BF16 MMA both moves the work to the right pipe and lowers register pressure.
+- The epilogue `aten::addmm` kernels show **DRAM ≈ 23–34%** and tiny duration — they re-read the full `[256,2048]` matmul output from DRAM just to add bias and apply the activation. That round-trip is what OPT-2 removes.
 
 ## 4. Optimizations Applied
 
-Status from `profiler_output/validation_report.json`; evidence/confidence from `optimizations.json`.
-
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
 |---|---|---|---|---|---|
-| OPT-1 | `dtype_promotion` (GEMM → bf16 tensor-core path) | all `aten::addmm`/`aten::mm` GEMMs (19 `Kernel2` launches) | `tensor_core_active_pct = 0.0` on all GEMM kernels; SM 6–23 %, DRAM 3–9 % → datapath waste, not bandwidth | high | **APPLIED** (4 GEMM nodes → bf16) |
-| OPT-2 | `epilogue_fusion` (bias-add + activation into GEMM epilogue) | per-layer bias-add + ReLU/GELU/SiLU/Tanh | FP32 SIMT `Kernel2` has no epilogue hook; bf16 Triton template does → removes 4 `triton_poi_fused_addmm_*` pointwise kernels | medium | **APPLIED** (2 epilogue nodes tagged; `epilogue_fusion=True`, `max_autotune_gemm=True`) |
+| OPT-1 | dtype_promotion (FP32→BF16 operands, FP32 accum, result cast back to FP32) | All 8 `aten::mm` / `aten::addmm` GEMMs | `tensor_core_active_pct == 0.0` on every GEMM; DRAM 3–9%; 200–210 regs/thread capping occupancy at 8–17% | high | **APPLIED** |
+| OPT-2 | fusion (bias+activation epilogue onto Triton GEMM template via `max_autotune_gemm` + `epilogue_fusion`) | The 4 `triton_poi_fused_addmm_<act>` epilogues | Standalone activation kernels re-read full `[256,2048]` output from DRAM (23–34% DRAM); ~8 launches + round-trip removable | medium | **APPLIED** |
 
-Both passes applied cleanly; none degraded gracefully (no skips/WARNINGs).
-
----
+Both passes report `APPLIED` in `validation_report.json`; OPT-1 is a prerequisite for OPT-2.
 
 ## 5. Implementation Notes
 
 # Implementation Notes — mlp_activations_opt
 
 Custom `torch.compile()` backend implementing the transforms in `optimizations.json`
-for the four-layer `MLPActivations` MLP (Linear+ReLU / +GELU / +SiLU / +Tanh,
-batch 256, FP32, Blackwell RTX PRO 6000).
-
-**Registered backend name:** `mlp_activations_opt`
+for the `MLPActivations` workload (four heterogeneous Linear+activation layers:
+ReLU / GELU / SiLU / Tanh). Backend name registered via `@register_backend`:
+`mlp_activations_opt`. Target: torch 2.11.0+cu128, RTX PRO 6000 Blackwell (GB202).
 
 ## Backend Architecture
 
 | Pass | Method | Reason |
 |---|---|---|
-| OPT-1 — promote every GEMM to bf16 (cast addmm/mm operands → bf16, run GEMM in bf16, cast result → fp32) | `_aten_pre_lowering_pass` → `_promote_gemm_to_bf16`, run via Inductor `post_grad_custom_pre_pass` (Aten IR) | Baseline GEMMs run on the FP32 SIMT path with `tensor_core_active_pct = 0` on all 19 GEMM kernels; bf16 operands make Inductor select the bf16 tensor-core matmul template. High confidence. |
-| OPT-2 — epilogue fusion of bias-add + activation into the GEMM template | Config (`epilogue_fusion=True`, `max_autotune_gemm=True`) in `_configure_inductor` + meta-tagging in `_tag_epilogue_fusions` (Aten IR) | The FP32 SIMT `Kernel2` GEMM has no epilogue hook; once OPT-1 puts the GEMM on the autotuned bf16 Triton template, the per-layer bias-add + activation fuse into the matmul epilogue, removing 4 `triton_poi_fused_addmm_*` pointwise kernels and their GEMM-output round trip. Medium confidence. MUST run after OPT-1. |
-| (non-graph) dtype / layout / batch | not applied — `get_model_and_input()` left at fp32, `[256,512]` | OPT-1/OPT-2 are graph passes; the dtype change happens inside the GEMM at IR level, so the model and input stay fp32 (matching baseline). No layout or batch-padding optimization was proposed. |
+| OPT-1 dtype_promotion (BF16 on aten.mm / aten.addmm operands, result cast back to FP32) | `_aten_pass_chain` (Inductor `post_grad_custom_pre_pass`) | All 8 GEMMs run on the FP32 SIMT path with `tensor_core_active_pct == 0.0`; BF16 operands force cuBLAS/Triton onto the Blackwell Tensor-Core MMA path. Structural rewrite at Aten IR — never reads weight values. |
+| OPT-1 TF32 fallback (`allow_tf32 = True`) | module import (global flag) | Accuracy-safe Tensor-Core engagement for any residual FP32 matmul the BF16 rewrite does not cover; cheap global, no graph surgery. |
+| OPT-2 fusion (bias+activation epilogue fused onto the GEMM template) | `_install_inductor_fusion_config` (Inductor config: `max_autotune_gemm`, `epilogue_fusion`, `max_autotune_gemm_backends="TRITON"`) | A lowering policy, not a node insertion. Forces the Triton GEMM template (cuBLAS extern cannot fuse an epilogue), removing the standalone `triton_poi_fused_addmm_<act>` kernels and their full-tensor DRAM round-trip. |
 
-Both passes are applied on the **same** decomposed Aten graph in a single
-`post_grad_custom_pre_pass` callback, in dependency order (OPT-1 then OPT-2).
-
-### Verified at generated-code level
-`TORCH_LOGS=output_code` confirms the addmm operands become `*bf16`, the GEMM
-emits `bf16[256,2048]`, Inductor selects `triton_tem_fused_addmm_*` (a `tl.dot`
-matmul template — the tensor-core path) instead of the FP32 SIMT `Kernel2`, and
-the bias is threaded into the template (`in_ptr0`) so the activation epilogue is
-fused. Numerics stay within bf16 tolerance of the FP32 baseline (`allclose`,
-atol/rtol 5e-2).
+Both passes from `optimizations.json fx_steps[]` are implemented and applied; there
+are no stubs for this workload.
 
 ## Key Design Decisions
 
-**Target `aten.addmm.default`, not `aten.mm.default`.** All four layers use
-`bias=True`, so at the post-AOTAutograd Aten IR level each layer is a single
-`aten.addmm.default(bias, x, wᵀ)` node — there is no bare `aten.mm.default` in
-the graph. The profile's `aten::mm` entries come from Inductor decomposing addmm
-into mm+add *during lowering*, which is downstream of this pass. OPT-1 therefore
-casts addmm's three operands (bias + both matmul operands; addmm requires uniform
-operand dtype) and handles bare `mm` defensively for robustness. This deviates
-from the literal `fx_steps` (which assumed bare `mm`) but matches the graph the
-compiler actually produces.
+**Injection point is `post_grad_custom_pre_pass`, not an `aot_autograd` fw_compiler.**
+On this torch 2.11 box the `aot_autograd` fw_compiler seam is broken (boxed-args
+AssertionError / decomp-fallback collision), and `optimizations.json` explicitly
+specifies the post-grad hook. OPT-1 therefore runs on the fully decomposed,
+functionalized Aten graph immediately before lowering, and the backend delegates
+AOTAutograd + lowering to `compile_fx`.
 
-**`post_grad_custom_pre_pass` instead of `aot_autograd(fw_compiler=...)`.** Rule 9's
-prescribed `aot_autograd(fw_compiler=_aten_fw_compiler)(gm, ...)` composition
-raises `AssertionError: Expected tensors only, but got list` inside
-`copy_misaligned_inputs` on torch 2.11 — the manually wrapped inference compiler
-mis-boxes runtime inputs. The fix is to register the Aten-IR pass on Inductor's
-`post_grad_custom_pre_pass` hook (which runs on the decomposed Aten graph at
-exactly the same IR level) and delegate to `compile_fx` as the dynamo backend
-directly, letting `compile_fx` drive AOTAutograd internally. Inserted `to.dtype`
-nodes get a populated `meta['val']` (computed via `src_val.to(dtype)`) so
-Inductor's post-grad fake-tensor propagation does not `KeyError` on a missing
-`'val'`.
+**Casts use `prims.convert_element_type.default`, not `aten._to_copy.default`.**
+At the post-grad level `aten._to_copy.default` triggers an Inductor "both fallback
+and decomp" assertion; `prims.convert_element_type.default` is the supported cast op.
 
-**Prerequisite ordering (OPT-2 after OPT-1).** Epilogue fusion into the GEMM
-requires the bf16 Triton matmul template; the FP32 SIMT GEMM has no epilogue
-hook, so running OPT-2 first would find nothing fusible. The single pre-lowering
-callback runs `_promote_gemm_to_bf16` before `_tag_epilogue_fusions`, and the
-config flags that actually drive the fusion are set in the backend before
-`compile_fx`.
+**OPT-1 handles both `aten.mm` and `aten.addmm`.** A bias-carrying `nn.Linear` may
+lower either to `aten.addmm.default(bias, x, wT)` or to a separate `aten.mm.default`
+plus an `aten.add`. Keying the pass on both targets (with `base=1` for addmm so the
+FP32 bias is skipped, `base=0` for mm) promotes all 8 distinct GEMMs regardless of
+how the bias add is decomposed. Accumulation and bias add stay FP32; only the
+matmul operands are BF16, and the result is cast straight back to FP32 so the
+ReLU/GELU/SiLU/Tanh epilogues and the final output are numerically unchanged.
 
-**Dedup path retained but inactive.** The backend builds a
-`UniqueSubgraphRegistry` per Rule 9, but the four layers have distinct shapes and
-activations, so `build_partition_equivalence_map()` returns empty and the flat
-compile path is taken — which also preserves cross-layer Inductor fusion. The
-dedup branch is kept for template parity.
+**OPT-2 is config, not a graph pass — and is set before any `compile_fx` call.**
+Epilogue fusion of the bias and activation onto a Triton GEMM template is enabled by
+Inductor lowering policy; there is no node to insert. The flags are installed at the
+top of the backend function (and the relevant ones idempotently) so they are in
+effect for every `compile_fx` invocation. Per the prerequisite chain, OPT-2 is most
+effective after OPT-1 sets operands to BF16, because the Tensor-Core MMA template
+keeps the output tile on-chip for the epilogue. Confidence is medium: whether
+max-autotune actually selects the Triton template over cuBLAS for these specific
+shapes is autotuner-dependent and should be confirmed in the Inductor debug dir
+(expect `triton_tem_fused_addmm_<act>` to replace `triton_poi_fused_addmm_<act>`).
 
-**`max_autotune_gemm` autotune warnings are benign.** Enabling
-`max_autotune_gemm` (required for the epilogue-capable Triton GEMM template) makes
-Inductor benchmark several template configs; some are rejected with
-`OutOfMemoryError: out of resource: triton_mm` (shared-memory over budget) and
-silently dropped. These are autotune-selection logs, not failures — a valid
-config is always chosen and the forward pass completes correctly.
+**Flat compile path (no dedup).** The four MLP layers are structurally distinct
+(different activations and the 512/2048/2048/512 shape progression), so
+`UniqueSubgraphRegistry.build_partition_equivalence_map()` returns no equivalence
+classes and the backend takes the flat `compile_fx(gm, example_inputs)` path. This
+preserves cross-layer Inductor fusion. The dedup branch (per Rule 9) is retained for
+structural reuse should the model grow repeated blocks.
 
----
+**No non-graph optimization in `get_model_and_input()`.** Neither proposed
+optimization is a non-graph transform: OPT-1 is a graph pass and OPT-2 is an Inductor
+config. There is no Conv2d (no `channels_last`) and the batch (256) is already a
+multiple of common tiles, so the workload interface applies no layout/shape change
+and returns the model in FP32.
+
+> Cache note: after editing this backend, clear the Inductor on-disk cache
+> (`rm -rf /tmp/torchinductor_* ~/.cache/torch_inductor*`) before re-profiling —
+> Inductor keys its cache on the FX graph, not the backend source, so a stale
+> compiled artifact can mask the new passes.
 
 ## 6. Before/After Results
 
-Both captures use B=256 (workload constant, identical across runs). Operators are matched by name; baseline's split GEMM views (`aten::mm` + `layer::unique::prologue` + `aten::addmm`) collapse to the optimized `aten::addmm` tensor-core template.
+Batch size matches across both captures (B=256). Durations are **per measure iteration**, nsys-timeline `duration_ns`.
 
-> **Launch-count caveat.** The optimized capture enumerated **8** GEMM-class launches vs the baseline's **20** — OPT-2's epilogue fusion folded the standalone activation kernels into the GEMM template, and the bf16 path produced fewer captured `Kernel2`-equivalent launches. Because the launch counts differ, the **per-launch GEMM figure is the controlled comparison**; the whole-graph total is reported with this caveat.
-
-### Per-launch GEMM (controlled — the headline result)
-
-| Metric | Baseline | Optimized | Speedup |
-|---|---|---|---|
-| GEMM-class launches | 20 | 8 | — |
-| Total GEMM time (ns) | 2,195,131 | 129,408 | 17.0× (uncontrolled — launch counts differ) |
-| **Per-launch GEMM (ns)** | **109,757** | **16,176** | **6.8×** |
-| `tensor_core_active_pct` | 0.0 % | 31.4 % | 0 → engaged |
-
-### Whole-graph total (ncu replay, relative timing)
+**Operator matching.** OPT-2 fuses each `Linear` GEMM with its bias+activation epilogue into a single `triton_tem_fused_addmm_<act>` template kernel, so the baseline's separate `aten::mm` + `aten::addmm` collapse to one optimized kernel per layer. Baseline rows are therefore summed per layer and compared to the corresponding fused template kernel.
 
 | Operator | Baseline (ns) | Optimized (ns) | Speedup |
 |---|---|---|---|
-| GEMM (`aten::mm`+`prologue`+`addmm`, fused → `aten::addmm`) | 2,219,099 | 129,408 | 17.1× |
-| `aten::copy_` (new — bf16↔fp32 casts from OPT-1) | 0 | 53,216 | new cost |
-| `aten::gelu` | — | 2,720 | — |
-| `aten::silu` | — | 2,656 | — |
-| `aten::relu` | — | 2,432 | — |
-| `aten::tanh` | — | 2,144 | — |
-| **Total** | **2,235,099** | **192,576** | **11.6×** |
+| fc1 GEMM (512×2048) + ReLU `(fused)` | 50,592 | 4,800 | 10.5× |
+| fc2 GEMM (2048×2048) + GELU `(fused)` | 125,536 | 22,144 | 5.7× |
+| fc3 GEMM (2048×2048) + SiLU `(fused)` | 124,031 | 23,168 | 5.4× |
+| fc4 GEMM (2048×512) + Tanh `(fused)` | 137,440 | 10,368 | 13.3× |
+| bias/activation epilogue (absorbed into templates) | 7,776 | — | fused away |
+| transpose + residual `aten::addmm`/`triton_poi` (new) | — | 12,800 | new overhead |
+| **Total (per iteration)** | **445,375** | **73,280** | **6.08×** |
 
-### Speedup attribution
+> ⚠️ **Attribution caveat (read before citing these numbers).** In the optimized profile the four `triton_tem_fused_addmm_<act>` template GEMMs — the centerpiece of the optimization — landed in `unattributed_kernels` with **empty `metrics.raw`**. Root cause is a name-instability footgun, not a real failure: nsys SQLite truncates/renumbers long Triton template kernel names (e.g. `triton_tem_fused_addmm_relu_t__2...`) while ncu reports the full, differently-numbered names (`triton_tem_fused_addmm_relu_t_2`), so the exact `(kernel_name, invocation_index)` join returns 0 ncu rows for them. **Consequence:** their nsys `duration_ns` is reliable (and is what the table above uses — consistent with the baseline, which is also nsys-sourced), but **no post-optimization hardware counters exist for the GEMMs**. The counters do exist in `profiler_output/ncu_reps/all_kernels.ncu-rep` under the full names (5 invocations each) and are recoverable by name; they were not force-joined into the JSON because that attribution would be unverifiable. The two attributed operators in the optimized profile (`aten::t`, residual `aten::addmm`) are *not* the GEMMs.
 
-The GEMM speedup is attributed to **OPT-1** under all three required conditions: (1) `status == APPLIED`; (2) the expected counter moved — `tensor_core_active_pct` 0.0 % → 31.4 %; (3) the GEMM operator's per-launch time dropped 6.8×. **OPT-2** (`APPLIED`) contributed the kernel-count reduction — the standalone `triton_poi_fused_addmm_*` activation kernels disappeared as bias+activation fused into the bf16 GEMM epilogue.
-
-### Residual opportunity
-
-After the GEMMs were fixed, the **new** second-order bottleneck is `aten::copy_` at **27.6 %** (53,216 ns) of optimized time — these are the bf16↔fp32 dtype-cast copies OPT-1 inserts around each GEMM. The activations are now negligible (~1 % each, memory-bound as expected). Eliminating the cast round-trips (e.g. carrying bf16 across consecutive layers instead of casting back to fp32 between every GEMM, or autocasting the whole forward region) would reclaim most of that 27.6 % — the single largest remaining lever in this profile.
-
----
+**Speedup attribution.** Both OPT-1 and OPT-2 are `APPLIED` in `validation_report.json`. The validation compiled-forward log confirms the GEMM operands lower to BF16 (`dtypes: torch.bfloat16, torch.bfloat16`) and that the standalone `triton_poi_fused_addmm_<act>` epilogue kernels are replaced by `triton_tem_fused_addmm_<act>` templates — i.e. both transformations are present in the executed graph. Because the optimized GEMM kernels carry no ncu counters, the expected-direction metric change (TC pipe 0.0 → active) **cannot be confirmed from the optimized profile's counters**; it is confirmed only by the validation BF16-lowering log and by the magnitude of the measured duration drop, which is fully consistent with moving a SIMT-bound GEMM onto the Tensor-Core MMA path.
 
 ## 7. What Drove Each Speedup
 
-**Promote GEMMs to bf16 tensor-core path (OPT-1, +6.8× per-launch on the GEMMs):** casting each `aten.addmm` operand to bf16 makes Inductor emit a `triton_tem_fused_addmm_*` `tl.dot` matmul template that runs on Blackwell's tensor cores instead of the register-pressure-limited FP32 SIMT `Kernel2`. The evidence is the `smsp__pipe_tensor_cycles_active` counter rising from a hard `0.0 %` to `31.4 %` — the tensor-core datapath went from completely idle to actively issuing matmul instructions.
+**BF16 Tensor-Core promotion (OPT-1, the dominant gain on all 4 GEMMs):** Casting each matmul's operands to BF16 (FP32 accumulation preserved) makes cuBLAS/Triton dispatch to the Blackwell Tensor-Core MMA pipe instead of the FFMA/SIMT path that the baseline used. Evidence: baseline `tensor_core_active_pct == 0.0` on every GEMM with occupancy capped at 8–17% by 200+ regs/thread; the validation log shows the optimized GEMMs now run as BF16 (`torch.bfloat16, torch.bfloat16`), and per-layer GEMM duration drops 5–13×, the signature of a SIMT→MMA path switch.
 
-**Epilogue fusion (OPT-2, kernel-count reduction):** with `epilogue_fusion=True` and `max_autotune_gemm=True`, the per-layer bias-add and activation thread into the bf16 GEMM template's epilogue (bias arrives as `in_ptr0`). The standalone `triton_poi_fused_addmm_relu/gelu/silu/tanh` pointwise kernels present in the baseline `prologue` no longer appear as separate launches, removing the hidden-activation round-trip through DRAM.
-
----
+**Epilogue fusion onto the GEMM template (OPT-2, smaller but launch/traffic gain):** Enabling `max_autotune_gemm` + `epilogue_fusion` with the Triton GEMM backend fuses each bias add and ReLU/GELU/SiLU/Tanh directly onto the matmul output tile on-chip. Evidence: the standalone `triton_poi_fused_addmm_<act>` kernels (which re-read the full `[256,2048]` output from DRAM at 23–34% throughput) disappear from the optimized trace and are replaced by single `triton_tem_fused_addmm_<act>` template kernels — removing ~8 launches and the DRAM round-trip per iteration.
 
 ## 8. Remaining Opportunities
 
-All proposed optimizations in `optimizations.json` (OPT-1, OPT-2) were applied and confirmed. No further *FX-pass* proposals remain.
+All proposed optimizations (OPT-1, OPT-2) were applied. No further FX-level gains were identified in this profile.
 
-The profile does, however, expose one un-proposed second-order target now that GEMMs are fixed:
-
-| ID | Type | Target | Reason Not Applied | Projected Gain |
-|---|---|---|---|---|
-| (new) | cast elimination / region autocast | `aten::copy_` (bf16↔fp32 casts) | Not in original proposal set — exposed only after OPT-1 shifted the bottleneck | ~27.6 % of current optimized time |
-
-Carrying bf16 activations across consecutive layers (rather than casting fp32→bf16→fp32 around every GEMM) or wrapping the forward in a single autocast region would remove most of the `aten::copy_` cost. Estimated additional whole-graph gain if fully applied: on the order of **1.3–1.4×** beyond the current optimized profile.
+One **measurement** (not optimization) gap remains worth closing: the optimized `triton_tem_fused_*` template GEMMs are unattributed due to the nsys↔ncu kernel-name truncation mismatch described in §6. Recovering their counters from `profiler_output/ncu_reps/all_kernels.ncu-rep` (by full name) would let a future run *verify* Tensor-Core engagement and residual occupancy/DRAM headroom directly, rather than inferring it from the duration drop. With both FX passes already applied, any further gain would come from autotuner-selected tile shapes or a lower-precision accumulation strategy, not from a new graph transformation.
 
 ---
 
-## Reproduction
+### Reproduction
 
 ```bash
-# Baseline capture (built-in dedup backend)
-python3 nvidia/scripts/run_workload.py --workload examples/mlp_activations/mlp_activations.py --correlation-pass ...
-nsys profile --trace=cuda,nvtx ... python3 nvidia/scripts/run_workload.py --workload examples/mlp_activations/mlp_activations.py ...
-# → examples/mlp_activations/profile.json
+# Baseline capture (Stage 0)
+python3 nvidia/scripts/run_workload.py --workload examples/mlp_activations/mlp_activations.py --correlation-pass
+nsys profile --trace=cuda,nvtx --output=profiler_output/mlp_activations \
+    python3 nvidia/scripts/run_workload.py --workload examples/mlp_activations/mlp_activations.py
+# → profile.json
 
-# Optimized capture (custom backend)
-python3 nvidia/scripts/run_workload.py --workload examples/mlp_activations/mlp_activations_optimized.py \
-    --compile-backend mlp_activations_opt ...
-# → examples/mlp_activations/profile_optimized.json
+# Propose / backend / validate / re-capture / report (reusing profile.json)
+/optimize examples/mlp_activations/mlp_activations.py --from=propose
 
-# Or drive the whole pipeline:
-/profiler-plugin:optimize examples/mlp_activations/mlp_activations.py
+# Optimized re-capture clears the Inductor cache first, then captures with
+#   --compile-backend=mlp_activations_opt --profile-name=optimized  → profile_optimized.json
 ```
+
+Backend: `examples/mlp_activations/mlp_activations_optimized.py` (`@register_backend("mlp_activations_opt")`).

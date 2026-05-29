@@ -1,197 +1,176 @@
-# Optimization Report — depthwise_separable_conv
+# Optimization Report — `depthwise_separable_conv`
 
-This optimization achieved a **2.75× total speedup** on the MobileNet-style depthwise-separable conv workload (B=16, NVIDIA RTX PRO 6000 Blackwell Server Edition), cutting attributed GPU time from **860.3 µs to 313.3 µs**.
+This optimization achieved a **1.27× speedup on the convolution operators** (B=16, NVIDIA RTX PRO 6000 Blackwell) **while folding away every standalone BatchNorm and layout-copy kernel** — the optimized convolutions are BatchNorm-inclusive yet still faster than the baseline convolutions that excluded it.
+
+> **Timing caveat.** All durations below are ncu replay values (2–5× longer than real wall-clock) and are used for *relative* comparison only. The baseline (built-in dedup backend) and optimized (custom backend) captures emitted different total kernel-launch counts (53 vs 12) because they instrument the graph differently, so the raw sum-of-all-kernels ratio is **not** a valid speedup. The figures in §6 compare the **12 operator-level entries present in both profiles** (6 pointwise + 6 depthwise convolutions, one kernel each), which match 1:1.
+
+---
 
 ## 1. Hardware Context
 
 | Field | Value |
 |---|---|
-| GPU model | NVIDIA RTX PRO 6000 Blackwell Server Edition (SM count ≈ 188) |
-| Architecture family | Blackwell |
-| PyTorch version | 2.11.0+cu128 |
-| Compile mode (baseline) | `inductor` |
-| Compile mode (optimized) | `depthwise_separable_conv_opt` (custom backend) |
-| Precision | FP32, `eval()` mode (no autocast) |
-| Batch size | 16 |
-| Input | (16, 32, 56, 56) |
-| Iteration timing | ncu replay — relative timing only (absolute ns inflated 2–5×) |
+| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs, assumed) |
+| Architecture | Blackwell |
+| PyTorch | 2.11.0+cu128 |
+| Compile mode (baseline) | `inductor` (built-in layer-dedup backend) |
+| Compile mode (optimized) | custom backend `depthwise_separable_conv_opt` |
+| dtype | FP32 (Tensor Cores idle on depthwise SIMT path; ~45% engaged on pointwise) |
+| Batch size | 16 (input `[16, 32, 56, 56]`, 56×56 spatial) |
+| Model | 3 MobileNet-style depthwise-separable blocks, 32→64→128→256 |
+| Iterations | ncu replay — relative timing only |
 
-**Workload.** Three stacked depthwise-separable blocks with channel doubling (32→64→128→256), spatial size held at 56×56. Each block is `Depthwise 3×3 (groups=C_in) → BatchNorm → ReLU6 → Pointwise 1×1 → BatchNorm → ReLU6`. This is a roofline teaching case: the depthwise convs and the pointwise convs land on opposite sides of the ridge point.
+---
 
-## 2. Operator Summary (Baseline)
+## 2. Operator Summary (baseline)
 
-Sorted by attributed GPU time. The two roll-up entries (`layer::unique::prologue`, the coarse `aten::cudnn_convolution`) are NVTX/torch-profiler aggregations that cover the same kernels as the fine-grained per-op entries; bottleneck analysis is driven by the fine-grained measure-iteration entries below them.
+Operator-level entries, sorted by share of the matched-operator budget. The baseline also carried standalone BatchNorm + layout-copy Triton kernels (see §6) that are not individual operators here — they lived inside the enclosing `layer::prologue` range.
 
-| Operator | Duration (ns) | Kernels | tc% | Occ% | Mem% | Bottleneck Class |
-|---|---|---|---|---|---|---|
-| layer::unique::prologue (warm-up roll-up) | 437,850 | 30 | 29.2 | 23.4 | 36.5 | warm-up (excluded from analysis) |
-| aten::cudnn_convolution (coarse roll-up) | 160,511 | 9 | 22.1 | 40.9 | 45.7 | roll-up |
-| cudnn_convolution PW 1×1 128→256 (op 26) | 48,480 | 1 | 44.8 | 8.3 | 30.9 | occupancy-bound |
-| cudnn_convolution PW 1×1 128→256 (op 53) | 47,872 | 1 | 45.0 | 8.3 | 31.2 | occupancy-bound |
-| cudnn_convolution PW 1×1 64→128 (op 18) | 27,040 | 1 | 39.1 | 8.5 | 26.4 | occupancy-bound |
-| cudnn_convolution PW 1×1 64→128 (op 45) | 26,912 | 1 | 39.3 | 8.3 | 26.9 | occupancy-bound |
-| aten::convolution (layout-copy roll-up) | 21,536 | 2 | 0.0 | 53.0 | 51.9 | memory-bound (layout copy) |
-| cudnn_convolution DW 3×3 128ch (op 49) | 16,575 | 1 | 0.0 | 86.4 | 73.5 | memory-bound (healthy) |
-| cudnn_convolution DW 3×3 128ch (op 22) | 16,512 | 1 | 0.0 | 87.0 | 73.8 | memory-bound (healthy) |
-| cudnn_convolution PW 1×1 32→64 (op 37) | 13,920 | 1 | 18.7 | 8.3 | 24.5 | occupancy-bound |
-| cudnn_convolution PW 1×1 32→64 (op 10) | 13,696 | 1 | 18.5 | 8.3 | 24.1 | occupancy-bound |
-| cudnn_convolution DW 3×3 64ch (op 41) | 8,896 | 1 | 0.0 | 81.7 | 62.1 | memory-bound (healthy) |
-| cudnn_convolution DW 3×3 64ch (op 14) | 8,736 | 1 | 0.0 | 82.1 | 60.8 | memory-bound (healthy) |
-| cudnn_convolution DW 3×3 32ch (op 33) | 5,920 | 1 | 0.0 | 72.5 | 46.9 | memory-bound (healthy) |
-| cudnn_convolution DW 3×3 32ch (op 6) | 5,856 | 1 | 0.0 | 72.7 | 48.1 | memory-bound (healthy) |
+| Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
+|---|---:|---:|---:|---|
+| `aten::cudnn_convolution` pw 1×1 128→256 (op 26) | 20.2% | 48,480 | 1 | Occupancy-starved (occ 8.3%, mem 31%) |
+| `aten::cudnn_convolution` pw 1×1 128→256 (op 53) | 19.9% | 47,872 | 1 | Occupancy-starved (occ 8.3%) |
+| `aten::cudnn_convolution` pw 1×1 64→128 (op 18) | 11.2% | 27,040 | 1 | Occupancy-starved (occ 8.5%) |
+| `aten::cudnn_convolution` pw 1×1 64→128 (op 45) | 11.2% | 26,912 | 1 | Occupancy-starved (occ 8.3%) |
+| `aten::cudnn_convolution` dw 3×3 128ch (op 49) | 6.9% | 16,575 | 1 | Memory-bound (mem 73%, occ 86%) |
+| `aten::cudnn_convolution` dw 3×3 128ch (op 22) | 6.9% | 16,512 | 1 | Memory-bound (mem 74%, occ 87%) |
+| `aten::cudnn_convolution` pw 1×1 32→64 (op 37) | 5.8% | 13,920 | 1 | Occupancy-starved (occ 8.3%) |
+| `aten::cudnn_convolution` pw 1×1 32→64 (op 10) | 5.7% | 13,696 | 1 | Occupancy-starved (occ 8.3%) |
+| `aten::cudnn_convolution` dw 3×3 64ch (op 41) | 3.7% | 8,896 | 1 | Memory-bound (mem 62%, occ 82%) |
+| `aten::cudnn_convolution` dw 3×3 64ch (op 14) | 3.6% | 8,736 | 1 | Memory-bound (mem 61%, occ 82%) |
+| `aten::cudnn_convolution` dw 3×3 32ch (op 33) | 2.5% | 5,920 | 1 | Memory-bound (mem 47%, occ 72%) |
+| `aten::cudnn_convolution` dw 3×3 32ch (op 6) | 2.4% | 5,856 | 1 | Memory-bound (mem 48%, occ 73%) |
 
-Plus **12 unattributed `triton_poi_fused__native_batch_*` kernels (~132 µs)** — standalone BatchNorm-affine elementwise kernels that Inductor could not fuse into the cuDNN conv epilogue.
+**Two distinct bottlenecks.** (1) The **pointwise 1×1 convolutions** all map to the implicit-GEMM `Kernel2`, which runs at only **~8.3% achieved occupancy** (224–228 registers/thread, 81.9 KB shared memory) with Tensor Cores at ~45% — latency-bound by occupancy starvation, not arithmetic. (2) The **depthwise 3×3 convolutions** (`conv2d_c1_k1_nhwc`) are memory-bound near roofline (DRAM 47–74%, occupancy 72–87%) and are deliberately left untouched. Separately, ~50.9% of baseline attributed time lived in the `prologue` range, dominated by standalone inference-BatchNorm + activation elementwise kernels and pure layout-copy kernels that do no math.
+
+---
 
 ## 3. Reading the Metrics
 
-- **tensor_core_active_pct (tc%).** On the pointwise convs it sits at 39–45% — tensor cores fire but are starved. **`tc% = 0.0` is not null** on the depthwise convs and the new GEMMs; for depthwise it is expected (no GEMM math), but on the FP32 GEMMs it is the highest-ROI residual signal (see §8).
-- **achieved_occupancy (Occ%).** The single most important baseline signal. The pointwise cuDNN `Kernel2` ran at **~8.3% occupancy** — capped by 224–228 registers/thread and ~82 KB dynamic shared memory. The depthwise convs were healthy at 72–87%.
-- **memory_throughput_pct (Mem%).** The depthwise convs at 60–74% confirm they are correctly bandwidth-bound and near the roofline ceiling; nothing to optimize in the conv math itself.
-- **eligible_cycles_pct** is the Blackwell latency-bound indicator (`warp_cycles_per_instruction` is unavailable on this architecture). The pointwise convs sat at 16–20%, confirming latency/occupancy starvation rather than compute saturation.
+- **`sm__warps_active … achieved occupancy %`** — fraction of the SM's warp slots that were resident. Below ~30% the kernel cannot hide memory/instruction latency. The pointwise `Kernel2` at **8.3%** is the headline problem: 224 registers/thread caps resident warps far below the SM ceiling.
+- **`gpu__dram_throughput %`** — DRAM bandwidth used vs peak. Above ~60% means memory-bound. The depthwise convs at 47–74% are already near their roof; the BatchNorm elementwise kernels are pure-bandwidth full-tensor read/write passes.
+- **`smsp__pipe_tensor_cycles_active %` (tensor-core engagement)** — `0.0` on the depthwise `conv2d_c1_k1_nhwc` kernels confirms the FP32 SIMT path with Tensor Cores fully idle; ~45% on the pointwise `Kernel2` shows partial engagement. A null value (non-GEMM kernels) is expected, not a problem.
+- **`launch__registers_per_thread`** — 224–228 on the large pointwise GEMM is what throttles occupancy; the smaller GEMMs and the rewritten path drop to 88.
+
+---
 
 ## 4. Optimizations Applied
 
-Status from `validation_report.json`; evidence/confidence from `optimizations.json`.
-
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
 |---|---|---|---|---|---|
-| OPT-1 | fusion (Conv-BN fold) | 6 conv→BN pairs + 12 standalone BN Triton kernels | 12 launches / ~132 µs of pure-memory BN-affine traffic | high | **APPLIED** (6 pairs folded) |
-| OPT-2 | memory_layout (1×1 conv → GEMM) | 6 pointwise 1×1 convs | occ 8.3%, regs 224–228, eligible 16% on cuDNN `Kernel2` | medium | **APPLIED** (3 convs / 6 sites → `aten.mm`) |
-| OPT-3 | fusion (depthwise → Triton) | depthwise 3×3 + layout-copy kernel | layout-copy `triton_poi_fused_convolution_0`: sm 9.6%, eligible 9% | low | **NOT_APPLIED** (detect-only stub; mutually exclusive with OPT-4) |
-| OPT-4 | memory_layout (channels_last NHWC) | per-stage NCHW↔NHWC layout copies | layout-copy kernel: ipc 0.09, sm 9.6% | medium | **APPLIED** (`model.to(channels_last)`) |
+| OPT-1 | Conv–BatchNorm fold (inference) | all 6 convs | 50.9% of time in prologue BN/elementwise kernels doing no math | high | **APPLIED** (folded BN into 7 conv nodes) |
+| OPT-3 | 1×1 pointwise conv → `addmm` GEMM | 3 pointwise convs | `Kernel2` occ 8.3%, 224 regs, TC ~45% | medium | **APPLIED** (3 convs → addmm, M=50176) |
+| OPT-2 | channels_last propagation | layout-copy kernels | `triton_poi_fused_convolution_0` copies, occ 52% / mem 52%, no math | medium | **NOT_APPLIED** (no redundant copy nodes — layout handled eager-side in `get_model_and_input()`) |
+| OPT-4 | Fuse ReLU6 into conv/GEMM epilogue | 6 activation chains | 6 `clamp_min/clamp_max` chains each a full-tensor read/write | low | **APPLIED** (6 ReLU6 chains marked for Inductor epilogue fusion; no rewrite) |
 
-**Dependency ordering: OPT-1 → OPT-2 → OPT-4.** OPT-1 rewrites the conv weight/bias constants, so it must run before OPT-2 (which reshapes the *folded* weight into a GEMM operand) and before any depthwise-epilogue fusion. OPT-4 (channels_last) is independent but applied after OPT-2 so the GEMM's permute becomes a metadata-only view. **OPT-3 was gated off** because it eliminates the same layout-copy kernel as OPT-4 and the two must not both run; OPT-3 is low confidence (Inductor's Triton depthwise codegen can regress the already-healthy memory-bound cuDNN depthwise), so OPT-4 was chosen as the copy eliminator and OPT-3 left as a detect-only stub.
+---
 
 ## 5. Implementation Notes
 
-Custom `torch.compile()` backend registered as **`depthwise_separable_conv_opt`** via
-`@register_backend`. All graph transformations run at the **Aten IR** level inside
-`_aten_fw_compiler` (the `aot_autograd` forward compiler), which then calls
-`compile_fx` for the Aten → Triton step.
+# Implementation Notes — depthwise_separable_conv_opt
+
+Backend registered with `@register_backend` as **`depthwise_separable_conv_opt`**.
+Target: `DepthwiseSepConv` (3 MobileNet-style depthwise-separable blocks, 32→64→128→256,
+56×56 spatial, FP32, batch 16) on torch 2.11.0+cu128 / RTX PRO 6000 Blackwell.
+
+Injection point: Inductor `post_grad_custom_pre_pass` (the torch 2.11-validated Aten-IR
+seam; the aot_autograd `fw_compiler` path is broken on 2.11). All graph passes run on the
+decomposed, functionalized Aten graph immediately before lowering; AOTAutograd + lowering
+are delegated to `compile_fx`. Graph inputs are FakeTensors, so every pass is a structural
+rewrite — folded weights are emitted as `aten.mul`/`aten.reshape` graph nodes on the
+parameter placeholders and constant-folded by Inductor, never read host-side.
 
 ## Backend Architecture
 
 | Pass | Method | Reason |
 |---|---|---|
-| OPT-1 — Conv-BatchNorm fold | `_aten_fw_compiler` (`_pass_fold_bn`) | Absorbs each `aten._native_batch_norm_legit_no_training` into the preceding conv weight/bias; eliminates ~12 standalone BN-affine Triton kernels. Weight values read from `fw_example_inputs` via the placeholder→tensor map. |
-| OPT-2 — 1x1 conv → GEMM | `_aten_fw_compiler` (`_pass_conv1x1_to_gemm`) | Rewrites the six 1x1/stride-1/pad-0/groups-1 convs as `permute→reshape→addmm/mm→reshape→permute` so they route to a well-occupied cuBLAS/Inductor GEMM instead of the 8%-occupancy cuDNN `Kernel2`. |
-| OPT-3 — depthwise Triton fusion | stub — not applied | Detect-only. Autotune-gated alternative to OPT-4; both eliminate the same NCHW↔NHWC copy kernel, so only one may run. Logs the depthwise convs it would force onto Triton, performs no transform. |
-| OPT-4 — channels_last (NHWC) | `get_model_and_input()` | Non-graph layout optimization: `model.to(memory_format=channels_last)` + `x.to(...)`. Collapses per-stage layout copies into metadata views; chosen copy eliminator over OPT-3. |
+| OPT-1 Conv-BatchNorm fold (inference) | `_aten_fw_compiler` (`_pass_fold_conv_bn`, post_grad_custom_pre_pass) | Detects the decomposed BN affine epilogue `sub(conv,mean)*rstd*gamma+beta` and folds `scale=gamma·rsqrt(var+eps)` into the conv weight + `(bias-mean)·scale+beta` into the conv bias as graph nodes; deletes the standalone BN normalize/broadcast Triton kernels (the 50.9% prologue). Folds all 6 convs. |
+| OPT-3 1×1 pointwise conv → addmm GEMM | `_aten_fw_compiler` (`_pass_pointwise_to_gemm`) | Rewrites each 1×1/stride-1/no-pad/groups-1 conv into `permute(NHWC)→reshape→addmm(bias,xf,Wᵀ)→reshape→permute(NCHW)`, routing the occupancy-starved implicit-GEMM Kernel2 onto a tiled cuBLAS GEMM. Rewrites all 3 pointwise convs (M=50176; K,N = 32,64 / 64,128 / 128,256). |
+| OPT-2 channels_last propagation | `get_model_and_input()` (eager `.to(memory_format=channels_last)`) + `_aten_fw_compiler` (`_pass_strip_layout_copies`) | Eager-side NHWC for model + input is the primary lever; the graph pass erases redundant `aten.clone`/`_to_copy(channels_last)` nodes whose input is already NHWC-contiguous. |
+| OPT-4 ReLU6 epilogue fusion | `_aten_fw_compiler` (`_pass_fuse_activation`) — detection only | Low confidence: once OPT-1 folds BN, the `conv/addmm → clamp_min → clamp_max` chain is a default Inductor pointwise epilogue fusion. The pass verifies all 6 ReLU6 chains are adjacent to a conv/GEMM producer and warns if any is separated; no structural rewrite. |
 
 ## Key Design Decisions
 
-**Dependency ordering (OPT-1 before OPT-2).** OPT-1 registers each BN-folded conv
-weight/bias as a `get_attr` buffer (`_folded_conv_weight_*`, `_folded_conv_bias_*`)
-and rewrites the convolution node to consume them. OPT-2 then reads the weight back
-— for the pointwise convs the weight node is now a `get_attr`, so OPT-2 resolves it
-with `getattr(gm, node.target)` rather than the placeholder map. This guarantees the
-GEMM reshape operates on the folded weight, satisfying the
-`prerequisite_for: [OPT-2, OPT-3]` constraint from `optimizations.json`.
+**Why OPT-1 folds against the decomposed affine chain, not a `_native_batch_norm_legit_no_training` node.** At the torch 2.11 post-grad level Inductor has already decomposed inference BatchNorm into `convolution(x,W,None)` followed by `sub → mul(rstd) → mul(gamma) → add(beta)` with the frozen params broadcast through `aten.unsqueeze`. There is no BN op to match. The pass walks that elementwise chain, recovers the four param sources by unwrapping the `unsqueeze` chains, and folds structurally.
 
-**Loop over all matches, never break early.** The model has three structurally
-similar but channel-distinct blocks (32→64, 64→128, 128→256) — six conv→BN pairs and
-six 1x1 pointwise convs total. Both passes iterate the full node list and transform
-every match; stopping at the first (as the canonical single-pattern templates do)
-would leave 5/6 of each optimization unapplied.
+**Topological ordering of the fold.** The `rstd`/`mean`/`gamma`/`beta` source nodes are computed *after* the conv in the decomposed graph. Inserting the folded-weight math and a replacement conv `inserting_before(conv)` would reference not-yet-defined nodes (lint: "used before defined"). The fix is to insert the folded weight/bias and a fresh `aten.convolution` node `inserting_before(affine_tail)` — the point where every BN-derived dependency already exists — then `replace_all_uses_with(new_conv)` on the affine tail and erase dead nodes.
 
-**OPT-3 vs OPT-4 mutual exclusion.** `optimizations.json` states OPT-3 (force
-depthwise onto Inductor Triton codegen) and OPT-4 (channels_last) both eliminate the
-`triton_poi_fused_convolution_0` layout copy and must not both be applied. OPT-3 is
-low confidence (Inductor's Triton depthwise codegen can regress the already-healthy
-memory-bound cuDNN depthwise kernel and needs an autotune comparison). OPT-4 is
-medium confidence and a clean non-graph change, so OPT-4 is the chosen copy
-eliminator and OPT-3 remains a detect-only stub.
+**Meta re-propagation after OPT-1/OPT-3.** Nodes created by the fold and the GEMM rewrite carry no `meta['val']`. Downstream Inductor post-grad passes (`should_prefer_unfused_addmm`) read `node.meta['val'].device`, raising `KeyError: 'val'`. `_repropagate_meta` recovers the FakeTensorMode and fake inputs from the placeholder meta and re-runs `FakeTensorProp` inside that mode, repopulating every node.
 
-**OPT-2 spatial reshape uses symbolic sizes.** `analysis.edge_case_flags` lists
-`dynamic_shapes` (flagged a false positive, but the GEMM reshape back to NCHW still
-must not hardcode N/H/W). The pass recovers `N`, `H`, `W` with
-`aten.sym_size.int(inp, dim)` so the rewrite is shape-correct under either static or
-dynamic tracing.
+**`aten.permute([1,0])` not `aten.t.default` for the GEMM weight transpose.** On torch 2.11 post-grad, `aten.t.default` triggers `AssertionError: both a fallback and a decomp for same op` during lowering (same failure class the project memory notes for `aten._to_copy`). The 2-D weight transpose is emitted as `aten.permute.default(w2, [1, 0])`.
 
-**Tuple-return handling for BatchNorm.** `_native_batch_norm_legit_no_training`
-returns `(output, save_mean, save_rstd)`. OPT-1 redirects the downstream
-`getitem(bn, 0)` consumer to the new conv node, erases the getitem, then erases the
-BN and original conv nodes, and finishes with `eliminate_dead_code()` to drop the now
-dead BN parameter placeholders.
+**Pass order OPT-1 → OPT-3 → OPT-2 → OPT-4.** Respects the `prerequisite_for` DAG: OPT-1 must run first (registers the folded bias OPT-3's addmm consumes; rewrites the conv nodes OPT-2/OPT-4 key off). OPT-3 runs before OPT-2 so the GEMM's NHWC permute/reshape pair becomes a no-copy view once layout is propagated. OPT-4 runs last as pure detection.
 
-**Backend structure.** Uses `UniqueSubgraphRegistry`. The three blocks have distinct
-channel counts and generally do not produce a structural-duplicate equivalence map,
-so the flat compile path (`aot_autograd(fw_compiler=_aten_fw_compiler)`) is taken,
-preserving cross-layer Inductor fusion. The dedup path is retained for correctness if
-the registry does detect duplicates.
+**Flat compile path.** The three DWSepBlocks have distinct channel widths (32→64, 64→128, 128→256), so `UniqueSubgraphRegistry` finds no structural duplicates and the backend takes the flat `compile_fx` path, preserving cross-block Inductor fusion. The dedup branch is retained for models with repeated identical blocks.
 
-### Bugs found and fixed during validation
+## Validation
 
-Three correctness hazards surfaced in OPT-2 while validating against eager, all fixed before profiling:
+- 4/4 tests pass (`test_depthwise_separable_conv_optimized.py`): import, backend registration, get_model_and_input (CUDA + shape (16,32,56,56) + FP32 + channels_last), compiled forward (no NaN/Inf, output (16,256,56,56)).
+- Numerical parity vs eager baseline: max abs diff 1.08e-5, mean 5.1e-7, `allclose(atol=1e-3, rtol=1e-3)` True — the fold and GEMM substitution are mathematically exact (residual is TF32/GEMM reassociation).
+- Observed pass application: OPT-1 folds 6 convs; OPT-3 rewrites 3 pointwise convs to addmm GEMMs; OPT-2 finds no redundant copy nodes (layout handled eager-side); OPT-4 confirms 6 ReLU6 epilogues adjacent to conv/GEMM producers.
 
-1. **Double-AOT calling-convention corruption.** Returning the full pre-AOT `compile_fx` from an `aot_autograd` inference compiler nests a second AOTAutograd pass; in torch 2.11 this corrupts the boxed calling convention (the runtime hands the inner callable a single list of 31 tensors → `Expected tensors only, but got <class 'list'>`). Fixed by returning the post-AOT `compile_fx_inner`.
-2. **FakeTensor weight leak.** BN-folding and GEMM weight pre-transposition must run on *real* tensor data — a `FakeTensor` operand produces a fake folded/transposed buffer that leaks into the Inductor runtime. The passes detect fake operands, skip if no real data is available, and materialize buffers under a disabled fake mode; a `FakeTensorProp` sweep then restores correct metadata on the newly inserted permute/reshape/mm nodes.
-3. **GEMM `aten.t` decomposition hazard.** Emitting an `aten.t.default` node for the weight transpose triggers Inductor's `both a fallback and a decomp for same op: aten.t.default` assert. Fixed by **pre-transposing** the weight into a real contiguous `(C_in, C_out)` buffer at compile time, so no runtime transpose node (and no transpose kernel) is emitted.
-
-**Validation outcome:** all 5 steps pass (syntax, import, registration, pytest, compiled smoke test). Numerical correctness vs eager: max abs diff **2.267e-05**, `allclose=True` (rtol=1e-3, atol=1e-4), output shape `[16, 256, 56, 56]`.
+---
 
 ## 6. Before/After Results
 
-Both captures use batch size 16. Operators are matched across profiles by structure (NOT `operator_id`, which changes between captures). The six standalone BatchNorm Triton kernels are folded away by OPT-1; the six pointwise cuDNN convs are rerouted to `aten.mm` GEMM sites by OPT-2.
+Matched on the **12 operator-level entries present in both profiles** (each one kernel). Pointwise entries are grouped by channel width; baseline `aten::cudnn_convolution` (implicit-GEMM `Kernel2`) → optimized `aten::mm` (cuBLAS GEMM via OPT-3). Depthwise entries (`conv2d_c1_k1_nhwc`) are unchanged by design.
 
-| Operator (matched) | Baseline (ns) | Optimized (ns) | Speedup |
-|---|---|---|---|
-| Pointwise 1×1 → GEMM, 128→256 (×2 sites) | 96,352 | 155,136 | 0.62× |
-| Pointwise 1×1 → GEMM, 64→128 (×2 sites) | 53,952 | 54,496 | 0.99× |
-| Pointwise 1×1 → GEMM, 32→64 (×2 sites) | 27,616 | 31,968 | 0.86× |
-| Depthwise 3×3 (6 convs, healthy) | 62,495 | 64,672 | 0.97× |
-| Standalone BatchNorm Triton kernels (12) | ~132,509 | 0 (folded) | ∞ (eliminated) |
-| Layout-copy `triton_poi_fused_convolution_0` | 21,536 | 0 (collapsed) | ∞ (eliminated) |
-| ReLU6 / add+hardtanh activation kernels | (folded in BN/prologue) | 7,072 (attributed) + unattributed | — |
-| **Total attributed GPU time** | **860,312** | **313,344** | **2.75×** |
+| Operator | Baseline (ns) | Optimized (ns) | Speedup |
+|---|---:|---:|---:|
+| Pointwise 1×1 128→256 (×2) | 96,352 | 81,920 | 1.18× |
+| Pointwise 1×1 64→128 (×2) | 53,952 | 32,320 | **1.67×** |
+| Pointwise 1×1 32→64 (×2) | 27,616 | 17,024 | **1.62×** |
+| **Pointwise subtotal** | **177,920** | **131,264** | **1.36×** |
+| Depthwise 3×3 128ch (×2) | 33,087 | 28,064 | 1.18× |
+| Depthwise 3×3 64ch (×2) | 17,632 | 14,656 | 1.20× |
+| Depthwise 3×3 32ch (×2) | 11,776 | 14,624 | 0.81× |
+| **Depthwise subtotal** | **62,495** | **57,344** | **1.09×** |
+| **Total (matched convs)** | **240,415** | **188,608** | **1.27×** |
 
-**Where the 2.75× came from:** the entire reduction is the *removal of whole kernel classes*, not per-kernel acceleration. The 12 BN-affine Triton kernels (~132 µs) disappeared, the per-stage NCHW↔NHWC layout copies (~21.5 µs) collapsed to metadata views, and the baseline's warm-up `prologue` roll-up (437.9 µs) no longer dominates the attributed budget. Note that the individual GEMMs are *not* faster than the cuDNN pointwise convs they replaced (the 128→256 GEMM is actually slower in raw ncu ns because it runs FP32 SIMT at 0% tensor-core — see §8); the net win is structural kernel-count collapse plus BN elimination.
+**Plus the eliminated kernels (not in the matched table).** In the baseline, ~18 standalone `triton_poi_fused__native_batch_norm…` kernels and ~5 `triton_poi_fused_convolution_0` layout-copy kernels ran as separate full-tensor read/write passes inside the `prologue` range (the 50.9% budget). In the optimized profile these are **entirely absent** — OPT-1 folded BatchNorm into the convolution weights/bias. The matched convs above are therefore a *conservative floor*: the optimized convs carry the folded BatchNorm math yet are still 1.27× faster, and the separately-launched BN/copy work vanished on top of that.
 
-**Speedup attribution** (all three conditions — APPLIED + metric moved + operator improved):
-- **OPT-1 (APPLIED):** the 12 `triton_poi_fused__native_batch_*` kernels present in the baseline are absent from the optimized profile — direct evidence of the fold. Largest single contributor.
-- **OPT-4 (APPLIED):** the `triton_poi_fused_convolution_0` layout-copy kernels (baseline `aten::convolution`, 21.5 µs) are gone; depthwise convs remain healthy NHWC `conv2d_c1_k1_nhwc`.
-- **OPT-2 (APPLIED):** the cuDNN pointwise `Kernel2` occupancy-bound convs are replaced by `aten::mm` GEMMs. This restructures the graph as intended but, on its own, did not accelerate those ops (see residual opportunity §8).
-- **OPT-3 (NOT_APPLIED):** contributed nothing — correctly, as it was a detect-only stub.
+### Speedup attribution
+
+- **Pointwise 1.36× → attributed to OPT-3** (`status == APPLIED`). Hardware evidence: the small/medium GEMMs dropped from 224–228 → **88 registers/thread**, lifting achieved occupancy from **8.3% → 15%** and roughly doubling effective throughput on the 32→64 and 64→128 convs. The 128→256 GEMM stayed at 228 regs (1.18×) — still register-bound even on the GEMM path.
+- **BatchNorm/layout-copy elimination → attributed to OPT-1** (`status == APPLIED`, folded 7 conv nodes). Evidence: every `triton_poi_fused__native_batch_norm…` kernel present in the baseline is gone from the optimized trace.
+- **Depthwise 1.09× → not attributed to any pass.** OPT-2 is `NOT_APPLIED` (no redundant copy nodes; layout was set eager-side). The small depthwise change — including the 32ch regression to 0.81× — is within Inductor's own scheduling/layout variance and is **not** credited to a transformation.
+
+### Residual opportunity (re-ranked optimized profile)
+
+The two `128→256` pointwise GEMMs (41,120 + 40,800 ns ≈ 43% of optimized matched time) remain the top cost at **228 registers/thread and 8.4% occupancy** — the GEMM rewrite alone did not relieve register pressure at this width. A tiled/split-K cuBLAS configuration or FP32→TF32 acceleration (Tensor Cores currently ~45%) is the next lever; discounted by medium confidence, an estimated additional ~1.2–1.3× on those two operators.
+
+---
 
 ## 7. What Drove Each Speedup
 
-**Conv-BatchNorm fold (OPT-1, dominant contributor):** in `eval()` mode each BatchNorm is a fixed affine map; folding `W' = W·(γ/√(var+ε))`, `b' = β + (b−μ)·γ/√(var+ε)` into the conv weight removes the standalone BN node entirely. Evidence: the 12 `triton_poi_fused__native_batch_*` kernels (~132 µs of pure DRAM read+affine+write) present in the baseline `unattributed_kernels[]` are completely absent from the optimized profile.
+**Conv–BatchNorm folding (OPT-1, eliminates the 50.9% prologue):** the pass folds the decomposed inference-BatchNorm affine chain (`scale = γ·rsqrt(var+ε)`) directly into each convolution's weight and bias as graph nodes, so the normalization costs zero extra kernels. Evidence: all `triton_poi_fused__native_batch_norm…` kernels present in the baseline trace are absent from the optimized trace.
 
-**channels_last NHWC end-to-end (OPT-4):** running the whole model in NHWC keeps one consistent layout so Inductor no longer inserts NCHW↔NHWC conversion copies between stages. Evidence: the baseline `aten::convolution` layout-copy kernel `triton_poi_fused_convolution_0` (ipc 0.09, sm 9.6%, 21.5 µs) does not appear in the optimized profile.
+**1×1 pointwise conv → addmm GEMM (OPT-3, +1.36× on pointwise convs):** rewriting each 1×1 convolution to `permute→reshape→addmm→reshape→permute` routes the occupancy-starved implicit-GEMM `Kernel2` onto a tiled cuBLAS GEMM. Evidence: registers/thread fell 224–228 → 88 on the 32→64 and 64→128 GEMMs, raising achieved occupancy 8.3% → 15%.
 
-**1×1 pointwise conv → GEMM (OPT-2):** each 1×1 conv is mathematically `(N·H·W, C_in)·(C_in, C_out)`, rewritten to `aten.mm` so it routes to cuBLAS instead of the 8.3%-occupancy cuDNN `Kernel2`. Evidence: the optimized profile shows four `aten::mm` operators replacing the six cuDNN pointwise convs, and GEMM occupancy rose from ~8.3% to ~21–23%. The mechanism landed as designed, but the GEMMs run FP32 with tensor cores idle, leaving the headline latency win on the table (§8).
+**ReLU6 epilogue fusion (OPT-4, detection only):** confirms the six `clamp_min/clamp_max` chains sit adjacent to a conv/GEMM producer so Inductor fuses them as pointwise epilogues rather than launching standalone activation kernels. No structural rewrite; contribution folded into the convs' measured time.
+
+---
 
 ## 8. Remaining Opportunities
 
 | ID | Type | Target | Reason Not Applied | Projected Gain |
 |---|---|---|---|---|
-| OPT-3 | fusion (depthwise → Triton) | depthwise 3×3 + layout copy | Detect-only stub; mutually exclusive with the applied OPT-4 copy eliminator, low confidence (may regress healthy memory-bound depthwise) | ~21 µs (2.4%), already largely captured by OPT-4 |
+| OPT-2 | channels_last propagation | layout-copy kernels | No redundant `channels_last` copy nodes in the graph — layout was set eager-side in `get_model_and_input()`, so the graph pass had nothing to strip | ~2.1% of total (already largely realized eager-side) |
 
-**Newly exposed second-order bottleneck (highest ROI):** after OPT-2, the four `aten::mm` GEMMs are now the top time consumers (the two 128→256 GEMMs alone are ~78 µs each in ncu ns) and they run on the **FP32 SIMT path with `tensor_core_active_pct = 0.0`** — tensor cores completely idle. Inductor emitted a warning that TF32 is available but not enabled. Setting `torch.set_float32_matmul_precision('high')` (or `'medium'`) would route these GEMMs through TF32 tensor cores and is the single highest-ROI remaining change — it directly targets the now-dominant operators that OPT-2 exposed.
+All four proposed passes ran; only OPT-2's *graph* component was a no-op because its goal was met before the graph pass executed. The largest remaining FX-level opportunity is **not** in the proposal set: relieving register pressure on the two `128→256` pointwise GEMMs (228 regs, 8.4% occupancy) via tiled/split-K or TF32 acceleration, with an estimated additional ~1.2–1.3× on those operators if pursued.
 
-**Secondary:** the fused `add+hardtanh` (ReLU6) activation kernels are very short and several were left unattributed by ncu (`triton_poi_fused_add_hardtanh_*`); they are not a meaningful time sink and need no action.
+---
 
-OPT-3 offers no additional gain beyond OPT-4. The principal remaining lever is the TF32 enablement above — not an FX-level transformation, but a one-line precision setting that would meaningfully accelerate the four GEMMs that now dominate the profile.
-
-## 9. Reproduction
+## Reproduction
 
 ```bash
-# One-shot end-to-end (capture → propose → backend → validate → re-profile → compare → report)
-/optimize depthwise_separable_conv.py
+# Baseline capture (built-in dedup backend)
+/capture examples/depthwise_separable_conv/depthwise_separable_conv.py
 
-# Or run the stages individually:
-# 1. Baseline capture
-/capture depthwise_separable_conv.py --profile-name=baseline
-# 2. Propose optimizations from profile.json
-/propose
-# 3. Generate the custom backend + validation harness
-/backend
-# 4. Validate before spending ncu replay time
-/validate depthwise_separable_conv_optimized.py
-# 5. Re-profile the optimized workload
-/capture depthwise_separable_conv_optimized.py --profile-name=optimized
-# 6. Regenerate this report
-/report
+# Propose → backend → validate → re-capture (reusing baseline profile.json)
+/optimize examples/depthwise_separable_conv/depthwise_separable_conv.py --from=propose
+
+# Optimized re-capture only
+/capture examples/depthwise_separable_conv/depthwise_separable_conv_optimized.py \
+    --profile-name=optimized --compile-backend=depthwise_separable_conv_opt
 ```
-
-All `duration_ns` values are ncu-replay measurements used for *relative ranking only* — absolute latency is inflated 2–5× by counter collection and is not a wall-clock time.
