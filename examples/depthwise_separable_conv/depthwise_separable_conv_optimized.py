@@ -1,465 +1,539 @@
 """
-depthwise_separable_conv_optimized.py — Custom torch.compile() backend for DepthwiseSepConv.
+depthwise_separable_conv_optimized.py — Custom torch.compile() backend for
+DepthwiseSepConv (MobileNet-style depthwise-separable conv blocks).
 
-Registered backend: ``depthwise_separable_conv_opt``
+Registered backend: ``depthwise_sep_conv_opt``
+(capture stage drives it with ``--compile-backend=depthwise_sep_conv_opt``)
 
-Implements the three optimizations from optimizations.json as named FX graph passes
-operating on the *decomposed Aten IR*, installed via Inductor's
-``post_grad_custom_pre_pass`` hook (the torch 2.11 FX injection point — the
-aot_autograd fw_compiler path is broken on 2.11). Plus one non-graph (eager-side)
-layout change for OPT-3. Dependency DAG and apply order (from the proposal):
+Implements the four optimizations from optimizations.json. Dependency DAG
+(from the proposal global_notes): OPT-1 -> {OPT-2, OPT-3, OPT-4}, OPT-2 -> OPT-4.
+Apply order: OPT-1, OPT-2, OPT-3, OPT-4.
 
-    OPT-2  ->  {OPT-1, OPT-3}        ;   apply order: OPT-2, then OPT-1, then OPT-3
+  OPT-1  dtype_promotion  — Promote the 1x1 POINTWISE convolutions (weight shape
+                            [Cout,Cin,1,1], groups==1) to bfloat16 at Aten IR: cast the
+                            activation + weight to bf16 before the conv and cast the
+                            result back to fp32 after. This routes Inductor's conv-as-mm
+                            lowering to a bf16 tensor-core GEMM template autotuned for
+                            sm_120 instead of the prebuilt sm_80 cutlass s1688 (TF32)
+                            kernel that pins occupancy at ~8%. Paired with
+                            ``max_autotune_gemm`` so the GEMM is retuned for Blackwell.
+                            Confidence: medium (changes numerics fp32->bf16). MUST run
+                            first so OPT-2's folded weight buffers materialize at the
+                            bf16 runtime dtype. Depthwise (groups==C) convs stay fp32.
+  OPT-2  fusion           — Conv-BatchNorm folding (inference). Matches the
+                            ``aten.convolution -> _native_batch_norm_legit_no_training``
+                            pair at Aten IR, bakes the BN per-channel affine into the
+                            conv weight/bias from the REAL parameter tensors (threaded via
+                            ``real_inputs``), registers folded buffers at the conv's
+                            runtime dtype (bf16 for pointwise after OPT-1, fp32 for
+                            depthwise), rewires a fresh biased conv, and deletes the BN.
+                            Eliminates every standalone DRAM-bound BN+ReLU6 Triton kernel.
+                            Confidence: high. Numerically exact. Prerequisite for OPT-4.
+  OPT-3  memory_layout    — channels_last (NHWC) propagation. Primary lever is the
+                            eager-side model + input ``.to(memory_format=channels_last)``
+                            in get_model_and_input() (Rule 7): the conv/GEMM kernels then
+                            consume native NHWC without per-block permute kernels. The
+                            graph pass strips now-redundant ``aten.clone`` /
+                            ``aten._to_copy(memory_format=channels_last)`` copies whose
+                            source is already NHWC. Confidence: medium. Runs AFTER OPT-1
+                            so the folded/bf16 conv nodes are the ones re-evaluated.
+  OPT-4  fusion           — Depthwise ReLU6 (hardtanh) epilogue fusion. Primary lever is
+                            config-level (max_autotune + max_autotune_conv_backends=
+                            'TRITON,ATEN') so the scheduler lowers the depthwise conv to a
+                            Triton template and fuses the clamp(0,6) epilogue (and the
+                            OPT-2-folded bias) into it, removing one full-tensor DRAM
+                            round-trip per depthwise stage. The graph pass DETECTS the
+                            (depthwise conv -> hardtanh) pairs and tags the conv node meta
+                            so the contract is asserted/logged. Confidence: medium. MUST
+                            run AFTER OPT-2 — the ReLU6 can only fuse into the conv once BN
+                            has been folded out (otherwise BN sits between conv and
+                            hardtanh and blocks epilogue fusion).
 
-  OPT-2  fusion          — Conv-BatchNorm folding (inference). MUST RUN FIRST. The
-                           decomposed post-grad graph emits inference BatchNorm as an
-                           elementwise affine epilogue on the conv output:
-                               sub(conv, mean) * rstd * gamma + beta
-                           (broadcast via aten.unsqueeze on the frozen BN params).
-                           This pass detects that chain, folds gamma/sqrt(var+eps)
-                           into the conv weight and (beta - mean*scale) into the conv
-                           bias as *structural* graph nodes (FakeTensor-safe — never
-                           reads weight values), then rewires the affine-chain output
-                           back to the conv. Inductor constant-folds the weight math,
-                           so the standalone BN normalize/broadcast Triton kernels are
-                           deleted, and the trailing relu6 epilogue-fuses into the conv.
-                           Confidence: high. Prerequisite for OPT-1 (supplies folded
-                           bias to addmm) and OPT-3 (layout acts on simplified graph).
-  OPT-1  op_substitution — 1x1 pointwise conv (kernel 1x1, stride 1, no pad, groups=1)
-                           -> reshape + aten.mm / aten.addmm (cuBLAS GEMM). Routes the
-                           occupancy-starved implicit-GEMM 'Kernel2' onto a tiled,
-                           Tensor-Core-engaged cuBLAS GEMM. Uses the OPT-2-folded bias
-                           via aten.addmm. Confidence: high. After OPT-2.
-  OPT-3  memory_layout   — channels_last (NHWC) propagation. Primary lever is the
-                           eager-side model + input .to(memory_format=channels_last)
-                           in get_model_and_input(); the graph pass strips now-redundant
-                           aten.clone/_to_copy(memory_format=channels_last) layout copies
-                           so Inductor stops emitting per-conv NCHW<->NHWC pack kernels.
-                           Confidence: medium. After OPT-2.
-
-IR-level mechanics (torch 2.11, RTX PRO 6000 Blackwell):
-  The graph torch.compile hands a @register_backend function is the *functional*
-  Dynamo graph, NOT Aten IR. Aten IR (aten.convolution, aten.clamp_min, the BN
-  decomposition) only appears after AOTAutograd decomposition, inside Inductor.
-  The supported torch 2.11 injection point for Aten-IR passes is Inductor's
-  ``post_grad_custom_pre_pass`` hook. We install the pass chain there and delegate
-  AOTAutograd + lowering to ``compile_fx``. Graph inputs are FakeTensors with no
-  readable storage, so every pass is a *structural* rewrite — the BN fold materializes
-  folded weights as aten.mul / aten.reshape graph nodes on the parameter placeholders,
-  which Inductor then constant-folds.
+IR-level mechanics (torch 2.11, RTX PRO 6000 Blackwell sm_120):
+  The graph torch.compile hands a @register_backend function is the *functional* Dynamo
+  graph, NOT Aten IR. Aten IR (aten.convolution,
+  aten._native_batch_norm_legit_no_training, aten.hardtanh) only appears after AOTAutograd
+  decomposition. We install the pass chain via ``compile_fx``'s ``inner_compile`` hook
+  (Strategy D, Rule 9): ``compile_fx`` owns AOTAutograd, the decomposition table, the
+  boxed calling convention, and the partitioner; we only swap the leaf compiler
+  ``compile_fx_inner`` and run the Aten-IR passes just before it. The ``inner_compile``
+  ``example_inputs`` may be FakeTensors, so the weight-VALUE-reading OPT-2 fold uses the
+  genuine parameter tensors threaded as ``real_inputs``.
 
 compile_mode = "inductor" (from optimizations.json): standard FX pass approach.
 """
 from __future__ import annotations
 
+import functools
 import logging
+import operator
 from typing import Callable, Optional
 
 import torch
 import torch.fx as fx
-import torch._inductor.config as inductor_config
 from torch._dynamo import register_backend
-from torch._inductor.compile_fx import compile_fx  # function, not module
+from torch._inductor.compile_fx import compile_fx, compile_fx_inner  # functions, not module
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 
-# Engage TF32 Tensor Cores for any residual FP32 matmul (cheap, global, accuracy-safe).
+# --------------------------------------------------------------------------- #
+# Global Inductor / backend config (cheap, process-scoped).
+#   OPT-1: retune the bf16 pointwise GEMM template for Blackwell sm_120 instead of
+#          reusing the prebuilt sm_80 cutlass s1688 (TF32) kernel.
+#   OPT-4: let the scheduler lower the depthwise conv to a Triton template and fuse the
+#          ReLU6 (hardtanh) + folded-bias epilogue into it.
+# --------------------------------------------------------------------------- #
+import torch._inductor.config as inductor_config
+
+inductor_config.max_autotune_gemm = True            # OPT-1: retune bf16 GEMM for sm_120
+inductor_config.layout_optimization = True          # OPT-3: NHWC propagation (default on)
+try:
+    inductor_config.max_autotune = True             # OPT-4: enable template autotune
+    # OPT-4: Triton conv template enables hardtanh+bias epilogue fusion; ATEN fallback
+    # keeps the faster library kernel when the Triton depthwise conv loses autotune.
+    inductor_config.max_autotune_conv_backends = "TRITON,ATEN"
+except Exception as _e:  # pragma: no cover - config key drift across torch versions
+    logger.warning("[config] max_autotune conv backend keys unavailable: %s", _e)
+
+# TF32 tensor cores for any residual fp32 conv/matmul (depthwise stays fp32).
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+# --------------------------------------------------------------------------- #
+# Aten IR targets.
+# --------------------------------------------------------------------------- #
 _CONV = torch.ops.aten.convolution.default
 _CONV_CUDNN = torch.ops.aten.cudnn_convolution.default
 _CONV_TARGETS = frozenset({_CONV, _CONV_CUDNN})
 
-_UNSQUEEZE = torch.ops.aten.unsqueeze.default
-_SUB = torch.ops.aten.sub.Tensor
-_ADD = torch.ops.aten.add.Tensor
-_MUL = torch.ops.aten.mul.Tensor
-_RESHAPE = torch.ops.aten.reshape.default
-_PERMUTE = torch.ops.aten.permute.default
-_MM = torch.ops.aten.mm.default
-_ADDMM = torch.ops.aten.addmm.default
-_T = torch.ops.aten.t.default
-_CLAMP_MIN = torch.ops.aten.clamp_min.default
-_CLAMP_MAX = torch.ops.aten.clamp_max.default
+_BN_NO_TRAIN = torch.ops.aten._native_batch_norm_legit_no_training.default
+_HARDTANH = torch.ops.aten.hardtanh.default
+
 _CLONE = torch.ops.aten.clone.default
 _TO_COPY = torch.ops.aten._to_copy.default
-_CONVOLUTION = torch.ops.aten.convolution.default
+
+# dtype-cast op form we insert / unwrap.
+_TO_DTYPE = torch.ops.aten.to.dtype
+_CAST_TARGETS = frozenset({_TO_DTYPE, _TO_COPY})
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _is_conv(n: fx.Node) -> bool:
-    return n.op == "call_function" and n.target in _CONV_TARGETS
-
-
-def _unwrap_unsqueeze(n) -> Optional[fx.Node]:
-    """Walk back through a chain of aten.unsqueeze.default to the broadcast source.
-
-    BatchNorm params reach the affine chain via two unsqueeze(-1) ops that turn a
-    [C] vector into a [C,1,1] broadcastable tensor. Return the underlying source node.
-    """
-    cur = n
-    while (
-        getattr(cur, "op", None) == "call_function"
-        and cur.target is _UNSQUEEZE
-        and cur.args
-    ):
-        cur = cur.args[0]
-    return cur if isinstance(cur, fx.Node) else None
-
-
-# ---------------------------------------------------------------------------
-# OPT-2 — Conv-BatchNorm folding (inference). Confidence: high.
-# MUST RUN FIRST: prerequisite for OPT-1 (folded bias feeds addmm) and OPT-3
-# (layout acts on the simplified graph). Any exception => WARNING + graph unchanged.
-# ---------------------------------------------------------------------------
-def _pass_fold_conv_bn(g: fx.Graph) -> int:
-    """Fold the decomposed inference-BatchNorm affine epilogue into the preceding conv.
-
-    Post-grad shape of ``Conv2d -> BatchNorm2d(eval)``:
-
-        conv  = aten.convolution(x, W, bias?, ...)
-        sub   = aten.sub(conv, unsqueeze(unsqueeze(running_mean)))
-        mul_a = aten.mul(sub,  unsqueeze(unsqueeze(rstd)))        # rstd = 1/sqrt(var+eps)
-        mul_b = aten.mul(mul_a, unsqueeze(unsqueeze(gamma)))      # optional (affine)
-        out   = aten.add(mul_b, unsqueeze(unsqueeze(beta)))       # optional (affine)
-
-    Fold:  scale = rstd * gamma ;  W_folded = W * scale[:, None, None, None]
-           bias_folded = (bias - mean) * scale + beta   (bias defaults to 0)
-
-    Emitted as *graph nodes* on the existing parameter placeholders, so it is
-    FakeTensor-safe; Inductor constant-folds the weight arithmetic at lower time,
-    deleting the per-conv BN normalize/broadcast passes from the trace.
-    """
-    folded = 0
-    for conv in list(g.nodes):
-        if not _is_conv(conv):
-            continue
-        # conv output must feed exactly the BN sub() (single consumer) to fold safely.
-        if len(conv.users) != 1:
-            continue
-        sub = next(iter(conv.users))
-        if not (sub.op == "call_function" and sub.target is _SUB and sub.args[0] is conv):
-            continue
-
-        mean_src = _unwrap_unsqueeze(sub.args[1])
-        if mean_src is None:
-            continue
-
-        # sub -> mul(rstd)
-        if len(sub.users) != 1:
-            continue
-        mul_a = next(iter(sub.users))
-        if not (mul_a.op == "call_function" and mul_a.target is _MUL):
-            continue
-        rstd_arg = mul_a.args[1] if mul_a.args[0] is sub else mul_a.args[0]
-        rstd_src = _unwrap_unsqueeze(rstd_arg)
-        if rstd_src is None:
-            continue
-
-        # Optional gamma mul and beta add following mul_a.
-        gamma_src = None
-        beta_src = None
-        affine_tail = mul_a  # last node of the affine chain to rewire
-        if len(mul_a.users) == 1:
-            nxt = next(iter(mul_a.users))
-            if nxt.op == "call_function" and nxt.target is _MUL:
-                gamma_arg = nxt.args[1] if nxt.args[0] is mul_a else nxt.args[0]
-                gamma_src = _unwrap_unsqueeze(gamma_arg)
-                affine_tail = nxt
-                if len(nxt.users) == 1:
-                    nxt2 = next(iter(nxt.users))
-                    if nxt2.op == "call_function" and nxt2.target is _ADD:
-                        beta_arg = nxt2.args[1] if nxt2.args[0] is nxt else nxt2.args[0]
-                        beta_src = _unwrap_unsqueeze(beta_arg)
-                        affine_tail = nxt2
-            elif nxt.op == "call_function" and nxt.target is _ADD:
-                beta_arg = nxt.args[1] if nxt.args[0] is mul_a else nxt.args[0]
-                beta_src = _unwrap_unsqueeze(beta_arg)
-                affine_tail = nxt
-
-        conv_w = conv.args[1]
-        conv_b = conv.args[2] if len(conv.args) > 2 else None
-        c_out = None
-        try:
-            c_out = int(conv_w.meta["val"].shape[0])
-        except Exception:
-            pass
-
-        # The rstd/mean/gamma/beta sources are computed *after* the conv in the
-        # decomposed graph, so the folded weight/bias and the replacement conv must
-        # be inserted just before the affine-chain tail (where every dependency is
-        # already defined) to keep the graph topologically ordered.
-        with g.inserting_before(affine_tail):
-            # scale = rstd * gamma  (shape [C_out])
-            if gamma_src is not None:
-                scale = g.call_function(_MUL, (rstd_src, gamma_src))
-            else:
-                scale = rstd_src
-            # W_folded = W * scale.reshape(C_out, 1, 1, 1)
-            scale_w = g.call_function(_RESHAPE, (scale, [-1, 1, 1, 1]))
-            w_folded = g.call_function(_MUL, (conv_w, scale_w))
-
-            # bias_folded = (bias - mean) * scale + beta   (bias optional)
-            if conv_b is not None:
-                bias_centered = g.call_function(_SUB, (conv_b, mean_src))
-            else:
-                bias_centered = g.call_function(_MUL, (mean_src, -1.0))
-            b_scaled = g.call_function(_MUL, (bias_centered, scale))
-            if beta_src is not None:
-                b_folded = g.call_function(_ADD, (b_scaled, beta_src))
-            else:
-                b_folded = b_scaled
-
-            # Emit a replacement conv consuming the folded weight + bias.
-            new_conv_args = list(conv.args)
-            new_conv_args[1] = w_folded
-            if len(new_conv_args) > 2:
-                new_conv_args[2] = b_folded
-            else:
-                new_conv_args.append(b_folded)
-            new_conv = g.call_function(_CONVOLUTION, tuple(new_conv_args))
-
-        # The affine-chain output now equals the new conv output; rewire consumers.
-        affine_tail.replace_all_uses_with(new_conv)
-        g.eliminate_dead_code()
-        folded += 1
-        if c_out is not None:
-            logger.info(
-                "[OPT-2 fold_conv_bn] Folded BatchNorm into conv (C_out=%d) [Aten IR]",
-                c_out,
-            )
-        else:
-            logger.info("[OPT-2 fold_conv_bn] Folded BatchNorm into conv [Aten IR]")
-
-    if folded:
-        g.lint()
-    else:
-        logger.warning(
-            "[OPT-2 fold_conv_bn] No conv->BN affine chain found — pass not applied"
-        )
-    return folded
-
-
-# ---------------------------------------------------------------------------
-# OPT-1 — 1x1 pointwise conv -> reshape + addmm/mm (cuBLAS GEMM). Confidence: high.
-# Runs AFTER OPT-2 (the folded bias is already carried on the conv, so the matmul
-# can absorb it via aten.addmm). Graceful no-op if no qualifying 1x1 conv is present.
-# ---------------------------------------------------------------------------
-def _weight_shape(w: fx.Node):
-    """Resolve a conv weight node's shape. After OPT-2 the weight arg is a folded
-    aten.mul(W, scale) node whose FakeTensor meta is not yet populated, so walk back
-    through the mul/reshape chain to the original weight placeholder (which carries meta).
-    """
-    cur = w
-    for _ in range(6):
-        if getattr(cur, "op", None) is None:
+def _node_shape(node) -> Optional[tuple]:
+    """Best-effort static shape from FX meta['val']; None if unavailable."""
+    try:
+        if not isinstance(node, fx.Node):
             return None
-        meta = cur.meta.get("val", None)
-        if meta is not None:
-            return tuple(meta.shape)
-        # mul(W, scale_reshape): the conv weight is args[0] (4-D), scale is args[1].
-        if cur.op == "call_function" and cur.args:
-            cur = cur.args[0]
-        else:
-            return None
+        val = node.meta.get("val", None)
+        if val is not None and hasattr(val, "shape"):
+            return tuple(val.shape)
+    except Exception:
+        pass
     return None
 
 
-def _conv_is_pointwise_gemm(conv: fx.Node) -> bool:
-    """True iff conv is 1x1, stride 1, no padding, no dilation, groups=1 (pure GEMM)."""
+def _unwrap_cast(node):
+    """Walk back through inserted dtype casts (aten.to.dtype / _to_copy) to the
+    underlying producer/placeholder so OPT-2/OPT-4 can read the real node."""
+    cur = node
+    seen = 0
+    while (
+        isinstance(cur, fx.Node)
+        and cur.op == "call_function"
+        and cur.target in _CAST_TARGETS
+        and seen < 4
+    ):
+        cur = cur.args[0]
+        seen += 1
+    return cur
+
+
+# =========================================================================== #
+# OPT-1 — dtype promotion of the 1x1 pointwise convolutions to bfloat16.
+# Confidence: medium. MUST run first (prerequisite for OPT-2/3/4).
+#
+# aten.convolution(input, weight, bias, stride, padding, dilation,
+#                  transposed, output_padding, groups)
+#   pointwise  := weight.shape[2:] == (1, 1) and groups == 1
+#   depthwise  := groups == C_in (left in fp32 — memory-bound, no GEMM win)
+#
+# Insert bf16 casts on the conv input + weight, run the conv in bf16, cast the
+# output back to fp32 so the surrounding graph (and any unfolded BN) stays fp32.
+# =========================================================================== #
+def _pass_bf16_pointwise_conv(gm: fx.GraphModule) -> fx.GraphModule:
+    """Cast the 1x1 pointwise conv operands to bf16 so Inductor lowers them to an
+    autotuned bf16 tensor-core GEMM (sm_120) instead of the sm_80 s1688 TF32 kernel.
+
+    Medium confidence: graceful no-op if no pointwise conv is present. The output is
+    cast back to fp32 so OPT-2's BN fold (which may not have folded the trailing BN
+    yet) and downstream consumers keep their expected dtype; consecutive bf16 stages
+    are still coalesced by Inductor's dtype propagation."""
     try:
-        wshape = _weight_shape(conv.args[1])
-        if wshape is None or len(wshape) != 4 or tuple(wshape[2:]) != (1, 1):
-            return False
-        # aten.convolution: (x, W, bias, stride, padding, dilation, transposed, output_padding, groups)
-        stride = list(conv.args[3])
-        padding = list(conv.args[4])
-        dilation = list(conv.args[5])
-        transposed = bool(conv.args[6])
-        groups = int(conv.args[8])
-        if transposed or groups != 1:
-            return False
-        if any(s != 1 for s in stride):
-            return False
-        if any(p != 0 for p in padding):
-            return False
-        if any(d != 1 for d in dilation):
-            return False
-        return True
-    except Exception:
-        return False
-
-
-def _pass_pointwise_to_gemm(g: fx.Graph) -> int:
-    """Rewrite each qualifying 1x1 conv into NHWC reshape -> addmm/mm -> reshape NCHW.
-
-    For x:[N,C_in,H,W], W:[C_out,C_in,1,1], bias:[C_out]?:
-        xp  = permute(x, [0,2,3,1])          # NHWC
-        xf  = reshape(xp, [N*H*W, C_in])
-        w2  = reshape(W, [C_out, C_in])
-        wt  = permute(w2, [1, 0])             # [C_in, C_out]
-        mm  = addmm(bias, xf, wt) | mm(xf, wt)
-        op  = reshape(mm, [N, H, W, C_out])
-        out = permute(op, [0,3,1,2])          # back to NCHW
-
-    Static dims (N,H,W) are read from the conv input's FakeTensor meta. When the
-    tensor is already channels_last (OPT-3), the permute/reshape pair is a no-copy view.
-    """
-    rewritten = 0
-    for conv in list(g.nodes):
-        if not _is_conv(conv):
-            continue
-        if not _conv_is_pointwise_gemm(conv):
-            continue
-
-        x = conv.args[0]
-        w = conv.args[1]
-        bias = conv.args[2] if len(conv.args) > 2 else None
-        try:
-            n_, c_in, h_, w_ = (int(s) for s in x.meta["val"].shape)
-            wshape = _weight_shape(w)
-            c_out = int(wshape[0])
-        except Exception:
-            logger.warning(
-                "[OPT-1 pointwise_to_gemm] Missing static shape meta on conv input — skipping"
+        promoted = 0
+        for conv in list(gm.graph.nodes):
+            if not (conv.op == "call_function" and conv.target in _CONV_TARGETS):
+                continue
+            groups = conv.args[8] if len(conv.args) > 8 else 1
+            weight = conv.args[1]
+            wshape = _node_shape(weight)
+            # pointwise: 1x1 spatial kernel AND not grouped (groups == 1).
+            is_pointwise = (
+                groups == 1
+                and wshape is not None
+                and len(wshape) == 4
+                and tuple(wshape[2:]) == (1, 1)
             )
-            continue
+            if not is_pointwise:
+                continue
 
-        with g.inserting_before(conv):
-            xp = g.call_function(_PERMUTE, (x, [0, 2, 3, 1]))
-            xf = g.call_function(_RESHAPE, (xp, [n_ * h_ * w_, c_in]))
-            w2 = g.call_function(_RESHAPE, (w, [c_out, c_in]))
-            # Use aten.permute (not aten.t) — on torch 2.11 post-grad, aten.t.default
-            # collides with an Inductor decomp/fallback assertion.
-            wt = g.call_function(_PERMUTE, (w2, [1, 0]))
-            if bias is not None:
-                mm = g.call_function(_ADDMM, (bias, xf, wt))
-            else:
-                mm = g.call_function(_MM, (xf, wt))
-            outp = g.call_function(_RESHAPE, (mm, [n_, h_, w_, c_out]))
-            out = g.call_function(_PERMUTE, (outp, [0, 3, 1, 2]))
+            x_in = conv.args[0]
+            with gm.graph.inserting_before(conv):
+                x_bf16 = gm.graph.call_function(_TO_DTYPE, (x_in, torch.bfloat16))
+                w_bf16 = gm.graph.call_function(_TO_DTYPE, (weight, torch.bfloat16))
+            conv.update_arg(0, x_bf16)
+            conv.update_arg(1, w_bf16)
 
-        conv.replace_all_uses_with(out)
-        g.eliminate_dead_code()
-        rewritten += 1
-        logger.info(
-            "[OPT-1 pointwise_to_gemm] 1x1 conv -> addmm GEMM "
-            "(M=%d, K=%d, N=%d) [Aten IR]",
-            n_ * h_ * w_,
-            c_in,
-            c_out,
-        )
+            with gm.graph.inserting_after(conv):
+                back = gm.graph.call_function(_TO_DTYPE, (conv, torch.float32))
+            conv.replace_all_uses_with(back)
+            # replace_all_uses_with rewired the new cast's own input too; restore it.
+            back.update_arg(0, conv)
+            promoted += 1
+            logger.info(
+                "[OPT-1 bf16_pointwise] Promoted 1x1 pointwise conv to bf16 "
+                "(Cout=%s) [Aten IR]",
+                wshape[0] if wshape else "?",
+            )
 
-    if rewritten:
-        g.lint()
-    else:
-        logger.warning(
-            "[OPT-1 pointwise_to_gemm] No qualifying 1x1 conv found — pass not applied"
-        )
-    return rewritten
-
-
-# ---------------------------------------------------------------------------
-# OPT-3 — channels_last propagation: strip redundant layout-copy nodes.
-# Confidence: medium. Primary lever is the eager-side conversion in
-# get_model_and_input(); this pass removes graph-level NCHW<->NHWC copies that are
-# already no-ops once producer/consumer agree on layout. Runs after OPT-2.
-# ---------------------------------------------------------------------------
-def _pass_strip_layout_copies(g: fx.Graph) -> int:
-    """Erase aten.clone / aten._to_copy(memory_format=channels_last) whose input is
-    already channels_last contiguous, so Inductor does not emit a standalone
-    layout-copy Triton kernel (triton_poi_fused_convolution_0)."""
-    stripped = 0
-    for node in list(g.nodes):
-        if not (node.op == "call_function" and node.target in (_CLONE, _TO_COPY)):
-            continue
-        if node.kwargs.get("memory_format", None) is not torch.channels_last:
-            continue
-        src = node.args[0]
-        try:
-            meta = src.meta["val"]
-            if meta.is_contiguous(memory_format=torch.channels_last):
-                node.replace_all_uses_with(src)
-                stripped += 1
-        except Exception:
-            continue
-
-    if stripped:
-        g.eliminate_dead_code()
-        g.lint()
-        logger.info(
-            "[OPT-3 strip_layout_copies] Removed %d redundant channels_last copy node(s) "
-            "[Aten IR]",
-            stripped,
-        )
-    else:
-        logger.info(
-            "[OPT-3 strip_layout_copies] No redundant channels_last copy nodes — "
-            "layout handled eager-side in get_model_and_input()"
-        )
-    return stripped
-
-
-# ---------------------------------------------------------------------------
-# Aten-IR pass chain, installed as Inductor's post_grad_custom_pre_pass. Runs on
-# the decomposed, functionalized Aten graph just before lowering. Apply order
-# respects the DAG OPT-2 -> {OPT-1, OPT-3} from optimizations.json:
-# OPT-2 (BN fold) first so the folded bias is available to OPT-1's addmm and the
-# graph is simplified for OPT-3; OPT-1 (1x1 -> GEMM) next; OPT-3 (layout) last.
-# ---------------------------------------------------------------------------
-def _repropagate_meta(g: fx.Graph) -> None:
-    """Re-run FakeTensorProp so the nodes inserted by OPT-2/OPT-1 acquire ``meta['val']``.
-
-    Downstream Inductor post-grad passes (e.g. should_prefer_unfused_addmm) read
-    ``node.meta['val'].device`` on the new addmm/fold nodes; without re-propagation
-    those reads raise KeyError. The fake mode and fake placeholder inputs are recovered
-    from the existing placeholder meta, so this stays inside the active FakeTensorMode.
-    """
-    gm = g.owning_module
-    if gm is None:
-        return
-    placeholders = [n for n in g.nodes if n.op == "placeholder"]
-    fake_inputs = []
-    fake_mode = None
-    for ph in placeholders:
-        val = ph.meta.get("val", None)
-        if val is None:
-            return  # cannot reconstruct inputs — skip (graph already had full meta)
-        fake_inputs.append(val)
-        fm = getattr(val, "fake_mode", None)
-        if fm is not None:
-            fake_mode = fm
-
-    from torch.fx.passes.fake_tensor_prop import FakeTensorProp
-
-    if fake_mode is not None:
-        with fake_mode:
-            FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(*fake_inputs)
-    else:
-        FakeTensorProp(gm).propagate_dont_convert_inputs(*fake_inputs)
-
-
-def _aten_pass_chain(g: fx.Graph) -> fx.Graph:
-    try:
-        folded = _pass_fold_conv_bn(g)          # OPT-2 (high) — MUST run first
-        rewritten = _pass_pointwise_to_gemm(g)  # OPT-1 (high) — consumes folded bias
-        _pass_strip_layout_copies(g)            # OPT-3 (medium) — layout on simplified graph
-        if folded or rewritten:
-            # New nodes need meta['val'] for downstream Inductor post-grad passes.
-            _repropagate_meta(g)
+        if promoted:
+            gm.graph.lint()
+            gm.recompile()
+            logger.info(
+                "[OPT-1 bf16_pointwise] Applied — promoted %d pointwise conv(s) to bf16",
+                promoted,
+            )
+        else:
+            logger.warning(
+                "[OPT-1 bf16_pointwise] No 1x1 pointwise (groups==1) conv found "
+                "— pass not applied"
+            )
     except Exception as e:  # never crash the compile
-        logger.warning("[depthwise_separable_conv_opt] Aten pass chain failed: %s", e)
-    return g
+        logger.warning("[OPT-1 bf16_pointwise] Failed: %s", e)
+    return gm
 
 
-def _install_aten_passes() -> None:
-    """Register the Aten-IR pass chain as Inductor's post-grad pre-pass."""
-    inductor_config.post_grad_custom_pre_pass = _aten_pass_chain
+# =========================================================================== #
+# OPT-2 — Conv-BatchNorm folding (inference). Confidence: high.
+# Prerequisite for OPT-4. Runs AFTER OPT-1 so folded buffers inherit the bf16
+# runtime dtype of the (already-cast) pointwise convs.
+#
+# aten._native_batch_norm_legit_no_training(input, weight(gamma), bias(beta),
+#                                           running_mean, running_var, momentum, eps)
+#   -> returns (output, save_mean, save_rstd); only getitem(node, 0) is live.
+# =========================================================================== #
+def _pass_fold_conv_bn(gm: fx.GraphModule, fw_example_inputs: list) -> fx.GraphModule:
+    """Fold an inference-mode BatchNorm into the preceding convolution.
+
+    Reads REAL parameter tensors (gamma/beta/running_mean/running_var, conv weight/bias)
+    from ``fw_example_inputs`` (the threaded ``real_inputs`` under Strategy D, so the
+    values are genuine, not FakeTensors). The conv weight arg may be an OPT-1 bf16 cast
+    node and the BN input may be the OPT-1 fp32-cast of the conv output; both are
+    unwrapped to reach the real placeholder / conv. Computes the numerically-exact
+    inference fold:
+
+        scale      = gamma / sqrt(running_var + eps)
+        new_weight = conv_weight * scale[:, None, None, None]
+        new_bias   = (conv_bias - running_mean) * scale + beta   (conv_bias=0 here)
+
+    Folded buffers are registered at the conv's runtime dtype: bf16 for OPT-1-promoted
+    pointwise convs, fp32 for depthwise convs. A fresh biased conv replaces
+    ``getitem(bn, 0)``; the BN node is eliminated.
+
+    High confidence: assume the pattern exists; a genuine error logs a warning and
+    returns the graph unchanged."""
+    try:
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+
+        folded = 0
+        for bn_node in list(gm.graph.nodes):
+            if not (bn_node.op == "call_function" and bn_node.target is _BN_NO_TRAIN):
+                continue
+
+            # The BN input may be the OPT-1 fp32 re-cast of the conv output; unwrap it.
+            conv_node = _unwrap_cast(bn_node.args[0])
+            if not (
+                isinstance(conv_node, fx.Node)
+                and conv_node.op == "call_function"
+                and conv_node.target in _CONV_TARGETS
+            ):
+                continue
+            # Conv output must feed only this BN (possibly via the single fp32 cast).
+            consumer = bn_node.args[0]
+            cast_in_between = (
+                isinstance(consumer, fx.Node)
+                and consumer.op == "call_function"
+                and consumer.target in _CAST_TARGETS
+            )
+            chain_tail = consumer if cast_in_between else conv_node
+            if len(conv_node.users) != 1:
+                continue
+            if cast_in_between and len(consumer.users) != 1:
+                continue
+
+            gamma = ph_to_tensor.get(bn_node.args[1])
+            beta = ph_to_tensor.get(bn_node.args[2])
+            run_mean = ph_to_tensor.get(bn_node.args[3])
+            run_var = ph_to_tensor.get(bn_node.args[4])
+            eps = bn_node.args[6] if len(bn_node.args) > 6 else 1e-5
+            if any(t is None for t in (gamma, beta, run_mean, run_var)):
+                logger.warning(
+                    "[OPT-2 fold_conv_bn] BN params not resolvable from real_inputs "
+                    "— skipping this BN"
+                )
+                continue
+
+            # Conv weight may be an OPT-1 bf16 cast node; recover the placeholder value.
+            weight_arg = conv_node.args[1]
+            weight_ph = _unwrap_cast(weight_arg)
+            conv_weight = ph_to_tensor.get(weight_ph)
+            conv_bias_node = conv_node.args[2] if len(conv_node.args) > 2 else None
+            conv_bias = (
+                ph_to_tensor.get(_unwrap_cast(conv_bias_node))
+                if isinstance(conv_bias_node, fx.Node)
+                else None
+            )
+            if conv_weight is None:
+                logger.warning(
+                    "[OPT-2 fold_conv_bn] Conv weight not resolvable — skipping"
+                )
+                continue
+
+            # Compute the fold in fp32 for accuracy, then match the conv runtime dtype.
+            cw32 = conv_weight.float()
+            scale = gamma.float() / torch.sqrt(run_var.float() + eps)
+            new_weight = cw32 * scale.reshape(-1, 1, 1, 1)
+            if conv_bias is not None:
+                new_bias = (conv_bias.float() - run_mean.float()) * scale + beta.float()
+            else:
+                new_bias = beta.float() - run_mean.float() * scale
+
+            # Runtime dtype: bf16 if the conv operands were cast by OPT-1, else fp32.
+            ran_bf16 = (
+                isinstance(weight_arg, fx.Node)
+                and weight_arg.op == "call_function"
+                and weight_arg.target in _CAST_TARGETS
+            )
+            runtime_dtype = torch.bfloat16 if ran_bf16 else torch.float32
+            new_weight = new_weight.to(runtime_dtype)
+            new_bias = new_bias.to(runtime_dtype)
+
+            c_out = int(new_weight.shape[0])
+            wname = f"_folded_conv_weight_{folded}"
+            bname = f"_folded_conv_bias_{folded}"
+            gm.register_buffer(wname, new_weight)
+            gm.register_buffer(bname, new_bias)
+
+            # Fresh biased conv reusing the original conv input + spatial args. When the
+            # conv ran bf16 (OPT-1) its input is already the bf16-cast activation node, so
+            # the folded bf16 weight/bias match.
+            new_conv_args = list(conv_node.args)
+            with gm.graph.inserting_before(bn_node):
+                fw = gm.graph.get_attr(wname)
+                fb = gm.graph.get_attr(bname)
+                new_conv_args[1] = fw
+                new_conv_args[2] = fb
+                new_conv = gm.graph.call_function(_CONV, tuple(new_conv_args))
+                # Cast the folded output back to fp32 if the conv ran bf16, so the BN
+                # consumers' dtype contract is preserved.
+                conv_out = new_conv
+                if ran_bf16:
+                    conv_out = gm.graph.call_function(
+                        _TO_DTYPE, (new_conv, torch.float32)
+                    )
+
+            # BN returns a tuple; redirect the live getitem(bn, 0) consumers.
+            for user in list(bn_node.users):
+                if (
+                    user.op == "call_function"
+                    and user.target is operator.getitem
+                    and user.args[1] == 0
+                ):
+                    user.replace_all_uses_with(conv_out)
+                    gm.graph.erase_node(user)
+            if not bn_node.users:
+                gm.graph.erase_node(bn_node)
+            # Drop the now-dead intermediate fp32 cast (and old conv) if unused.
+            if cast_in_between and not chain_tail.users:
+                gm.graph.erase_node(chain_tail)
+            if not conv_node.users:
+                gm.graph.erase_node(conv_node)
+
+            folded += 1
+            logger.info(
+                "[OPT-2 fold_conv_bn] Folded BatchNorm into conv (C_out=%d, dtype=%s) "
+                "[Aten IR]",
+                c_out,
+                runtime_dtype,
+            )
+
+        if folded:
+            gm.graph.eliminate_dead_code()
+            gm.graph.lint()
+            gm.recompile()
+            logger.info("[OPT-2 fold_conv_bn] Applied — folded %d conv+BN pair(s)", folded)
+        else:
+            logger.warning(
+                "[OPT-2 fold_conv_bn] No conv->_native_batch_norm_legit_no_training "
+                "pair found — pass not applied"
+            )
+    except Exception as e:  # never crash the compile
+        logger.warning("[OPT-2 fold_conv_bn] Failed: %s", e)
+    return gm
+
+
+# =========================================================================== #
+# OPT-3 — channels_last propagation: strip redundant layout-copy nodes.
+# Confidence: medium. Primary (non-graph) lever is the eager-side conversion in
+# get_model_and_input(); this pass removes graph-level NCHW<->NHWC copies that are
+# already no-ops once producer/consumer agree on layout. Runs AFTER OPT-1/OPT-2 so the
+# folded/bf16 conv nodes are the ones whose layout is re-evaluated (DAG order).
+# =========================================================================== #
+def _pass_strip_layout_copies(gm: fx.GraphModule) -> fx.GraphModule:
+    """Erase ``aten.clone`` / ``aten._to_copy(memory_format=channels_last)`` whose input
+    is already channels_last contiguous. Medium confidence: graceful no-op if no such
+    redundant copy is present (the eager-side conversion already aligned layouts)."""
+    try:
+        stripped = 0
+        for node in list(gm.graph.nodes):
+            if not (node.op == "call_function" and node.target in (_CLONE, _TO_COPY)):
+                continue
+            if node.kwargs.get("memory_format", None) is not torch.channels_last:
+                continue
+            src = node.args[0]
+            try:
+                meta = src.meta["val"]
+                if meta.is_contiguous(memory_format=torch.channels_last):
+                    node.replace_all_uses_with(src)
+                    stripped += 1
+            except Exception:
+                continue
+
+        if stripped:
+            gm.graph.eliminate_dead_code()
+            gm.graph.lint()
+            gm.recompile()
+            logger.info(
+                "[OPT-3 strip_layout_copies] Removed %d redundant channels_last copy "
+                "node(s) [Aten IR]",
+                stripped,
+            )
+        else:
+            logger.info(
+                "[OPT-3 strip_layout_copies] No redundant channels_last copy nodes — "
+                "layout handled eager-side in get_model_and_input()"
+            )
+    except Exception as e:
+        logger.warning("[OPT-3 strip_layout_copies] Failed: %s", e)
+    return gm
+
+
+# =========================================================================== #
+# OPT-4 — Depthwise ReLU6 (hardtanh) epilogue fusion. Confidence: medium.
+# MUST run AFTER OPT-2 (the clamp can only fuse into the conv once BN is folded out).
+#
+# The PRIMARY lever is config-level (max_autotune + max_autotune_conv_backends=
+# 'TRITON,ATEN', set at module load) so the scheduler lowers the depthwise conv to a
+# Triton template and fuses the clamp(0,6) epilogue. This graph pass DETECTS the
+# (depthwise conv -> hardtanh) pairs and tags the conv node meta so the contract is
+# asserted/logged for the Inductor debug dir (no node surgery needed for fusion).
+# =========================================================================== #
+def _pass_mark_depthwise_relu6_fusion(gm: fx.GraphModule) -> fx.GraphModule:
+    """Detect (depthwise aten.convolution -> aten.hardtanh) pairs and tag the conv for
+    Triton-template lowering so the ReLU6 (and OPT-2-folded bias) epilogue fuses into the
+    conv kernel. After OPT-2 the hardtanh is the conv's direct consumer; before OPT-2 a
+    BN node sits between them and fusion is blocked (hence the OPT-2 -> OPT-4 ordering).
+
+    Detection only — never mutates op semantics; medium confidence, graceful no-op."""
+    try:
+        marked = 0
+        for ht in list(gm.graph.nodes):
+            if not (ht.op == "call_function" and ht.target is _HARDTANH):
+                continue
+            # The hardtanh input may be a dtype cast (OPT-1 bf16 round-trip).
+            conv = _unwrap_cast(ht.args[0])
+            if not (
+                isinstance(conv, fx.Node)
+                and conv.op == "call_function"
+                and conv.target in _CONV_TARGETS
+            ):
+                continue
+            groups = conv.args[8] if len(conv.args) > 8 else 1
+            wshape = _node_shape(conv.args[1])
+            # depthwise: groups > 1 and weight is [C,1,k,k] (out channels == groups).
+            is_depthwise = (
+                isinstance(groups, int)
+                and groups > 1
+                and wshape is not None
+                and len(wshape) == 4
+                and int(wshape[0]) == groups
+            )
+            if not is_depthwise:
+                continue
+            conv.meta["fuse_relu6_epilogue"] = True
+            marked += 1
+            logger.info(
+                "[OPT-4 depthwise_relu6_fuse] Tagged depthwise conv (C=%s) -> ReLU6 for "
+                "Triton epilogue fusion [Aten IR]",
+                groups,
+            )
+
+        if marked:
+            logger.info(
+                "[OPT-4 depthwise_relu6_fuse] Applied — %d depthwise->ReLU6 pair(s) "
+                "tagged; Triton conv epilogue fusion via max_autotune_conv_backends",
+                marked,
+            )
+        else:
+            logger.warning(
+                "[OPT-4 depthwise_relu6_fuse] No depthwise conv -> hardtanh pair found "
+                "(BN may not be folded, or layout differs) — pass not applied"
+            )
+    except Exception as e:
+        logger.warning("[OPT-4 depthwise_relu6_fuse] Failed: %s", e)
+    return gm
+
+
+# =========================================================================== #
+# Strategy D — install the Aten-IR pass chain via compile_fx's inner_compile hook.
+# Order respects the DAG: OPT-1, OPT-2, OPT-3, OPT-4.
+# =========================================================================== #
+def _aten_inner_compile(
+    gm: fx.GraphModule, example_inputs, *, real_inputs=None, **kwargs
+) -> Callable:
+    """Inductor ``inner_compile`` hook. ``compile_fx`` calls this with the fully
+    decomposed Aten IR graph (after AOTAutograd). Run the Aten-IR passes here, then
+    delegate to the real ``compile_fx_inner`` (Aten -> Triton).
+
+    ``example_inputs`` may be FakeTensors; the weight-VALUE-reading OPT-2 fold uses the
+    genuine ``real_inputs`` threaded from the backend for the ph_to_tensor lookup. All
+    ``**kwargs`` are forwarded verbatim to stay forward-compatible.
+    """
+    weight_source = real_inputs if real_inputs is not None else example_inputs
+    gm = _pass_bf16_pointwise_conv(gm)              # OPT-1 (medium) — must run first
+    gm = _pass_fold_conv_bn(gm, weight_source)      # OPT-2 (high)   — prereq for OPT-4
+    gm = _pass_strip_layout_copies(gm)              # OPT-3 (medium) — re-eval layout
+    gm = _pass_mark_depthwise_relu6_fusion(gm)      # OPT-4 (medium) — after OPT-2
+    return compile_fx_inner(gm, example_inputs, **kwargs)
+
+
+def _compile_with_aten_passes(gm: fx.GraphModule, example_inputs) -> Callable:
+    """Compile a (sub)graph through Inductor with the Aten-IR passes installed via
+    ``inner_compile``. ``compile_fx`` owns AOTAutograd, the decomp table, the boxed
+    calling convention, and the partitioner — we only swap the leaf compiler. Scoped
+    per call (no process-global state)."""
+    inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
+    return compile_fx(gm, example_inputs, inner_compile=inner)
 
 
 def _capture_partition_inputs(split_gm: fx.GraphModule, example_inputs: list) -> dict:
@@ -479,34 +553,35 @@ def _capture_partition_inputs(split_gm: fx.GraphModule, example_inputs: list) ->
 
 
 @register_backend
-def depthwise_separable_conv_opt(gm: fx.GraphModule, example_inputs) -> Callable:
+def depthwise_sep_conv_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     """Custom torch.compile backend for DepthwiseSepConv.
 
-    Installs the Aten-IR pass chain (OPT-2 -> OPT-1 -> OPT-3) via Inductor's
-    post_grad_custom_pre_pass, then delegates AOTAutograd + lowering to compile_fx.
-    Dedup-aware per Rule 9: the three DWSepBlocks have different channel widths, so
-    they are NOT structural duplicates — the flat compile path is taken (preserving
-    cross-block Inductor fusion). The dedup branch is retained for models with
-    repeated identical blocks.
-    """
-    logger.info("depthwise_separable_conv_opt backend: starting")
-    _install_aten_passes()
+    Installs the Aten-IR pass chain (OPT-1 bf16_pointwise, OPT-2 fold_conv_bn,
+    OPT-3 strip_layout_copies, OPT-4 mark_depthwise_relu6_fusion) via ``compile_fx``'s
+    ``inner_compile`` hook, then delegates AOTAutograd + lowering to ``compile_fx``.
+    OPT-3's primary (non-graph) lever is the channels_last conversion in
+    get_model_and_input() (Rule 7).
 
+    Dedup-aware per Rule 9: the three DWSepBlocks have DISTINCT channel counts
+    (32->64, 64->128, 128->256), so there are no structurally repeated layers and the
+    flat compile path is taken (preserving cross-block Inductor fusion). The dedup
+    branch is retained for structural reuse if the model grows to repeated blocks.
+    """
+    logger.info("depthwise_sep_conv_opt backend: starting")
     registry = UniqueSubgraphRegistry(gm)
     equiv_map = registry.build_partition_equivalence_map()
 
     if not equiv_map:
-        logger.info("depthwise_separable_conv_opt: no repeated layers, flat compile path")
-        return compile_fx(gm, example_inputs)
+        logger.info("depthwise_sep_conv_opt: no repeated layers, flat compile path")
+        return _compile_with_aten_passes(gm, example_inputs)
 
     logger.info(
-        "depthwise_separable_conv_opt: %d duplicate partition(s), dedup path",
-        len(equiv_map),
+        "depthwise_sep_conv_opt: %d duplicate partition(s), dedup path", len(equiv_map)
     )
     partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
     for rep_name, rep_mod in registry.unique_reps:
         inputs = partition_inputs.get(rep_name, example_inputs)
-        compiled = compile_fx(rep_mod, inputs)
+        compiled = _compile_with_aten_passes(rep_mod, inputs)
         rep_mod.forward = compiled
         for _, dup_mod in registry.duplicates_of(rep_name):
             dup_mod.forward = compiled
@@ -514,13 +589,16 @@ def depthwise_separable_conv_opt(gm: fx.GraphModule, example_inputs) -> Callable
     return lambda *args: registry.split(*args)
 
 
-# ---------------------------------------------------------------------------
-# Workload interface. OPT-3's non-graph lever lives here: the model and input are
-# converted to channels_last (NHWC) once, so every conv consumes its producer's
-# output directly and Inductor does not re-insert per-conv NCHW<->NHWC copies. The
-# model is returned in FP32 (matches profile dtype); all other optimizations are
-# graph-level passes installed by the backend.
-# ---------------------------------------------------------------------------
+# =========================================================================== #
+# Workload interface — non-graph optimizations live here (Rule 7).
+#   OPT-3 (channels_last): model + input cast to torch.channels_last so the conv/GEMM
+#          kernels run native NHWC and Inductor drops the per-block permute kernels.
+#          This is the PRIMARY lever for OPT-3; the graph pass only cleans up residual
+#          copies. Idempotent — checked before converting (Rule 7).
+# OPT-1 (bf16 pointwise), OPT-2 (conv-BN fold), OPT-4 (depthwise ReLU6 epilogue) are
+# realized as Aten-IR graph passes at compile time, NOT here; leaving the model in fp32
+# with the BN intact lets the passes demonstrably transform the graph.
+# =========================================================================== #
 DEVICE = "cuda"
 BATCH_SIZE = 16
 IN_CHANNELS = 32
@@ -529,10 +607,12 @@ WIDTH = 56
 
 
 def get_model_and_input() -> tuple:
-    """Return (raw_model, input_tensor) on CUDA — uncompiled, unwarmed.
+    """Return (model, input_tensor) on CUDA — uncompiled, unwarmed.
 
-    Applies OPT-3's non-graph half: channels_last for both the model weights and
-    the input (idempotent — checked before converting per Rule 7).
+    Applies OPT-3's non-graph half: channels_last for both the model weights and the
+    input (idempotent — checked before converting per Rule 7). OPT-1 (bf16 pointwise),
+    OPT-2 (conv-BN fold) and OPT-4 (depthwise ReLU6 epilogue) run inside the
+    depthwise_sep_conv_opt backend at compile time.
     """
     assert torch.cuda.is_available(), "CUDA required"
     from depthwise_separable_conv import DepthwiseSepConv
@@ -543,15 +623,17 @@ def get_model_and_input() -> tuple:
     # OPT-3 (channels_last propagation) — eager-side, only if not already NHWC.
     if not next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
         model = model.to(memory_format=torch.channels_last)
+        logger.info("[OPT-3 channels_last] Model cast to channels_last (NHWC)")
     if not x.is_contiguous(memory_format=torch.channels_last):
         x = x.to(memory_format=torch.channels_last)
+        logger.info("[OPT-3 channels_last] Input cast to channels_last (NHWC)")
 
     return model, x
 
 
 if __name__ == "__main__":
     model, x = get_model_and_input()
-    compiled = torch.compile(model, backend="depthwise_separable_conv_opt")
+    compiled = torch.compile(model, backend="depthwise_sep_conv_opt")
     with torch.no_grad():
         out = compiled(x)
     print("output shape:", out.shape, "dtype:", out.dtype)

@@ -1,42 +1,42 @@
 {
   "schema_version": "1.0",
   "capture_metadata": {
-    "model_name": "depthwise_separable_conv_optimized",
+    "model_name": "DepthwiseSepConv",
     "torch_version": "2.11.0+cu128",
     "cuda_version": null,
-    "compile_mode": "depthwise_separable_conv_opt",
+    "compile_mode": "depthwise_sep_conv_opt",
     "nsys_report_path": "/home/ubuntu/Profiler/examples/depthwise_separable_conv/profiler_output/depthwise_separable_conv_optimized.nsys-rep",
     "ncu_report_path": "/home/ubuntu/Profiler/examples/depthwise_separable_conv/profiler_output/ncu_reps",
-    "capture_timestamp_utc": "2026-05-29T02:12:04.444505+00:00",
+    "capture_timestamp_utc": "2026-05-29T22:32:40.133755+00:00",
     "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
   },
   "operators": [
     {
-      "operator_id": "aten::cudnn_convolution, op_id = 6, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::cudnn_convolution, op_id = 6, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "operator_id": "aten::cudnn_convolution, op_id = 5, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::cudnn_convolution, op_id = 5, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
       "call_index": 0,
       "is_fused": true,
       "fused_with": [
-        "aten::_convolution, op_id = 5, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "aten::convolution, op_id = 4, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+        "aten::_convolution, op_id = 4, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::convolution, op_id = 3, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
       ],
       "nvtx_range": {
-        "text": "aten::cudnn_convolution, op_id = 6, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "text": "aten::cudnn_convolution, op_id = 5, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
         "depth": 0,
-        "start_ns": 4878989902,
-        "end_ns": 4879017293,
+        "start_ns": 4067551396,
+        "end_ns": 4067581738,
         "domain": "default"
       },
       "kernels": [
         {
-          "kernel_id": "k_00057",
+          "kernel_id": "k_00065",
           "kernel_name": "conv2d_c1_k1_nhwc",
           "demangled_name": null,
           "stream_id": 7,
           "device_id": 0,
-          "start_ns": 4879013662,
-          "end_ns": 4879019326,
-          "duration_ns": 5664,
+          "start_ns": 4067581244,
+          "end_ns": 4067592412,
+          "duration_ns": 11168,
           "grid_dim": [
             1568,
             1,
@@ -51,634 +51,55 @@
             "raw": {
               "dram__bytes_op_read.sum": 6.43,
               "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 44.18,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 45.39,
               "fbpa__dram_read_bytes.sum": 6.43,
               "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 45.88,
-              "gpu__time_duration.sum": 9.18,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 85.96,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 35.28,
-              "launch__registers_per_thread": 40,
-              "launch__shared_mem_per_block_dynamic": 0,
-              "lts__t_request_hit_rate.pct": 36.85,
-              "lts__t_sector_hit_rate.pct": 38.55,
-              "sm__cycles_active.sum": 2133508,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 23.9,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 78.88,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.34,
-              "smsp__inst_executed.sum": 3013504,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 34.35,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
-            }
-          },
-          "attribution_method": "nvtx",
-          "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::cudnn_convolution, op_id = 6, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-            "depth": 0,
-            "start_ns": 4878989902,
-            "end_ns": 4879017293,
-            "domain": "default"
-          }
-        }
-      ],
-      "aggregated": {
-        "total_duration_ns": 5664,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00057",
-        "total_dram_bytes_read": 6,
-        "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 45.88,
-        "dram_throughput_pct": 44.18,
-        "mem_busy_pct": 35.28,
-        "l1_hit_rate": 85.96,
-        "l2_hit_rate": 36.85,
-        "sm_throughput_pct": 23.900000000000002,
-        "tensor_core_active_pct": 0.0,
-        "achieved_occupancy": 78.88,
-        "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 34.35,
-        "total_executed_instructions": 3013504,
-        "total_issued_instructions": 0,
-        "ipc_active": 0.34,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 40.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 0.0
-      }
-    },
-    {
-      "operator_id": "aten::mm, op_id = 9, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::mm, op_id = 9, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (0,-1)]",
-      "call_index": 0,
-      "is_fused": false,
-      "fused_with": [],
-      "nvtx_range": {
-        "text": "aten::mm, op_id = 9, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (0,-1)]",
-        "depth": 0,
-        "start_ns": 4879102954,
-        "end_ns": 4879132125,
-        "domain": "default"
-      },
-      "kernels": [
-        {
-          "kernel_id": "k_00060",
-          "kernel_name": "Kernel2",
-          "demangled_name": null,
-          "stream_id": 7,
-          "device_id": 0,
-          "start_ns": 4879131069,
-          "end_ns": 4879141661,
-          "duration_ns": 10592,
-          "grid_dim": [
-            784,
-            1,
-            1
-          ],
-          "block_dim": [
-            128,
-            1,
-            1
-          ],
-          "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 6.45,
-              "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 31.05,
-              "fbpa__dram_read_bytes.sum": 6.45,
-              "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 31.36,
-              "gpu__time_duration.sum": 13.06,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 0,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 26.56,
-              "launch__registers_per_thread": 88,
-              "launch__shared_mem_per_block_dynamic": 49.15,
-              "lts__t_request_hit_rate.pct": 49.21,
-              "lts__t_sector_hit_rate.pct": 34.21,
-              "sm__cycles_active.sum": 3188687,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 14.23,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 15.42,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.18,
-              "smsp__inst_executed.sum": 2320640,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 17.81,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 12.32
-            }
-          },
-          "attribution_method": "nvtx",
-          "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::mm, op_id = 9, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (0,-1)]",
-            "depth": 0,
-            "start_ns": 4879102954,
-            "end_ns": 4879132125,
-            "domain": "default"
-          }
-        }
-      ],
-      "aggregated": {
-        "total_duration_ns": 10592,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00060",
-        "total_dram_bytes_read": 6,
-        "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 31.36,
-        "dram_throughput_pct": 31.050000000000004,
-        "mem_busy_pct": 26.559999999999995,
-        "l1_hit_rate": 0.0,
-        "l2_hit_rate": 49.21,
-        "sm_throughput_pct": 14.23,
-        "tensor_core_active_pct": 12.32,
-        "achieved_occupancy": 15.419999999999998,
-        "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 17.81,
-        "total_executed_instructions": 2320640,
-        "total_issued_instructions": 0,
-        "ipc_active": 0.18,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 88.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 49.15
-      }
-    },
-    {
-      "operator_id": "aten::cudnn_convolution, op_id = 14, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::cudnn_convolution, op_id = 14, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-      "call_index": 0,
-      "is_fused": true,
-      "fused_with": [
-        "aten::_convolution, op_id = 13, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "aten::convolution, op_id = 12, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
-      ],
-      "nvtx_range": {
-        "text": "aten::cudnn_convolution, op_id = 14, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "depth": 0,
-        "start_ns": 4879230956,
-        "end_ns": 4879252676,
-        "domain": "default"
-      },
-      "kernels": [
-        {
-          "kernel_id": "k_00063",
-          "kernel_name": "conv2d_c1_k1_nhwc",
-          "demangled_name": null,
-          "stream_id": 7,
-          "device_id": 0,
-          "start_ns": 4879250556,
-          "end_ns": 4879259196,
-          "duration_ns": 8640,
-          "grid_dim": [
-            3136,
-            1,
-            1
-          ],
-          "block_dim": [
-            256,
-            1,
-            1
-          ],
-          "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 12.86,
-              "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 57.38,
-              "fbpa__dram_read_bytes.sum": 12.86,
-              "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 59.93,
-              "gpu__time_duration.sum": 14.11,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 85.07,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 39.41,
-              "launch__registers_per_thread": 40,
-              "launch__shared_mem_per_block_dynamic": 0,
-              "lts__t_request_hit_rate.pct": 41.04,
-              "lts__t_sector_hit_rate.pct": 41.8,
-              "sm__cycles_active.sum": 3819724,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 31.26,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 80.91,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.4,
-              "smsp__inst_executed.sum": 6027008,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 40.01,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
-            }
-          },
-          "attribution_method": "nvtx",
-          "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::cudnn_convolution, op_id = 14, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (9,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-            "depth": 0,
-            "start_ns": 4879230956,
-            "end_ns": 4879252676,
-            "domain": "default"
-          }
-        }
-      ],
-      "aggregated": {
-        "total_duration_ns": 8640,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00063",
-        "total_dram_bytes_read": 12,
-        "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 59.93,
-        "dram_throughput_pct": 57.38,
-        "mem_busy_pct": 39.41,
-        "l1_hit_rate": 85.07,
-        "l2_hit_rate": 41.04,
-        "sm_throughput_pct": 31.26,
-        "tensor_core_active_pct": 0.0,
-        "achieved_occupancy": 80.91,
-        "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 40.01,
-        "total_executed_instructions": 6027008,
-        "total_issued_instructions": 0,
-        "ipc_active": 0.4,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 40.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 0.0
-      }
-    },
-    {
-      "operator_id": "aten::mm, op_id = 17, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::mm, op_id = 17, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (0,-1)]",
-      "call_index": 0,
-      "is_fused": false,
-      "fused_with": [],
-      "nvtx_range": {
-        "text": "aten::mm, op_id = 17, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (0,-1)]",
-        "depth": 0,
-        "start_ns": 4879312757,
-        "end_ns": 4879328748,
-        "domain": "default"
-      },
-      "kernels": [
-        {
-          "kernel_id": "k_00066",
-          "kernel_name": "Kernel2",
-          "demangled_name": null,
-          "stream_id": 7,
-          "device_id": 0,
-          "start_ns": 4879329212,
-          "end_ns": 4879348892,
-          "duration_ns": 19680,
-          "grid_dim": [
-            1568,
-            1,
-            1
-          ],
-          "block_dim": [
-            128,
-            1,
-            1
-          ],
-          "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 12.9,
-              "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 37.1,
-              "fbpa__dram_read_bytes.sum": 12.9,
-              "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 37.87,
-              "gpu__time_duration.sum": 21.82,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 0,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 34.07,
-              "launch__registers_per_thread": 88,
-              "launch__shared_mem_per_block_dynamic": 49.15,
-              "lts__t_request_hit_rate.pct": 69.59,
-              "lts__t_sector_hit_rate.pct": 54.03,
-              "sm__cycles_active.sum": 6184644,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 22.42,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 15.62,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.24,
-              "smsp__inst_executed.sum": 5908224,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 23.91,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 25.99
-            }
-          },
-          "attribution_method": "nvtx",
-          "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::mm, op_id = 17, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (0,-1)]",
-            "depth": 0,
-            "start_ns": 4879312757,
-            "end_ns": 4879328748,
-            "domain": "default"
-          }
-        }
-      ],
-      "aggregated": {
-        "total_duration_ns": 19680,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00066",
-        "total_dram_bytes_read": 12,
-        "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 37.87,
-        "dram_throughput_pct": 37.1,
-        "mem_busy_pct": 34.07,
-        "l1_hit_rate": 0.0,
-        "l2_hit_rate": 69.59,
-        "sm_throughput_pct": 22.42,
-        "tensor_core_active_pct": 25.99,
-        "achieved_occupancy": 15.62,
-        "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 23.91,
-        "total_executed_instructions": 5908224,
-        "total_issued_instructions": 0,
-        "ipc_active": 0.24,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 88.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 49.15
-      }
-    },
-    {
-      "operator_id": "aten::cudnn_convolution, op_id = 22, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(9,0), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::cudnn_convolution, op_id = 22, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(9,0), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-      "call_index": 0,
-      "is_fused": true,
-      "fused_with": [
-        "aten::_convolution, op_id = 21, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(9,0), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "aten::convolution, op_id = 20, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(9,0), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
-      ],
-      "nvtx_range": {
-        "text": "aten::cudnn_convolution, op_id = 22, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(9,0), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "depth": 0,
-        "start_ns": 4879393580,
-        "end_ns": 4879410429,
-        "domain": "default"
-      },
-      "kernels": [
-        {
-          "kernel_id": "k_00069",
-          "kernel_name": "conv2d_c1_k1_nhwc",
-          "demangled_name": null,
-          "stream_id": 7,
-          "device_id": 0,
-          "start_ns": 4879409979,
-          "end_ns": 4879426779,
-          "duration_ns": 16800,
-          "grid_dim": [
-            6272,
-            1,
-            1
-          ],
-          "block_dim": [
-            256,
-            1,
-            1
-          ],
-          "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 25.7,
-              "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 71.16,
-              "fbpa__dram_read_bytes.sum": 25.7,
-              "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 73.44,
-              "gpu__time_duration.sum": 22.69,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 82.91,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 45.12,
-              "launch__registers_per_thread": 40,
-              "launch__shared_mem_per_block_dynamic": 0,
-              "lts__t_request_hit_rate.pct": 48.65,
-              "lts__t_sector_hit_rate.pct": 48.86,
-              "sm__cycles_active.sum": 6672714,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 39.12,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 86.51,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.45,
-              "smsp__inst_executed.sum": 12054016,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 44.83,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
-            }
-          },
-          "attribution_method": "nvtx",
-          "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::cudnn_convolution, op_id = 22, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(9,0), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-            "depth": 0,
-            "start_ns": 4879393580,
-            "end_ns": 4879410429,
-            "domain": "default"
-          }
-        }
-      ],
-      "aggregated": {
-        "total_duration_ns": 16800,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00069",
-        "total_dram_bytes_read": 25,
-        "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 73.44,
-        "dram_throughput_pct": 71.16,
-        "mem_busy_pct": 45.12,
-        "l1_hit_rate": 82.91,
-        "l2_hit_rate": 48.65,
-        "sm_throughput_pct": 39.12,
-        "tensor_core_active_pct": 0.0,
-        "achieved_occupancy": 86.51,
-        "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 44.83,
-        "total_executed_instructions": 12054016,
-        "total_issued_instructions": 0,
-        "ipc_active": 0.45,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 40.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 0.0
-      }
-    },
-    {
-      "operator_id": "aten::mm, op_id = 25, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (9,0)]_0",
-      "operator_name": "aten::mm, op_id = 25, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (9,0)]",
-      "call_index": 0,
-      "is_fused": false,
-      "fused_with": [],
-      "nvtx_range": {
-        "text": "aten::mm, op_id = 25, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (9,0)]",
-        "depth": 0,
-        "start_ns": 4879462290,
-        "end_ns": 4879476530,
-        "domain": "default"
-      },
-      "kernels": [
-        {
-          "kernel_id": "k_00072",
-          "kernel_name": "Kernel2",
-          "demangled_name": null,
-          "stream_id": 7,
-          "device_id": 0,
-          "start_ns": 4879476955,
-          "end_ns": 4879527355,
-          "duration_ns": 50400,
-          "grid_dim": [
-            784,
-            1,
-            1
-          ],
-          "block_dim": [
-            128,
-            1,
-            1
-          ],
-          "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 25.86,
-              "dram__bytes_op_write.sum": 352,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 31.11,
-              "fbpa__dram_read_bytes.sum": 25.86,
-              "fbpa__dram_write_bytes.sum": 352,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 31.11,
-              "gpu__time_duration.sum": 52.83,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 0,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 30.01,
-              "launch__registers_per_thread": 228,
-              "launch__shared_mem_per_block_dynamic": 81.92,
-              "lts__t_request_hit_rate.pct": 74.79,
-              "lts__t_sector_hit_rate.pct": 60.07,
-              "sm__cycles_active.sum": 14588900,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 36.2,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 8.34,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.17,
-              "smsp__inst_executed.sum": 9536576,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 16.58,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 44.66
-            }
-          },
-          "attribution_method": "nvtx",
-          "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::mm, op_id = 25, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (9,0)]",
-            "depth": 0,
-            "start_ns": 4879462290,
-            "end_ns": 4879476530,
-            "domain": "default"
-          }
-        }
-      ],
-      "aggregated": {
-        "total_duration_ns": 50400,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00072",
-        "total_dram_bytes_read": 25,
-        "total_dram_bytes_written": 352,
-        "memory_throughput_pct": 31.11,
-        "dram_throughput_pct": 31.11,
-        "mem_busy_pct": 30.01,
-        "l1_hit_rate": 0.0,
-        "l2_hit_rate": 74.79,
-        "sm_throughput_pct": 36.2,
-        "tensor_core_active_pct": 44.66,
-        "achieved_occupancy": 8.34,
-        "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 16.58,
-        "total_executed_instructions": 9536576,
-        "total_issued_instructions": 0,
-        "ipc_active": 0.17,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 228.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 81.92
-      }
-    },
-    {
-      "operator_id": "aten::cudnn_convolution, op_id = 32, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::cudnn_convolution, op_id = 32, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-      "call_index": 0,
-      "is_fused": true,
-      "fused_with": [
-        "aten::_convolution, op_id = 31, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "aten::convolution, op_id = 30, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
-      ],
-      "nvtx_range": {
-        "text": "aten::cudnn_convolution, op_id = 32, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "depth": 0,
-        "start_ns": 4879592583,
-        "end_ns": 4879609263,
-        "domain": "default"
-      },
-      "kernels": [
-        {
-          "kernel_id": "k_00075",
-          "kernel_name": "conv2d_c1_k1_nhwc",
-          "demangled_name": null,
-          "stream_id": 7,
-          "device_id": 0,
-          "start_ns": 4879608346,
-          "end_ns": 4879614042,
-          "duration_ns": 5696,
-          "grid_dim": [
-            1568,
-            1,
-            1
-          ],
-          "block_dim": [
-            256,
-            1,
-            1
-          ],
-          "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 6.43,
-              "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 45.36,
-              "fbpa__dram_read_bytes.sum": 6.43,
-              "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 47.21,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 47.51,
               "gpu__time_duration.sum": 8.93,
               "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
               "l1tex__t_sector_hit_rate.pct": 85.96,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 35.06,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 35.16,
               "launch__registers_per_thread": 40,
               "launch__shared_mem_per_block_dynamic": 0,
               "lts__t_request_hit_rate.pct": 36.84,
-              "lts__t_sector_hit_rate.pct": 38.54,
-              "sm__cycles_active.sum": 2146425,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 24.57,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 74.2,
+              "lts__t_sector_hit_rate.pct": 38.52,
+              "sm__cycles_active.sum": 2140918,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 24.7,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 73.77,
               "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
               "smsp__inst_executed.avg.per_cycle_active": 0.35,
               "smsp__inst_executed.sum": 3013504,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 34.92,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 35.09,
               "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
             }
           },
           "attribution_method": "nvtx",
           "confidence": "medium",
           "nvtx_range": {
-            "text": "aten::cudnn_convolution, op_id = 32, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (17,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "text": "aten::cudnn_convolution, op_id = 5, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
             "depth": 0,
-            "start_ns": 4879592583,
-            "end_ns": 4879609263,
+            "start_ns": 4067551396,
+            "end_ns": 4067581738,
             "domain": "default"
           }
         }
       ],
       "aggregated": {
-        "total_duration_ns": 5696,
+        "total_duration_ns": 11168,
         "kernel_count": 1,
-        "dominant_kernel_id": "k_00075",
+        "dominant_kernel_id": "k_00065",
         "total_dram_bytes_read": 6,
         "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 47.21000000000001,
-        "dram_throughput_pct": 45.36,
-        "mem_busy_pct": 35.06,
+        "memory_throughput_pct": 47.50999999999999,
+        "dram_throughput_pct": 45.39,
+        "mem_busy_pct": 35.16,
         "l1_hit_rate": 85.96,
         "l2_hit_rate": 36.84,
-        "sm_throughput_pct": 24.57,
+        "sm_throughput_pct": 24.7,
         "tensor_core_active_pct": 0.0,
-        "achieved_occupancy": 74.2,
+        "achieved_occupancy": 73.77,
         "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 34.92,
+        "eligible_cycles_pct": 35.09,
         "total_executed_instructions": 3013504,
         "total_issued_instructions": 0,
         "ipc_active": 0.35,
@@ -689,28 +110,796 @@
       }
     },
     {
-      "operator_id": "aten::mm, op_id = 35, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (20,0)]_0",
-      "operator_name": "aten::mm, op_id = 35, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (20,0)]",
+      "operator_id": "aten::_native_batch_norm_legit_no_training_0",
+      "operator_name": "aten::_native_batch_norm_legit_no_training",
       "call_index": 0,
-      "is_fused": false,
-      "fused_with": [],
+      "is_fused": true,
+      "fused_with": [
+        "aten::hardtanh"
+      ],
+      "nvtx_range": null,
+      "kernels": [
+        {
+          "kernel_id": "k_00066",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_0",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067647452,
+          "end_ns": 4067650812,
+          "duration_ns": 3360,
+          "grid_dim": [
+            3136,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 6.43,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 48.13,
+              "fbpa__dram_read_bytes.sum": 6.43,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 48.93,
+              "gpu__time_duration.sum": 8.45,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 74.62,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 19.35,
+              "launch__registers_per_thread": 20,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 47.96,
+              "lts__t_sector_hit_rate.pct": 51.21,
+              "sm__cycles_active.sum": 1898857,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 19.94,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 81.85,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.31,
+              "smsp__inst_executed.sum": 2308096,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 30.77,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00071",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067825405,
+          "end_ns": 4067831229,
+          "duration_ns": 5824,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.85,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 64.34,
+              "fbpa__dram_read_bytes.sum": 12.85,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 65.44,
+              "gpu__time_duration.sum": 12.54,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 66.42,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 21.11,
+              "launch__registers_per_thread": 19,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 1.0,
+              "lts__t_sector_hit_rate.pct": 1.75,
+              "sm__cycles_active.sum": 3567474,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 26.91,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 74.31,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.35,
+              "smsp__inst_executed.sum": 4616192,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 34.82,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00073",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067891229,
+          "end_ns": 4067897149,
+          "duration_ns": 5920,
+          "grid_dim": [
+            3136,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.85,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 56.64,
+              "fbpa__dram_read_bytes.sum": 12.85,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 57.57,
+              "gpu__time_duration.sum": 14.27,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 64.63,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 18.44,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 49.06,
+              "lts__t_sector_hit_rate.pct": 50.87,
+              "sm__cycles_active.sum": 3451266,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 15.93,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 72.87,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.24,
+              "smsp__inst_executed.sum": 3136000,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 24.13,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00078",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_5",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068006014,
+          "end_ns": 4068015870,
+          "duration_ns": 9856,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 25.7,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 77.71,
+              "fbpa__dram_read_bytes.sum": 25.7,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 78.02,
+              "gpu__time_duration.sum": 20.8,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 49.58,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 25.53,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 1.02,
+              "lts__t_sector_hit_rate.pct": 1.33,
+              "sm__cycles_active.sum": 6136356,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 21.89,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 81.57,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.26,
+              "smsp__inst_executed.sum": 6246912,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 25.77,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00080",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_6",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068060894,
+          "end_ns": 4068070942,
+          "duration_ns": 10048,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 25.7,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 74.98,
+              "fbpa__dram_read_bytes.sum": 25.7,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 75.92,
+              "gpu__time_duration.sum": 21.5,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 67.89,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 24.51,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 49.74,
+              "lts__t_sector_hit_rate.pct": 50.73,
+              "sm__cycles_active.sum": 6147175,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 21.11,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 83.79,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.25,
+              "smsp__inst_executed.sum": 6272000,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 25.39,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00085",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_8",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068173055,
+          "end_ns": 4068195583,
+          "duration_ns": 22528,
+          "grid_dim": [
+            12544,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 51.39,
+              "dram__bytes_op_write.sum": 17.66,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 84.82,
+              "fbpa__dram_read_bytes.sum": 51.39,
+              "fbpa__dram_write_bytes.sum": 17.66,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 84.82,
+              "gpu__time_duration.sum": 38.02,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 49.57,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 28.37,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 1.07,
+              "lts__t_sector_hit_rate.pct": 1.22,
+              "sm__cycles_active.sum": 11836376,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 24.29,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 84.89,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.27,
+              "smsp__inst_executed.sum": 12493824,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 26.94,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00087",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_0",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068267007,
+          "end_ns": 4068270207,
+          "duration_ns": 3200,
+          "grid_dim": [
+            3136,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 6.43,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 50.37,
+              "fbpa__dram_read_bytes.sum": 6.43,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 51.37,
+              "gpu__time_duration.sum": 8.06,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 74.56,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 20.47,
+              "launch__registers_per_thread": 20,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 48.1,
+              "lts__t_sector_hit_rate.pct": 51.25,
+              "sm__cycles_active.sum": 1812239,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 20.93,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 75.23,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.32,
+              "smsp__inst_executed.sum": 2308096,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 32.44,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00092",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068372832,
+          "end_ns": 4068378528,
+          "duration_ns": 5696,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.85,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 64.5,
+              "fbpa__dram_read_bytes.sum": 12.85,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 65.5,
+              "gpu__time_duration.sum": 12.54,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 66.42,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 20.95,
+              "launch__registers_per_thread": 19,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 1.05,
+              "lts__t_sector_hit_rate.pct": 1.75,
+              "sm__cycles_active.sum": 3453674,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 26.7,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 77.83,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.34,
+              "smsp__inst_executed.sum": 4616192,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 34.33,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00094",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068419360,
+          "end_ns": 4068425248,
+          "duration_ns": 5888,
+          "grid_dim": [
+            3136,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.85,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 57.03,
+              "fbpa__dram_read_bytes.sum": 12.85,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 58.16,
+              "gpu__time_duration.sum": 14.18,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 64.6,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 18.62,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 49.12,
+              "lts__t_sector_hit_rate.pct": 50.93,
+              "sm__cycles_active.sum": 3513563,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 16.09,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 72.3,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.23,
+              "smsp__inst_executed.sum": 3136000,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 22.88,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00099",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_5",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068519168,
+          "end_ns": 4068529088,
+          "duration_ns": 9920,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 25.7,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 79.0,
+              "fbpa__dram_read_bytes.sum": 25.7,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 79.26,
+              "gpu__time_duration.sum": 20.45,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 49.58,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 25.79,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 0.92,
+              "lts__t_sector_hit_rate.pct": 1.3,
+              "sm__cycles_active.sum": 6179098,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 22.12,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 80.1,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.25,
+              "smsp__inst_executed.sum": 6246912,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 25.35,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00101",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_6",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068564737,
+          "end_ns": 4068574561,
+          "duration_ns": 9824,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 25.7,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 75.83,
+              "fbpa__dram_read_bytes.sum": 25.7,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 76.41,
+              "gpu__time_duration.sum": 21.28,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 68.03,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 24.89,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 49.73,
+              "lts__t_sector_hit_rate.pct": 50.65,
+              "sm__cycles_active.sum": 6205246,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 21.43,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 82.93,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.26,
+              "smsp__inst_executed.sum": 6272000,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 25.79,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00106",
+          "kernel_name": "triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_8",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068667617,
+          "end_ns": 4068691073,
+          "duration_ns": 23456,
+          "grid_dim": [
+            12544,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 51.39,
+              "dram__bytes_op_write.sum": 8.7,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 85.76,
+              "fbpa__dram_read_bytes.sum": 51.39,
+              "fbpa__dram_write_bytes.sum": 8.7,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 85.76,
+              "gpu__time_duration.sum": 37.63,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 49.58,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 28.43,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 0.98,
+              "lts__t_sector_hit_rate.pct": 1.15,
+              "sm__cycles_active.sum": 11736327,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 24.34,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 86.15,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.26,
+              "smsp__inst_executed.sum": 12493824,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 26.46,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 115520,
+        "kernel_count": 12,
+        "dominant_kernel_id": "k_00106",
+        "total_dram_bytes_read": 269,
+        "total_dram_bytes_written": 26,
+        "memory_throughput_pct": 75.8084459833795,
+        "dram_throughput_pct": 75.36759556786703,
+        "mem_busy_pct": 25.067736842105262,
+        "l1_hit_rate": 57.376116343490295,
+        "l2_hit_rate": 16.97654570637119,
+        "sm_throughput_pct": 22.57417728531856,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy": 81.69368421052631,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 27.048030470914124,
+        "total_executed_instructions": 70146048,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.2692659279778394,
+        "avg_threads_per_warp": 32.0,
+        "registers_per_thread": 40.0,
+        "local_memory_spills": 0,
+        "dynamic_smem_per_block": 0.0
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 10, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(9,0), (3,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 10, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(9,0), (3,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 8, sizes = [[16, 32, 56, 56], [], [], [], [], [], []], input_op_ids = [(3,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 7, sizes = [[16, 32, 56, 56], [], [], [], []], input_op_ids = [(3,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
       "nvtx_range": {
-        "text": "aten::mm, op_id = 35, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (20,0)]",
+        "text": "aten::copy_, op_id = 10, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(9,0), (3,0), (0,-1)]",
         "depth": 0,
-        "start_ns": 4879658993,
-        "end_ns": 4879673653,
+        "start_ns": 4067680400,
+        "end_ns": 4067692720,
         "domain": "default"
       },
       "kernels": [
         {
-          "kernel_id": "k_00078",
-          "kernel_name": "Kernel2",
+          "kernel_id": "k_00067",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
           "demangled_name": null,
           "stream_id": 7,
           "device_id": 0,
-          "start_ns": 4879674074,
-          "end_ns": 4879684345,
-          "duration_ns": 10271,
+          "start_ns": 4067694620,
+          "end_ns": 4067696636,
+          "duration_ns": 2016,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 10, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(9,0), (3,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4067680400,
+            "end_ns": 4067692720,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 2016,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00067",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 14, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(13,0), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 14, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(13,0), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 12, sizes = [[64, 32, 1, 1], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 11, sizes = [[64, 32, 1, 1], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 14, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(13,0), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4067712281,
+        "end_ns": 4067718582,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00068",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067722237,
+          "end_ns": 4067723229,
+          "duration_ns": 992,
+          "grid_dim": [
+            2,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 14, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(13,0), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4067712281,
+            "end_ns": 4067718582,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 992,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00068",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::convolution_0",
+      "operator_name": "aten::convolution",
+      "call_index": 0,
+      "is_fused": false,
+      "fused_with": [],
+      "nvtx_range": null,
+      "kernels": [
+        {
+          "kernel_id": "k_00069",
+          "kernel_name": "triton_tem_fused_convolution_1",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067749405,
+          "end_ns": 4067752957,
+          "duration_ns": 3552,
           "grid_dim": [
             784,
             1,
@@ -723,92 +912,406 @@
           ],
           "metrics": {
             "raw": {
-              "dram__bytes_op_read.sum": 6.45,
+              "dram__bytes_op_read.sum": 3.22,
               "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 31.49,
-              "fbpa__dram_read_bytes.sum": 6.45,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 29.26,
+              "fbpa__dram_read_bytes.sum": 3.22,
               "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 31.88,
-              "gpu__time_duration.sum": 12.9,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 29.33,
+              "gpu__time_duration.sum": 6.94,
               "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 0,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 25.35,
-              "launch__registers_per_thread": 88,
-              "launch__shared_mem_per_block_dynamic": 49.15,
-              "lts__t_request_hit_rate.pct": 49.21,
-              "lts__t_sector_hit_rate.pct": 34.2,
-              "sm__cycles_active.sum": 3341075,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 14.41,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 14.34,
+              "l1tex__t_sector_hit_rate.pct": 19.01,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 32.41,
+              "launch__registers_per_thread": 56,
+              "launch__shared_mem_per_block_dynamic": 8.19,
+              "lts__t_request_hit_rate.pct": 7.44,
+              "lts__t_sector_hit_rate.pct": 9.69,
+              "sm__cycles_active.sum": 1150599,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 8.4,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 28.85,
               "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.18,
-              "smsp__inst_executed.sum": 2320640,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 17.83,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 12.33
+              "smsp__inst_executed.avg.per_cycle_active": 0.15,
+              "smsp__inst_executed.sum": 686784,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 14.72,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 17.21
             }
           },
-          "attribution_method": "nvtx",
+          "attribution_method": "inductor_fusion",
           "confidence": "medium",
-          "nvtx_range": {
-            "text": "aten::mm, op_id = 35, sizes = [[50176, 32], [32, 64], [50176, 64]], input_op_ids = [(0,-1), (0,-1), (20,0)]",
-            "depth": 0,
-            "start_ns": 4879658993,
-            "end_ns": 4879673653,
-            "domain": "default"
-          }
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00076",
+          "kernel_name": "triton_tem_fused_convolution_4",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067957982,
+          "end_ns": 4067965374,
+          "duration_ns": 7392,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 6.44,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 34.64,
+              "fbpa__dram_read_bytes.sum": 6.44,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 35.95,
+              "gpu__time_duration.sum": 11.71,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 12.43,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 54.57,
+              "launch__registers_per_thread": 48,
+              "launch__shared_mem_per_block_dynamic": 16.38,
+              "lts__t_request_hit_rate.pct": 42.13,
+              "lts__t_sector_hit_rate.pct": 43.52,
+              "sm__cycles_active.sum": 2609211,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 20.17,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 70.89,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.24,
+              "smsp__inst_executed.sum": 2471168,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 23.79,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 30.92
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00083",
+          "kernel_name": "triton_tem_fused_convolution_7",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068125694,
+          "end_ns": 4068145087,
+          "duration_ns": 19393,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.92,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 30.62,
+              "fbpa__dram_read_bytes.sum": 12.92,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 30.62,
+              "gpu__time_duration.sum": 26.5,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 36.41,
+              "launch__registers_per_thread": 130,
+              "launch__shared_mem_per_block_dynamic": 49.15,
+              "lts__t_request_hit_rate.pct": 62.02,
+              "lts__t_sector_hit_rate.pct": 62.56,
+              "sm__cycles_active.sum": 7734769,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 35.46,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 15.12,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 4810624,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.67,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 41.84
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00090",
+          "kernel_name": "triton_tem_fused_convolution_1",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068331231,
+          "end_ns": 4068334783,
+          "duration_ns": 3552,
+          "grid_dim": [
+            784,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 3.22,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 29.17,
+              "fbpa__dram_read_bytes.sum": 3.22,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 29.24,
+              "gpu__time_duration.sum": 6.98,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 19.01,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 32.35,
+              "launch__registers_per_thread": 56,
+              "launch__shared_mem_per_block_dynamic": 8.19,
+              "lts__t_request_hit_rate.pct": 7.73,
+              "lts__t_sector_hit_rate.pct": 9.78,
+              "sm__cycles_active.sum": 1152935,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 8.35,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 29.58,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.15,
+              "smsp__inst_executed.sum": 686784,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.09,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 17.64
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00097",
+          "kernel_name": "triton_tem_fused_convolution_4",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068479104,
+          "end_ns": 4068486656,
+          "duration_ns": 7552,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 6.44,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 35.07,
+              "fbpa__dram_read_bytes.sum": 6.44,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 36.33,
+              "gpu__time_duration.sum": 11.58,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 12.61,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 54.7,
+              "launch__registers_per_thread": 48,
+              "launch__shared_mem_per_block_dynamic": 16.38,
+              "lts__t_request_hit_rate.pct": 41.93,
+              "lts__t_sector_hit_rate.pct": 43.46,
+              "sm__cycles_active.sum": 2600941,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 20.44,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 70.34,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.24,
+              "smsp__inst_executed.sum": 2471168,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 23.91,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 31.07
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
+        },
+        {
+          "kernel_id": "k_00104",
+          "kernel_name": "triton_tem_fused_convolution_7",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068622913,
+          "end_ns": 4068642305,
+          "duration_ns": 19392,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.92,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 31.01,
+              "fbpa__dram_read_bytes.sum": 12.92,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 31.04,
+              "gpu__time_duration.sum": 26.14,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 0,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 37.06,
+              "launch__registers_per_thread": 130,
+              "launch__shared_mem_per_block_dynamic": 49.15,
+              "lts__t_request_hit_rate.pct": 62.01,
+              "lts__t_sector_hit_rate.pct": 62.56,
+              "sm__cycles_active.sum": 7582684,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 35.7,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 15.63,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.16,
+              "smsp__inst_executed.sum": 4810624,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 15.52,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 41.45
+            }
+          },
+          "attribution_method": "inductor_fusion",
+          "confidence": "medium",
+          "nvtx_range": null
         }
       ],
       "aggregated": {
-        "total_duration_ns": 10271,
-        "kernel_count": 1,
-        "dominant_kernel_id": "k_00078",
-        "total_dram_bytes_read": 6,
+        "total_duration_ns": 60833,
+        "kernel_count": 6,
+        "dominant_kernel_id": "k_00083",
+        "total_dram_bytes_read": 45,
         "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 31.88,
-        "dram_throughput_pct": 31.49,
-        "mem_busy_pct": 25.35,
-        "l1_hit_rate": 0.0,
-        "l2_hit_rate": 49.21,
-        "sm_throughput_pct": 14.410000000000002,
-        "tensor_core_active_pct": 12.33,
-        "achieved_occupancy": 14.339999999999998,
+        "memory_throughput_pct": 31.95450725757401,
+        "dram_throughput_pct": 31.621167129682902,
+        "mem_busy_pct": 40.6238391991189,
+        "l1_hit_rate": 5.295815100356715,
+        "l2_hit_rate": 50.74903325497674,
+        "sm_throughput_pct": 28.650990416385838,
+        "tensor_core_active_pct": 36.200581920996825,
+        "achieved_occupancy": 30.56053523580951,
         "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 17.83,
-        "total_executed_instructions": 2320640,
+        "eligible_cycles_pct": 17.542473164236515,
+        "total_executed_instructions": 15937152,
         "total_issued_instructions": 0,
-        "ipc_active": 0.18,
+        "ipc_active": 0.17848470402577551,
         "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 88.0,
+        "registers_per_thread": 130.0,
         "local_memory_spills": 0,
         "dynamic_smem_per_block": 49.15
       }
     },
     {
-      "operator_id": "aten::cudnn_convolution, op_id = 40, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(17,0), (35,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::cudnn_convolution, op_id = 40, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(17,0), (35,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "operator_id": "aten::copy_, op_id = 19, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(18,0), (11,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 19, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(18,0), (11,0), (0,-1)]",
       "call_index": 0,
       "is_fused": true,
       "fused_with": [
-        "aten::_convolution, op_id = 39, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(17,0), (35,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "aten::convolution, op_id = 38, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(17,0), (35,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+        "aten::_to_copy, op_id = 17, sizes = [[16, 64, 56, 56], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 16, sizes = [[16, 64, 56, 56], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
       ],
       "nvtx_range": {
-        "text": "aten::cudnn_convolution, op_id = 40, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(17,0), (35,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "text": "aten::copy_, op_id = 19, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(18,0), (11,0), (0,-1)]",
         "depth": 0,
-        "start_ns": 4879729704,
-        "end_ns": 4879744505,
+        "start_ns": 4067783414,
+        "end_ns": 4067791203,
         "domain": "default"
       },
       "kernels": [
         {
-          "kernel_id": "k_00081",
+          "kernel_id": "k_00070",
+          "kernel_name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067794909,
+          "end_ns": 4067801917,
+          "duration_ns": 7008,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 19, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(18,0), (11,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4067783414,
+            "end_ns": 4067791203,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 7008,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00070",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::cudnn_convolution, op_id = 23, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::cudnn_convolution, op_id = 23, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_convolution, op_id = 22, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::convolution, op_id = 21, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::cudnn_convolution, op_id = 23, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4067843845,
+        "end_ns": 4067861746,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00072",
           "kernel_name": "conv2d_c1_k1_nhwc",
           "demangled_name": null,
           "stream_id": 7,
           "device_id": 0,
-          "start_ns": 4879744185,
-          "end_ns": 4879752921,
-          "duration_ns": 8736,
+          "start_ns": 4067863965,
+          "end_ns": 4067871229,
+          "duration_ns": 7264,
           "grid_dim": [
             3136,
             1,
@@ -823,58 +1326,58 @@
             "raw": {
               "dram__bytes_op_read.sum": 12.86,
               "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 56.9,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 58.04,
               "fbpa__dram_read_bytes.sum": 12.86,
               "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 59.35,
-              "gpu__time_duration.sum": 14.24,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 61.03,
+              "gpu__time_duration.sum": 13.95,
               "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 85.06,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 40.07,
+              "l1tex__t_sector_hit_rate.pct": 85.07,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 39.43,
               "launch__registers_per_thread": 40,
               "launch__shared_mem_per_block_dynamic": 0,
               "lts__t_request_hit_rate.pct": 41.07,
-              "lts__t_sector_hit_rate.pct": 41.85,
-              "sm__cycles_active.sum": 3756634,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 30.9,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 83.93,
+              "lts__t_sector_hit_rate.pct": 41.79,
+              "sm__cycles_active.sum": 3817727,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 31.72,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 81.78,
               "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
               "smsp__inst_executed.avg.per_cycle_active": 0.4,
               "smsp__inst_executed.sum": 6027008,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 40.28,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 39.93,
               "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
             }
           },
           "attribution_method": "nvtx",
           "confidence": "medium",
           "nvtx_range": {
-            "text": "aten::cudnn_convolution, op_id = 40, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(17,0), (35,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "text": "aten::cudnn_convolution, op_id = 23, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(11,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
             "depth": 0,
-            "start_ns": 4879729704,
-            "end_ns": 4879744505,
+            "start_ns": 4067843845,
+            "end_ns": 4067861746,
             "domain": "default"
           }
         }
       ],
       "aggregated": {
-        "total_duration_ns": 8736,
+        "total_duration_ns": 7264,
         "kernel_count": 1,
-        "dominant_kernel_id": "k_00081",
+        "dominant_kernel_id": "k_00072",
         "total_dram_bytes_read": 12,
         "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 59.35,
-        "dram_throughput_pct": 56.9,
-        "mem_busy_pct": 40.07,
-        "l1_hit_rate": 85.06,
+        "memory_throughput_pct": 61.03,
+        "dram_throughput_pct": 58.04,
+        "mem_busy_pct": 39.43,
+        "l1_hit_rate": 85.07,
         "l2_hit_rate": 41.07,
-        "sm_throughput_pct": 30.899999999999995,
+        "sm_throughput_pct": 31.72,
         "tensor_core_active_pct": 0.0,
-        "achieved_occupancy": 83.93,
+        "achieved_occupancy": 81.78,
         "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 40.28,
+        "eligible_cycles_pct": 39.93,
         "total_executed_instructions": 6027008,
         "total_issued_instructions": 0,
-        "ipc_active": 0.4,
+        "ipc_active": 0.4000000000000001,
         "avg_threads_per_warp": 32.0,
         "registers_per_thread": 40.0,
         "local_memory_spills": 0,
@@ -882,30 +1385,33 @@
       }
     },
     {
-      "operator_id": "aten::mm, op_id = 43, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (17,0)]_0",
-      "operator_name": "aten::mm, op_id = 43, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (17,0)]",
+      "operator_id": "aten::copy_, op_id = 28, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(27,0), (21,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 28, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(27,0), (21,0), (0,-1)]",
       "call_index": 0,
-      "is_fused": false,
-      "fused_with": [],
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 26, sizes = [[16, 64, 56, 56], [], [], [], [], [], []], input_op_ids = [(21,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 25, sizes = [[16, 64, 56, 56], [], [], [], []], input_op_ids = [(21,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
       "nvtx_range": {
-        "text": "aten::mm, op_id = 43, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (17,0)]",
+        "text": "aten::copy_, op_id = 28, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(27,0), (21,0), (0,-1)]",
         "depth": 0,
-        "start_ns": 4879792415,
-        "end_ns": 4879805116,
+        "start_ns": 4067902748,
+        "end_ns": 4067909717,
         "domain": "default"
       },
       "kernels": [
         {
-          "kernel_id": "k_00084",
-          "kernel_name": "Kernel2",
+          "kernel_id": "k_00074",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
           "demangled_name": null,
           "stream_id": 7,
           "device_id": 0,
-          "start_ns": 4879805913,
-          "end_ns": 4879825624,
-          "duration_ns": 19711,
+          "start_ns": 4067913085,
+          "end_ns": 4067916125,
+          "duration_ns": 3040,
           "grid_dim": [
-            1568,
+            3136,
             1,
             1
           ],
@@ -915,93 +1421,220 @@
             1
           ],
           "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 12.9,
-              "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 37.37,
-              "fbpa__dram_read_bytes.sum": 12.9,
-              "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 38.18,
-              "gpu__time_duration.sum": 21.66,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 0,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 34.01,
-              "launch__registers_per_thread": 88,
-              "launch__shared_mem_per_block_dynamic": 49.15,
-              "lts__t_request_hit_rate.pct": 69.59,
-              "lts__t_sector_hit_rate.pct": 54.01,
-              "sm__cycles_active.sum": 6179848,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 22.47,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 15.73,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.24,
-              "smsp__inst_executed.sum": 5908224,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 24.16,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 26.27
-            }
+            "raw": {}
           },
           "attribution_method": "nvtx",
           "confidence": "medium",
           "nvtx_range": {
-            "text": "aten::mm, op_id = 43, sizes = [[50176, 64], [64, 128], [50176, 128]], input_op_ids = [(0,-1), (0,-1), (17,0)]",
+            "text": "aten::copy_, op_id = 28, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(27,0), (21,0), (0,-1)]",
             "depth": 0,
-            "start_ns": 4879792415,
-            "end_ns": 4879805116,
+            "start_ns": 4067902748,
+            "end_ns": 4067909717,
             "domain": "default"
           }
         }
       ],
       "aggregated": {
-        "total_duration_ns": 19711,
+        "total_duration_ns": 3040,
         "kernel_count": 1,
-        "dominant_kernel_id": "k_00084",
-        "total_dram_bytes_read": 12,
-        "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 38.18,
-        "dram_throughput_pct": 37.37,
-        "mem_busy_pct": 34.01,
-        "l1_hit_rate": 0.0,
-        "l2_hit_rate": 69.59,
-        "sm_throughput_pct": 22.47,
-        "tensor_core_active_pct": 26.27,
-        "achieved_occupancy": 15.730000000000002,
+        "dominant_kernel_id": "k_00074",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
         "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 24.16,
-        "total_executed_instructions": 5908224,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
         "total_issued_instructions": 0,
-        "ipc_active": 0.23999999999999996,
-        "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 88.0,
-        "local_memory_spills": 0,
-        "dynamic_smem_per_block": 49.15
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
       }
     },
     {
-      "operator_id": "aten::cudnn_convolution, op_id = 48, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(35,0), (43,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
-      "operator_name": "aten::cudnn_convolution, op_id = 48, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(35,0), (43,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "operator_id": "aten::copy_, op_id = 32, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(31,0), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 32, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(31,0), (0,-1), (0,-1)]",
       "call_index": 0,
       "is_fused": true,
       "fused_with": [
-        "aten::_convolution, op_id = 47, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(35,0), (43,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
-        "aten::convolution, op_id = 46, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(35,0), (43,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+        "aten::_to_copy, op_id = 30, sizes = [[128, 64, 1, 1], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 29, sizes = [[128, 64, 1, 1], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
       ],
       "nvtx_range": {
-        "text": "aten::cudnn_convolution, op_id = 48, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(35,0), (43,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "text": "aten::copy_, op_id = 32, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(31,0), (0,-1), (0,-1)]",
         "depth": 0,
-        "start_ns": 4879857847,
-        "end_ns": 4879869887,
+        "start_ns": 4067923468,
+        "end_ns": 4067928978,
         "domain": "default"
       },
       "kernels": [
         {
-          "kernel_id": "k_00087",
+          "kernel_id": "k_00075",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067932670,
+          "end_ns": 4067933854,
+          "duration_ns": 1184,
+          "grid_dim": [
+            8,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 32, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(31,0), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4067923468,
+            "end_ns": 4067928978,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 1184,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00075",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 37, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(36,0), (29,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 37, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(36,0), (29,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 35, sizes = [[16, 128, 56, 56], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 34, sizes = [[16, 128, 56, 56], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 37, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(36,0), (29,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4067968489,
+        "end_ns": 4067974500,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00077",
+          "kernel_name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4067977982,
+          "end_ns": 4067989662,
+          "duration_ns": 11680,
+          "grid_dim": [
+            12544,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 37, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(36,0), (29,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4067968489,
+            "end_ns": 4067974500,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 11680,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00077",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::cudnn_convolution, op_id = 41, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::cudnn_convolution, op_id = 41, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_convolution, op_id = 40, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::convolution, op_id = 39, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::cudnn_convolution, op_id = 41, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068016290,
+        "end_ns": 4068029231,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00079",
           "kernel_name": "conv2d_c1_k1_nhwc",
           "demangled_name": null,
           "stream_id": 7,
           "device_id": 0,
-          "start_ns": 4879870040,
-          "end_ns": 4879887000,
-          "duration_ns": 16960,
+          "start_ns": 4068031934,
+          "end_ns": 4068045470,
+          "duration_ns": 13536,
           "grid_dim": [
             6272,
             1,
@@ -1016,55 +1649,55 @@
             "raw": {
               "dram__bytes_op_read.sum": 25.7,
               "dram__bytes_op_write.sum": 0,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 71.21,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 71.69,
               "fbpa__dram_read_bytes.sum": 25.7,
               "fbpa__dram_write_bytes.sum": 0,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 73.66,
-              "gpu__time_duration.sum": 22.66,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 74.69,
+              "gpu__time_duration.sum": 22.5,
               "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 82.91,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 44.62,
+              "l1tex__t_sector_hit_rate.pct": 82.92,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 44.71,
               "launch__registers_per_thread": 40,
               "launch__shared_mem_per_block_dynamic": 0,
-              "lts__t_request_hit_rate.pct": 48.67,
-              "lts__t_sector_hit_rate.pct": 48.89,
-              "sm__cycles_active.sum": 6746703,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 38.88,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 86.33,
+              "lts__t_request_hit_rate.pct": 48.69,
+              "lts__t_sector_hit_rate.pct": 48.99,
+              "sm__cycles_active.sum": 6733982,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 39.32,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 85.73,
               "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
               "smsp__inst_executed.avg.per_cycle_active": 0.45,
               "smsp__inst_executed.sum": 12054016,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 44.95,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 44.52,
               "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
             }
           },
           "attribution_method": "nvtx",
           "confidence": "medium",
           "nvtx_range": {
-            "text": "aten::cudnn_convolution, op_id = 48, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(35,0), (43,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "text": "aten::cudnn_convolution, op_id = 41, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(29,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
             "depth": 0,
-            "start_ns": 4879857847,
-            "end_ns": 4879869887,
+            "start_ns": 4068016290,
+            "end_ns": 4068029231,
             "domain": "default"
           }
         }
       ],
       "aggregated": {
-        "total_duration_ns": 16960,
+        "total_duration_ns": 13536,
         "kernel_count": 1,
-        "dominant_kernel_id": "k_00087",
+        "dominant_kernel_id": "k_00079",
         "total_dram_bytes_read": 25,
         "total_dram_bytes_written": 0,
-        "memory_throughput_pct": 73.66,
-        "dram_throughput_pct": 71.21,
-        "mem_busy_pct": 44.62,
-        "l1_hit_rate": 82.91,
-        "l2_hit_rate": 48.67,
-        "sm_throughput_pct": 38.88,
+        "memory_throughput_pct": 74.69,
+        "dram_throughput_pct": 71.69,
+        "mem_busy_pct": 44.71,
+        "l1_hit_rate": 82.92,
+        "l2_hit_rate": 48.69,
+        "sm_throughput_pct": 39.32,
         "tensor_core_active_pct": 0.0,
-        "achieved_occupancy": 86.33,
+        "achieved_occupancy": 85.73,
         "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 44.95,
+        "eligible_cycles_pct": 44.52,
         "total_executed_instructions": 12054016,
         "total_issued_instructions": 0,
         "ipc_active": 0.45,
@@ -1075,30 +1708,33 @@
       }
     },
     {
-      "operator_id": "aten::mm, op_id = 51, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (35,0)]_0",
-      "operator_name": "aten::mm, op_id = 51, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (35,0)]",
+      "operator_id": "aten::copy_, op_id = 46, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(45,0), (39,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 46, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(45,0), (39,0), (0,-1)]",
       "call_index": 0,
-      "is_fused": false,
-      "fused_with": [],
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 44, sizes = [[16, 128, 56, 56], [], [], [], [], [], []], input_op_ids = [(39,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 43, sizes = [[16, 128, 56, 56], [], [], [], []], input_op_ids = [(39,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
       "nvtx_range": {
-        "text": "aten::mm, op_id = 51, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (35,0)]",
+        "text": "aten::copy_, op_id = 46, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(45,0), (39,0), (0,-1)]",
         "depth": 0,
-        "start_ns": 4879905867,
-        "end_ns": 4879915788,
+        "start_ns": 4068072633,
+        "end_ns": 4068079703,
         "domain": "default"
       },
       "kernels": [
         {
-          "kernel_id": "k_00090",
-          "kernel_name": "Kernel2",
+          "kernel_id": "k_00081",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
           "demangled_name": null,
           "stream_id": 7,
           "device_id": 0,
-          "start_ns": 4879916888,
-          "end_ns": 4879967223,
-          "duration_ns": 50335,
+          "start_ns": 4068083070,
+          "end_ns": 4068088766,
+          "duration_ns": 5696,
           "grid_dim": [
-            784,
+            6272,
             1,
             1
           ],
@@ -1108,750 +1744,1230 @@
             1
           ],
           "metrics": {
-            "raw": {
-              "dram__bytes_op_read.sum": 25.86,
-              "dram__bytes_op_write.sum": 239.62,
-              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 31.26,
-              "fbpa__dram_read_bytes.sum": 25.86,
-              "fbpa__dram_write_bytes.sum": 239.62,
-              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 31.26,
-              "gpu__time_duration.sum": 52.35,
-              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
-              "l1tex__t_sector_hit_rate.pct": 0,
-              "l1tex__throughput.avg.pct_of_peak_sustained_active": 30.4,
-              "launch__registers_per_thread": 228,
-              "launch__shared_mem_per_block_dynamic": 81.92,
-              "lts__t_request_hit_rate.pct": 74.79,
-              "lts__t_sector_hit_rate.pct": 60.07,
-              "sm__cycles_active.sum": 14496843,
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 36.67,
-              "sm__warps_active.avg.pct_of_peak_sustained_active": 8.25,
-              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
-              "smsp__inst_executed.avg.per_cycle_active": 0.17,
-              "smsp__inst_executed.sum": 9536576,
-              "smsp__issue_active.avg.pct_of_peak_sustained_active": 16.7,
-              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 44.99
-            }
+            "raw": {}
           },
           "attribution_method": "nvtx",
           "confidence": "medium",
           "nvtx_range": {
-            "text": "aten::mm, op_id = 51, sizes = [[50176, 128], [128, 256], [50176, 256]], input_op_ids = [(0,-1), (0,-1), (35,0)]",
+            "text": "aten::copy_, op_id = 46, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(45,0), (39,0), (0,-1)]",
             "depth": 0,
-            "start_ns": 4879905867,
-            "end_ns": 4879915788,
+            "start_ns": 4068072633,
+            "end_ns": 4068079703,
             "domain": "default"
           }
         }
       ],
       "aggregated": {
-        "total_duration_ns": 50335,
+        "total_duration_ns": 5696,
         "kernel_count": 1,
-        "dominant_kernel_id": "k_00090",
-        "total_dram_bytes_read": 25,
-        "total_dram_bytes_written": 239,
-        "memory_throughput_pct": 31.26,
-        "dram_throughput_pct": 31.26,
-        "mem_busy_pct": 30.4,
-        "l1_hit_rate": 0.0,
-        "l2_hit_rate": 74.79,
-        "sm_throughput_pct": 36.67,
-        "tensor_core_active_pct": 44.989999999999995,
-        "achieved_occupancy": 8.25,
+        "dominant_kernel_id": "k_00081",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
         "warp_cycles_per_instruction": null,
-        "eligible_cycles_pct": 16.7,
-        "total_executed_instructions": 9536576,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
         "total_issued_instructions": 0,
-        "ipc_active": 0.17,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 50, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(49,0), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 50, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(49,0), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 48, sizes = [[256, 128, 1, 1], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 47, sizes = [[256, 128, 1, 1], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 50, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(49,0), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068096932,
+        "end_ns": 4068102514,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00082",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068106590,
+          "end_ns": 4068107934,
+          "duration_ns": 1344,
+          "grid_dim": [
+            32,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 50, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(49,0), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068096932,
+            "end_ns": 4068102514,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 1344,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00082",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 55, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(54,0), (47,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 55, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(54,0), (47,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 53, sizes = [[16, 256, 56, 56], [], [], [], [], [], []], input_op_ids = [(47,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 52, sizes = [[16, 256, 56, 56], [], [], [], []], input_op_ids = [(47,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 55, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(54,0), (47,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068138065,
+        "end_ns": 4068144204,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00084",
+          "kernel_name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068147871,
+          "end_ns": 4068169759,
+          "duration_ns": 21888,
+          "grid_dim": [
+            25088,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 55, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(54,0), (47,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068138065,
+            "end_ns": 4068144204,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 21888,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00084",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::cudnn_convolution, op_id = 61, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::cudnn_convolution, op_id = 61, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_convolution, op_id = 60, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::convolution, op_id = 59, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::cudnn_convolution, op_id = 61, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068225507,
+        "end_ns": 4068242828,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00086",
+          "kernel_name": "conv2d_c1_k1_nhwc",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068244191,
+          "end_ns": 4068254847,
+          "duration_ns": 10656,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 6.43,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 42.33,
+              "fbpa__dram_read_bytes.sum": 6.43,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 43.89,
+              "gpu__time_duration.sum": 9.57,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 85.96,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 34.8,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 36.87,
+              "lts__t_sector_hit_rate.pct": 38.55,
+              "sm__cycles_active.sum": 2162774,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 23.07,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 73.65,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.35,
+              "smsp__inst_executed.sum": 3013504,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 35.25,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::cudnn_convolution, op_id = 61, sizes = [[16, 32, 56, 56], [32, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068225507,
+            "end_ns": 4068242828,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 10656,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00086",
+        "total_dram_bytes_read": 6,
+        "total_dram_bytes_written": 0,
+        "memory_throughput_pct": 43.89,
+        "dram_throughput_pct": 42.33,
+        "mem_busy_pct": 34.8,
+        "l1_hit_rate": 85.96,
+        "l2_hit_rate": 36.87,
+        "sm_throughput_pct": 23.07,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy": 73.65,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 35.25,
+        "total_executed_instructions": 3013504,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.35,
         "avg_threads_per_warp": 32.0,
-        "registers_per_thread": 228.0,
+        "registers_per_thread": 40.0,
         "local_memory_spills": 0,
-        "dynamic_smem_per_block": 81.92
+        "dynamic_smem_per_block": 0.0
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 66, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(65,0), (59,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 66, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(65,0), (59,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 64, sizes = [[16, 32, 56, 56], [], [], [], [], [], []], input_op_ids = [(59,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 63, sizes = [[16, 32, 56, 56], [], [], [], []], input_op_ids = [(59,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 66, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(65,0), (59,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068279528,
+        "end_ns": 4068286869,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00088",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068290271,
+          "end_ns": 4068292319,
+          "duration_ns": 2048,
+          "grid_dim": [
+            1568,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 66, sizes = [[16, 32, 56, 56], [16, 32, 56, 56], []], input_op_ids = [(65,0), (59,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068279528,
+            "end_ns": 4068286869,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 2048,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00088",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 70, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(69,0), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 70, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(69,0), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 68, sizes = [[64, 32, 1, 1], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 67, sizes = [[64, 32, 1, 1], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 70, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(69,0), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068302489,
+        "end_ns": 4068308480,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00089",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068311999,
+          "end_ns": 4068313119,
+          "duration_ns": 1120,
+          "grid_dim": [
+            2,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 70, sizes = [[64, 32, 1, 1], [64, 32, 1, 1], []], input_op_ids = [(69,0), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068302489,
+            "end_ns": 4068308480,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 1120,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00089",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 75, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(74,0), (67,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 75, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(74,0), (67,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 73, sizes = [[16, 64, 56, 56], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 72, sizes = [[16, 64, 56, 56], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 75, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(74,0), (67,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068342791,
+        "end_ns": 4068348901,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00091",
+          "kernel_name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068352736,
+          "end_ns": 4068359808,
+          "duration_ns": 7072,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 75, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(74,0), (67,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068342791,
+            "end_ns": 4068348901,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 7072,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00091",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::cudnn_convolution, op_id = 79, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::cudnn_convolution, op_id = 79, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_convolution, op_id = 78, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::convolution, op_id = 77, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::cudnn_convolution, op_id = 79, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068381491,
+        "end_ns": 4068398003,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00093",
+          "kernel_name": "conv2d_c1_k1_nhwc",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068399744,
+          "end_ns": 4068407264,
+          "duration_ns": 7520,
+          "grid_dim": [
+            3136,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 12.86,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 57.7,
+              "fbpa__dram_read_bytes.sum": 12.86,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 60.66,
+              "gpu__time_duration.sum": 14.02,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 85.06,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 39.6,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 41.13,
+              "lts__t_sector_hit_rate.pct": 41.85,
+              "sm__cycles_active.sum": 3801246,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 31.28,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 83.57,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.4,
+              "smsp__inst_executed.sum": 6027008,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 39.73,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::cudnn_convolution, op_id = 79, sizes = [[16, 64, 56, 56], [64, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(67,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068381491,
+            "end_ns": 4068398003,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 7520,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00093",
+        "total_dram_bytes_read": 12,
+        "total_dram_bytes_written": 0,
+        "memory_throughput_pct": 60.66,
+        "dram_throughput_pct": 57.7,
+        "mem_busy_pct": 39.6,
+        "l1_hit_rate": 85.06,
+        "l2_hit_rate": 41.13,
+        "sm_throughput_pct": 31.28,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy": 83.57,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 39.73,
+        "total_executed_instructions": 6027008,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.4,
+        "avg_threads_per_warp": 32.0,
+        "registers_per_thread": 40.0,
+        "local_memory_spills": 0,
+        "dynamic_smem_per_block": 0.0
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 84, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(83,0), (77,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 84, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(83,0), (77,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 82, sizes = [[16, 64, 56, 56], [], [], [], [], [], []], input_op_ids = [(77,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 81, sizes = [[16, 64, 56, 56], [], [], [], []], input_op_ids = [(77,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 84, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(83,0), (77,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068426883,
+        "end_ns": 4068433954,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00095",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068437408,
+          "end_ns": 4068440448,
+          "duration_ns": 3040,
+          "grid_dim": [
+            3136,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 84, sizes = [[16, 64, 56, 56], [16, 64, 56, 56], []], input_op_ids = [(83,0), (77,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068426883,
+            "end_ns": 4068433954,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 3040,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00095",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 88, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(87,0), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 88, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(87,0), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 86, sizes = [[128, 64, 1, 1], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 85, sizes = [[128, 64, 1, 1], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 88, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(87,0), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068448773,
+        "end_ns": 4068455093,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00096",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068458720,
+          "end_ns": 4068459776,
+          "duration_ns": 1056,
+          "grid_dim": [
+            8,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 88, sizes = [[128, 64, 1, 1], [128, 64, 1, 1], []], input_op_ids = [(87,0), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068448773,
+            "end_ns": 4068455093,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 1056,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00096",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 93, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(92,0), (85,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 93, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(92,0), (85,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 91, sizes = [[16, 128, 56, 56], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 90, sizes = [[16, 128, 56, 56], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 93, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(92,0), (85,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068487645,
+        "end_ns": 4068493705,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00098",
+          "kernel_name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068497152,
+          "end_ns": 4068508960,
+          "duration_ns": 11808,
+          "grid_dim": [
+            12544,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 93, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(92,0), (85,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068487645,
+            "end_ns": 4068493705,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 11808,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00098",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::cudnn_convolution, op_id = 97, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::cudnn_convolution, op_id = 97, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_convolution, op_id = 96, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::convolution, op_id = 95, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::cudnn_convolution, op_id = 97, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068528006,
+        "end_ns": 4068540167,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00100",
+          "kernel_name": "conv2d_c1_k1_nhwc",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068543072,
+          "end_ns": 4068556800,
+          "duration_ns": 13728,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            256,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {
+              "dram__bytes_op_read.sum": 25.7,
+              "dram__bytes_op_write.sum": 0,
+              "dram__throughput.avg.pct_of_peak_sustained_elapsed": 71.37,
+              "fbpa__dram_read_bytes.sum": 25.7,
+              "fbpa__dram_write_bytes.sum": 0,
+              "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 74.24,
+              "gpu__time_duration.sum": 22.62,
+              "l1tex__t_output_wavefronts_pipe_lsu_mem_local.sum": 0,
+              "l1tex__t_sector_hit_rate.pct": 82.91,
+              "l1tex__throughput.avg.pct_of_peak_sustained_active": 44.96,
+              "launch__registers_per_thread": 40,
+              "launch__shared_mem_per_block_dynamic": 0,
+              "lts__t_request_hit_rate.pct": 48.66,
+              "lts__t_sector_hit_rate.pct": 48.91,
+              "sm__cycles_active.sum": 6695855,
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed": 39.62,
+              "sm__warps_active.avg.pct_of_peak_sustained_active": 85.41,
+              "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32,
+              "smsp__inst_executed.avg.per_cycle_active": 0.45,
+              "smsp__inst_executed.sum": 12054016,
+              "smsp__issue_active.avg.pct_of_peak_sustained_active": 44.51,
+              "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0
+            }
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::cudnn_convolution, op_id = 97, sizes = [[16, 128, 56, 56], [128, 1, 3, 3], [], [], [], [], [], [], []], input_op_ids = [(85,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068528006,
+            "end_ns": 4068540167,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 13728,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00100",
+        "total_dram_bytes_read": 25,
+        "total_dram_bytes_written": 0,
+        "memory_throughput_pct": 74.24,
+        "dram_throughput_pct": 71.37,
+        "mem_busy_pct": 44.96,
+        "l1_hit_rate": 82.91,
+        "l2_hit_rate": 48.66,
+        "sm_throughput_pct": 39.62,
+        "tensor_core_active_pct": 0.0,
+        "achieved_occupancy": 85.41,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": 44.510000000000005,
+        "total_executed_instructions": 12054016,
+        "total_issued_instructions": 0,
+        "ipc_active": 0.45,
+        "avg_threads_per_warp": 32.0,
+        "registers_per_thread": 40.0,
+        "local_memory_spills": 0,
+        "dynamic_smem_per_block": 0.0
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 102, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(101,0), (95,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 102, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(101,0), (95,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 100, sizes = [[16, 128, 56, 56], [], [], [], [], [], []], input_op_ids = [(95,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 99, sizes = [[16, 128, 56, 56], [], [], [], []], input_op_ids = [(95,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 102, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(101,0), (95,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068575408,
+        "end_ns": 4068581928,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00102",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068585249,
+          "end_ns": 4068591009,
+          "duration_ns": 5760,
+          "grid_dim": [
+            6272,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 102, sizes = [[16, 128, 56, 56], [16, 128, 56, 56], []], input_op_ids = [(101,0), (95,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068575408,
+            "end_ns": 4068581928,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 5760,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00102",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 106, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(105,0), (0,-1), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 106, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(105,0), (0,-1), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 104, sizes = [[256, 128, 1, 1], [], [], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 103, sizes = [[256, 128, 1, 1], [], [], [], []], input_op_ids = [(0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 106, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(105,0), (0,-1), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068596049,
+        "end_ns": 4068602338,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00103",
+          "kernel_name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068606465,
+          "end_ns": 4068607713,
+          "duration_ns": 1248,
+          "grid_dim": [
+            32,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 106, sizes = [[256, 128, 1, 1], [256, 128, 1, 1], []], input_op_ids = [(105,0), (0,-1), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068596049,
+            "end_ns": 4068602338,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 1248,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00103",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
+      }
+    },
+    {
+      "operator_id": "aten::copy_, op_id = 111, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(110,0), (103,0), (0,-1)]_0",
+      "operator_name": "aten::copy_, op_id = 111, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(110,0), (103,0), (0,-1)]",
+      "call_index": 0,
+      "is_fused": true,
+      "fused_with": [
+        "aten::_to_copy, op_id = 109, sizes = [[16, 256, 56, 56], [], [], [], [], [], []], input_op_ids = [(103,0), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1), (0,-1)]",
+        "aten::to, op_id = 108, sizes = [[16, 256, 56, 56], [], [], [], []], input_op_ids = [(103,0), (0,-1), (0,-1), (0,-1), (0,-1)]"
+      ],
+      "nvtx_range": {
+        "text": "aten::copy_, op_id = 111, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(110,0), (103,0), (0,-1)]",
+        "depth": 0,
+        "start_ns": 4068634219,
+        "end_ns": 4068640350,
+        "domain": "default"
+      },
+      "kernels": [
+        {
+          "kernel_id": "k_00105",
+          "kernel_name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+          "demangled_name": null,
+          "stream_id": 7,
+          "device_id": 0,
+          "start_ns": 4068643713,
+          "end_ns": 4068666017,
+          "duration_ns": 22304,
+          "grid_dim": [
+            25088,
+            1,
+            1
+          ],
+          "block_dim": [
+            128,
+            1,
+            1
+          ],
+          "metrics": {
+            "raw": {}
+          },
+          "attribution_method": "nvtx",
+          "confidence": "medium",
+          "nvtx_range": {
+            "text": "aten::copy_, op_id = 111, sizes = [[16, 256, 56, 56], [16, 256, 56, 56], []], input_op_ids = [(110,0), (103,0), (0,-1)]",
+            "depth": 0,
+            "start_ns": 4068634219,
+            "end_ns": 4068640350,
+            "domain": "default"
+          }
+        }
+      ],
+      "aggregated": {
+        "total_duration_ns": 22304,
+        "kernel_count": 1,
+        "dominant_kernel_id": "k_00105",
+        "total_dram_bytes_read": null,
+        "total_dram_bytes_written": null,
+        "memory_throughput_pct": null,
+        "dram_throughput_pct": null,
+        "mem_busy_pct": null,
+        "l1_hit_rate": null,
+        "l2_hit_rate": null,
+        "sm_throughput_pct": null,
+        "tensor_core_active_pct": null,
+        "achieved_occupancy": null,
+        "warp_cycles_per_instruction": null,
+        "eligible_cycles_pct": null,
+        "total_executed_instructions": 0,
+        "total_issued_instructions": 0,
+        "ipc_active": null,
+        "avg_threads_per_warp": null,
+        "registers_per_thread": null,
+        "local_memory_spills": null,
+        "dynamic_smem_per_block": null
       }
     }
   ],
-  "unattributed_kernels": [
-    {
-      "kernel_id": "k_00056",
-      "kernel_name": "triton_poi_fused__native_batch_1...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4878941695,
-      "end_ns": 4878942655,
-      "duration_ns": 960,
-      "grid_dim": [
-        2,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00058",
-      "kernel_name": "triton_poi_fused__native_batch_2...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879062270,
-      "end_ns": 4879066590,
-      "duration_ns": 4320,
-      "grid_dim": [
-        1568,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00059",
-      "kernel_name": "triton_poi_fused__native_batch_3...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879092318,
-      "end_ns": 4879093278,
-      "duration_ns": 960,
-      "grid_dim": [
-        1,
-        4,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00061",
-      "kernel_name": "triton_poi_fused__native_batch_4...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879172349,
-      "end_ns": 4879179517,
-      "duration_ns": 7168,
-      "grid_dim": [
-        3136,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00062",
-      "kernel_name": "triton_poi_fused__native_batch_5...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879195581,
-      "end_ns": 4879196573,
-      "duration_ns": 992,
-      "grid_dim": [
-        3,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00064",
-      "kernel_name": "triton_poi_fused__native_batch_6...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879282652,
-      "end_ns": 4879289916,
-      "duration_ns": 7264,
-      "grid_dim": [
-        6272,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00065",
-      "kernel_name": "triton_poi_fused__native_batch_7...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879304508,
-      "end_ns": 4879305532,
-      "duration_ns": 1024,
-      "grid_dim": [
-        1,
-        32,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00067",
-      "kernel_name": "triton_poi_fused__native_batch_8...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879355228,
-      "end_ns": 4879366812,
-      "duration_ns": 11584,
-      "grid_dim": [
-        12544,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00068",
-      "kernel_name": "triton_poi_fused__native_batch_9...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879376892,
-      "end_ns": 4879378364,
-      "duration_ns": 1472,
-      "grid_dim": [
-        1,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00070",
-      "kernel_name": "triton_poi_fused__native_batch_10...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879435675,
-      "end_ns": 4879447515,
-      "duration_ns": 11840,
-      "grid_dim": [
-        12544,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00071",
-      "kernel_name": "triton_poi_fused__native_batch_11...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879457371,
-      "end_ns": 4879459387,
-      "duration_ns": 2016,
-      "grid_dim": [
-        8,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00073",
-      "kernel_name": "triton_poi_fused__native_batch_12...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879529755,
-      "end_ns": 4879551834,
-      "duration_ns": 22079,
-      "grid_dim": [
-        25088,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00074",
-      "kernel_name": "triton_poi_fused__native_batch_1...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879576410,
-      "end_ns": 4879577370,
-      "duration_ns": 960,
-      "grid_dim": [
-        2,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00076",
-      "kernel_name": "triton_poi_fused__native_batch_2...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879634842,
-      "end_ns": 4879639258,
-      "duration_ns": 4416,
-      "grid_dim": [
-        1568,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00077",
-      "kernel_name": "triton_poi_fused__native_batch_3...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879653818,
-      "end_ns": 4879654842,
-      "duration_ns": 1024,
-      "grid_dim": [
-        1,
-        4,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00079",
-      "kernel_name": "triton_poi_fused__native_batch_4...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879695193,
-      "end_ns": 4879702425,
-      "duration_ns": 7232,
-      "grid_dim": [
-        3136,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00080",
-      "kernel_name": "triton_poi_fused__native_batch_5...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879715705,
-      "end_ns": 4879716857,
-      "duration_ns": 1152,
-      "grid_dim": [
-        3,
-        1,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00082",
-      "kernel_name": "triton_poi_fused__native_batch_6...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879766649,
-      "end_ns": 4879773753,
-      "duration_ns": 7104,
-      "grid_dim": [
-        6272,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00083",
-      "kernel_name": "triton_poi_fused__native_batch_7...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879786201,
-      "end_ns": 4879787193,
-      "duration_ns": 992,
-      "grid_dim": [
-        1,
-        32,
-        1
-      ],
-      "block_dim": [
-        128,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00085",
-      "kernel_name": "triton_poi_fused__native_batch_8...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879828152,
-      "end_ns": 4879839064,
-      "duration_ns": 10912,
-      "grid_dim": [
-        12544,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00086",
-      "kernel_name": "triton_poi_fused__native_batch_9...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879845496,
-      "end_ns": 4879847032,
-      "duration_ns": 1536,
-      "grid_dim": [
-        1,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00088",
-      "kernel_name": "triton_poi_fused__native_batch_10...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879889144,
-      "end_ns": 4879899736,
-      "duration_ns": 10592,
-      "grid_dim": [
-        12544,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00089",
-      "kernel_name": "triton_poi_fused__native_batch_11...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879903064,
-      "end_ns": 4879905144,
-      "duration_ns": 2080,
-      "grid_dim": [
-        8,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    },
-    {
-      "kernel_id": "k_00091",
-      "kernel_name": "triton_poi_fused__native_batch_12...",
-      "demangled_name": null,
-      "stream_id": 7,
-      "device_id": 0,
-      "start_ns": 4879968023,
-      "end_ns": 4879989111,
-      "duration_ns": 21088,
-      "grid_dim": [
-        25088,
-        1,
-        1
-      ],
-      "block_dim": [
-        256,
-        1,
-        1
-      ],
-      "metrics": {
-        "raw": {}
-      },
-      "attribution_method": "unattributed",
-      "confidence": "unattributed",
-      "nvtx_range": null
-    }
-  ],
+  "unattributed_kernels": [],
   "warnings": [
-    "k_00000 (distribution_elementwise_grid_stride_kernel): flagged as initialization kernel",
-    "k_00001 (elementwise_kernel): flagged as initialization kernel",
-    "k_00002 (triton_poi_fused__native_batch_1...): flagged as initialization kernel",
-    "k_00003 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00004 (triton_poi_fused__native_batch_2...): flagged as initialization kernel",
-    "k_00005 (triton_poi_fused__native_batch_3...): flagged as initialization kernel",
-    "k_00006 (Kernel2): flagged as initialization kernel",
-    "k_00007 (triton_poi_fused__native_batch_4...): flagged as initialization kernel",
-    "k_00008 (triton_poi_fused__native_batch_5...): flagged as initialization kernel",
+    "k_00000 (void at::native::<unnamed>::distribution_elementwise_grid_stride_kernel<float, (int)4, void at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl *, void at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl *>(const at::TensorBase &, double, double, T1)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, T3, T4)::[lambda(curandStatePhilox4_32_10 *) (instance 2)], void at::native::<unnamed>::distribution_nullary_kernel<float, float, float4, at::CUDAGeneratorImpl *, void at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl *, void at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl *>(const at::TensorBase &, double, double, T1)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, T3, T4)::[lambda(curandStatePhilox4_32_10 *) (instance 2)], void at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl *>(const at::TensorBase &, double, double, T1)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, T4, const T5 &, T6)::[lambda(int, float) (instance 1)]>(long, at::PhiloxCudaState, T3, T4)): flagged as initialization kernel",
+    "k_00001 (void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)): flagged as initialization kernel",
+    "k_00002 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00003 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_0): flagged as initialization kernel",
+    "k_00004 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00005 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00006 (triton_tem_fused_convolution_1): flagged as initialization kernel",
+    "k_00007 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00008 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2): flagged as initialization kernel",
     "k_00009 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00010 (triton_poi_fused__native_batch_6...): flagged as initialization kernel",
-    "k_00011 (triton_poi_fused__native_batch_7...): flagged as initialization kernel",
-    "k_00012 (Kernel2): flagged as initialization kernel",
-    "k_00013 (triton_poi_fused__native_batch_8...): flagged as initialization kernel",
-    "k_00014 (triton_poi_fused__native_batch_9...): flagged as initialization kernel",
-    "k_00015 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00016 (triton_poi_fused__native_batch_10...): flagged as initialization kernel",
-    "k_00017 (triton_poi_fused__native_batch_11...): flagged as initialization kernel",
-    "k_00018 (Kernel2): flagged as initialization kernel",
-    "k_00019 (triton_poi_fused__native_batch_12...): flagged as initialization kernel",
-    "k_00020 (triton_poi_fused__native_batch_1...): flagged as initialization kernel",
-    "k_00021 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00022 (triton_poi_fused__native_batch_2...): flagged as initialization kernel",
-    "k_00023 (triton_poi_fused__native_batch_3...): flagged as initialization kernel",
-    "k_00024 (Kernel2): flagged as initialization kernel",
-    "k_00025 (triton_poi_fused__native_batch_4...): flagged as initialization kernel",
-    "k_00026 (triton_poi_fused__native_batch_5...): flagged as initialization kernel",
-    "k_00027 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00028 (triton_poi_fused__native_batch_6...): flagged as initialization kernel",
-    "k_00029 (triton_poi_fused__native_batch_7...): flagged as initialization kernel",
-    "k_00030 (Kernel2): flagged as initialization kernel",
-    "k_00031 (triton_poi_fused__native_batch_8...): flagged as initialization kernel",
-    "k_00032 (triton_poi_fused__native_batch_9...): flagged as initialization kernel",
-    "k_00033 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00034 (triton_poi_fused__native_batch_10...): flagged as initialization kernel",
-    "k_00035 (triton_poi_fused__native_batch_11...): flagged as initialization kernel",
-    "k_00036 (Kernel2): flagged as initialization kernel",
-    "k_00037 (triton_poi_fused__native_batch_12...): flagged as initialization kernel",
-    "k_00038 (triton_poi_fused__native_batch_1...): flagged as initialization kernel",
-    "k_00039 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00040 (triton_poi_fused__native_batch_2...): flagged as initialization kernel",
-    "k_00041 (triton_poi_fused__native_batch_3...): flagged as initialization kernel",
-    "k_00042 (Kernel2): flagged as initialization kernel",
-    "k_00043 (triton_poi_fused__native_batch_4...): flagged as initialization kernel",
-    "k_00044 (triton_poi_fused__native_batch_5...): flagged as initialization kernel",
-    "k_00045 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00046 (triton_poi_fused__native_batch_6...): flagged as initialization kernel",
-    "k_00047 (triton_poi_fused__native_batch_7...): flagged as initialization kernel",
-    "k_00048 (Kernel2): flagged as initialization kernel",
-    "k_00049 (triton_poi_fused__native_batch_8...): flagged as initialization kernel",
-    "k_00050 (triton_poi_fused__native_batch_9...): flagged as initialization kernel",
+    "k_00010 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3): flagged as initialization kernel",
+    "k_00011 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00012 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00013 (triton_tem_fused_convolution_4): flagged as initialization kernel",
+    "k_00014 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00015 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_5): flagged as initialization kernel",
+    "k_00016 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00017 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_6): flagged as initialization kernel",
+    "k_00018 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00019 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00020 (triton_tem_fused_convolution_7): flagged as initialization kernel",
+    "k_00021 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00022 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_8): flagged as initialization kernel",
+    "k_00023 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00024 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_0): flagged as initialization kernel",
+    "k_00025 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00026 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00027 (triton_tem_fused_convolution_1): flagged as initialization kernel",
+    "k_00028 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00029 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2): flagged as initialization kernel",
+    "k_00030 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00031 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3): flagged as initialization kernel",
+    "k_00032 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00033 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00034 (triton_tem_fused_convolution_4): flagged as initialization kernel",
+    "k_00035 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00036 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_5): flagged as initialization kernel",
+    "k_00037 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00038 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_6): flagged as initialization kernel",
+    "k_00039 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00040 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00041 (triton_tem_fused_convolution_7): flagged as initialization kernel",
+    "k_00042 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00043 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_8): flagged as initialization kernel",
+    "k_00044 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00045 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_0): flagged as initialization kernel",
+    "k_00046 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00047 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00048 (triton_tem_fused_convolution_1): flagged as initialization kernel",
+    "k_00049 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00050 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_2): flagged as initialization kernel",
     "k_00051 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
-    "k_00052 (triton_poi_fused__native_batch_10...): flagged as initialization kernel",
-    "k_00053 (triton_poi_fused__native_batch_11...): flagged as initialization kernel",
-    "k_00054 (Kernel2): flagged as initialization kernel",
-    "k_00055 (triton_poi_fused__native_batch_12...): flagged as initialization kernel"
+    "k_00052 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_3): flagged as initialization kernel",
+    "k_00053 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00054 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00055 (triton_tem_fused_convolution_4): flagged as initialization kernel",
+    "k_00056 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00057 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_5): flagged as initialization kernel",
+    "k_00058 (conv2d_c1_k1_nhwc): flagged as initialization kernel",
+    "k_00059 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_6): flagged as initialization kernel",
+    "k_00060 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00061 (void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)): flagged as initialization kernel",
+    "k_00062 (triton_tem_fused_convolution_7): flagged as initialization kernel",
+    "k_00063 (void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)): flagged as initialization kernel",
+    "k_00064 (triton_poi_fused__native_batch_norm_legit_no_training_hardtanh_8): flagged as initialization kernel"
   ]
 }
