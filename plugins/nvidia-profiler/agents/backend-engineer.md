@@ -276,7 +276,8 @@ A graph transformation must run at the IR level where its pattern is cleanly exp
 | Optimization | `ir_level` | Target it matches |
 |---|---|---|
 | QKV / gate-up weight fusion | `functional` | `F.linear` triplets sharing one activation |
-| SDPA formation / replacement | `functional` | `F.scaled_dot_product_attention` (or the matmul-softmax-matmul pattern) |
+| SDPA formation (matmul-softmax-matmul → F.sdpa) | `functional` | `F.scaled_dot_product_attention` |
+| SDPA replacement (efficient_attn ↔ sdpa kernel) | `aten` | `torch.ops.aten._scaled_dot_product_efficient_attention.default` |
 | BF16 / dtype promotion | `aten` | `aten.mm` / `aten.addmm` / SDPA operands |
 | Conv channels_last annotation | `aten` | `aten.convolution.default` |
 | Conv-BN fold | `aten` | `aten._native_batch_norm_legit_no_training.default` |

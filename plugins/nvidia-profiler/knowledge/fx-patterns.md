@@ -274,7 +274,7 @@ def _pass_fuse_qkv_aten(gm: fx.GraphModule, fw_example_inputs: list) -> fx.Graph
 
 ---
 
-## Pattern 2: SDPA Replacement
+## Pattern 2: SDPA Replacement — **`ir_level: aten`**
 
 Replaces `aten._scaled_dot_product_efficient_attention` (or flash variant) with `aten.scaled_dot_product_attention(is_causal=True)` to let the SDPA dispatcher select a hardware-native kernel.
 
@@ -468,9 +468,9 @@ def _pass_tanh_to_gelu(gm: fx.GraphModule) -> fx.GraphModule:
 
 ---
 
-## Pattern 5: Pre-Transposed Weight Buffer
+## Pattern 5: Pre-Transposed Weight Buffer — **`ir_level: aten` (deprecated — prefer `inductor_config` freezing)**
 
-Eliminates runtime `aten.t.default` overhead by pre-storing `weight.T.contiguous()` as a buffer.
+Eliminates runtime `aten.t.default` overhead by pre-storing `weight.T.contiguous()` as a buffer. Prefer `config_patches={"freezing": True}` (Pattern 7) over this pass — Inductor's constant-folding picks the layout CUTLASS wants and does not conflict with QKV fusion. Use this pattern only when `freezing` is unavailable.
 
 **Detection signal:** `aten.t.default(weight_ph)` consumed as the weight arg of `aten.mm.default`.
 

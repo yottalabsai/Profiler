@@ -306,7 +306,7 @@ Pass your `profile.json` to this prompt along with your baseline `workload.py`. 
 ### 2. Implement Optimizations (`optimization_implementation_prompt.md`)
 
 Pass the optimization recommendations and your workload to this prompt. It generates:
-- A custom `torch.compile()` backend with FX graph passes that implement the optimizations; all passes run at the **Aten IR** level (targeting `torch.ops.aten.*` nodes) inside `_aten_inner_compile`, which is installed as `compile_fx`'s `inner_compile` hook. This is distinct from the functional-level graph (`torch.mm`, `F.linear`, etc.) that `@register_backend` first receives.
+- A custom `torch.compile()` backend with FX graph passes routed across three IR levels: `functional` passes (fusion, SDPA) run before `compile_fx` on the Dynamo graph; `aten` passes (dtype casts, BN fold) run inside `_aten_inner_compile` targeting `torch.ops.aten.*` nodes; `inductor_config` passes are scoped `config_patches` on `compile_fx`. The three stages are composed as `_compile_unit` — see `plugins/nvidia-profiler/knowledge/fx-patterns.md` for the canonical implementation.
 - A test script to verify the optimized workload
 - Before/after documentation
 

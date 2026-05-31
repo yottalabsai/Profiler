@@ -175,7 +175,7 @@ Each proposal includes: the specific operators affected, exact metric evidence f
 | `qkv_fusion` (3 GEMM → 1) | FX pass | high/medium |
 | `sdpa_replacement` (FlashAttention) | FX pass | medium |
 | `bn_fold` (BatchNorm into Conv2d) | FX pass | high |
-| `pretranspose_weights` (weight layout) | FX pass | high |
+| `pretranspose_weights` (weight layout) | Inductor config (`freezing`) | high |
 | `activation_substitution` (tanh → gelu) | FX pass | medium |
 | `batch_padding` (pad to warp tile) | `get_model_and_input()` | medium |
 | `algorithm_selection` | Config change | high |
@@ -217,24 +217,33 @@ def get_model_and_input():
         x = x.to(torch.bfloat16)
     return model, x
 
-# Passes run at Aten IR level inside _aten_inner_compile (compile_fx's inner_compile hook).
-# example_inputs here may be FakeTensors; use real_inputs for weight-value-reading passes.
+# LEVEL 1 — functional passes on the Dynamo graph, before compile_fx/AOTAutograd.
+# Fusion and SDPA run here: the shared activation is one node; decomposition shatters it.
+def _run_functional_passes(gm):
+    gm = _fpass_fuse_qkv(gm)        # QKV fusion at functional level
+    gm = _fpass_replace_sdpa(gm)    # SDPA formation at functional level
+    return gm
+
+# LEVEL 2 — aten passes inside _aten_inner_compile, post-AOTAutograd decomposition.
+# example_inputs may be FakeTensors; use real_inputs for weight-value-reading passes.
 def _aten_inner_compile(gm, example_inputs, *, real_inputs=None, **kwargs):
     weight_source = real_inputs if real_inputs is not None else example_inputs
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
     ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}
-    gm = pass_fuse_qkv(gm, ph_to_tensor)           # weight-access pass
-    gm = pass_replace_sdpa(gm)                      # op-target pass
-    gm = pass_pretranspose_weights(gm, ph_to_tensor)
+    gm = _apass_bf16_promotion(gm)          # dtype cast — aten level
+    gm = _apass_fold_bn(gm, ph_to_tensor)  # BN fold — aten level
     return compile_fx_inner(gm, example_inputs, **kwargs)
 
 @register_backend
 def my_backend(gm, example_inputs):
+    gm = _run_functional_passes(gm)
     inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
-    return compile_fx(gm, example_inputs, inner_compile=inner)
+    # LEVEL 3 — inductor_config: scoped config_patches, no graph surgery
+    return compile_fx(gm, example_inputs, inner_compile=inner,
+                      config_patches={"freezing": True})
 ```
 
-All FX passes run at the **Aten IR** level. The `@register_backend` function receives the functional-level graph (`torch.mm`, `F.linear`, etc.), but passes must target `torch.ops.aten.*` nodes — these only appear after AOTAutograd decomposes the graph. The canonical injection point is `_aten_inner_compile`, installed as `compile_fx`'s `inner_compile` hook. Each pass is implemented defensively: it inspects the graph for the expected pattern before mutating, logs `INFO` on success or `WARNING` if the pattern is not found (graceful degradation).
+Passes are routed across three IR levels. **`functional`** passes (fusion, SDPA formation) run before `compile_fx` on the Dynamo graph, where the shared activation is still a single node — decomposition shatters it into per-consumer `aten.view`s, so fusion must happen here. **`aten`** passes (dtype casts, BN fold, channels-last) run inside `_aten_inner_compile` targeting decomposed `torch.ops.aten.*` nodes. **`inductor_config`** passes are scoped `config_patches` dicts on `compile_fx` (e.g. `{"freezing": True}` for constant-weight layout). Each pass degrades gracefully — logs `WARNING` if the pattern is not found and returns the graph unchanged.
 
 ---
 
@@ -375,7 +384,7 @@ GPU database covering 11 architectures (A100, H100, H200, B100, B200, RTX 4090, 
 
 ### `knowledge/fx-patterns.md`
 
-Canonical FX graph pass implementations for every supported transformation type: QKV fusion, SDPA replacement, BatchNorm fold, pre-transposed weights, activation substitution, and more. All patterns operate at the **Aten IR** level — targeting `torch.ops.aten.*` nodes inside `_aten_inner_compile` (not functional-level ops visible in the graph `@register_backend` receives). Includes the Aten IR op mapping table, `real_inputs` threading for weight-value-reading passes (because `inner_compile`'s `example_inputs` may be FakeTensors), and the standard `_aten_inner_compile` / `compile_fx_inner` / `_compile_with_aten_passes` backend skeleton. The `backend-engineer` agent uses this as the authoritative implementation reference.
+Canonical FX graph pass implementations organized by IR level. **`functional`-level** patterns (QKV fusion, SDPA formation) run before `compile_fx` on the Dynamo graph where the shared activation is still one node. **`aten`-level** patterns (dtype casts, BN fold, channels-last annotation, activation substitution) run inside `_aten_inner_compile` targeting `torch.ops.aten.*` nodes. **`inductor_config`** patterns are scoped `config_patches` dicts (e.g. `{"freezing": True}`). Includes the Aten IR op mapping table, `real_inputs` threading for weight-value-reading passes (because `inner_compile`'s `example_inputs` may be FakeTensors), and the standard three-stage `_compile_unit` funnel. The `backend-engineer` agent uses this as the authoritative implementation reference.
 
 ### `knowledge/edge-cases.md`
 

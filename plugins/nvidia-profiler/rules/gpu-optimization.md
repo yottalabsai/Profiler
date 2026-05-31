@@ -82,19 +82,15 @@ def my_model_opt(gm: fx.GraphModule, example_inputs) -> Callable:
 
     logger.info(f"my_model_opt: {len(equiv_map)} duplicate partitions, dedup path")
 
-    # Apply passes to each unique rep, then propagate to its duplicates
-    for rep_name, rep_mod in registry.unique_reps:
-        _pass_manual(rep_mod)
-        for _, dup_mod in registry.duplicates_of(rep_name):
-            _pass_manual(dup_mod)
-
-    # Compile unique reps; share the compiled callable with structural duplicates
+    # Compile each unique rep (passes applied inside _compile_unit per rep).
+    # Share the compiled callable with structural duplicates — do NOT apply passes to dup_mod.
     partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
     for rep_name, rep_mod in registry.unique_reps:
+        rep_mod = _pass_manual(rep_mod)  # passes on unique rep only
         compiled = compile_fx(rep_mod, partition_inputs.get(rep_name, example_inputs))
         rep_mod.forward = compiled
         for _, dup_mod in registry.duplicates_of(rep_name):
-            dup_mod.forward = compiled
+            dup_mod.forward = compiled  # share compiled callable; do not re-apply passes
 
     return lambda *args: registry.split(*args)
 ```
@@ -129,7 +125,7 @@ if x.shape[0] < 64:
 Passes are routed by `ir_level` (backend-engineer Rule 10). The funnel fixes the cross-level order **functional → (decomposition) → aten → inductor_config**, so a cross-level prerequisite is satisfied automatically (e.g. QKV fusion at `functional` precedes bf16 promotion at `aten`, so the fused weight is bf16).
 
 1. **Non-graph** (`dtype_promotion` whole-module, `channels_last`, `batch_padding`) — in `get_model_and_input()` only, before `torch.compile()`. Never inside `@register_backend`.
-2. **`functional`** (on the Dynamo graph, before `compile_fx`): node-count-reducing **fusion** (`_fpass_fuse_qkv`, gate/up fusion) and **SDPA formation/replacement**. These key on a shared high-level op / shared activation node that decomposition shatters into per-consumer `aten.view`s, so they MUST run pre-decomposition. SDPA replacement runs after QKV fusion (needs the fused outputs) — both `functional`, ordered within the level.
+2. **`functional`** (on the Dynamo graph, before `compile_fx`): node-count-reducing **fusion** (`_fpass_fuse_qkv`, gate/up fusion) and **SDPA formation** (converting a matmul-softmax-matmul pattern to `F.scaled_dot_product_attention`). These key on a shared high-level op / shared activation node that decomposition shatters into per-consumer `aten.view`s, so they MUST run pre-decomposition. SDPA formation runs after QKV fusion (needs the fused outputs) — both `functional`, ordered within the level.
 3. **`aten`** (inside `_aten_inner_compile`, post-decomposition): selective dtype casts, `_pass_fold_bn`, channels_last annotation, activation substitution (`_pass_tanh_to_gelu`).
 4. **`inductor_config`** (scoped `config_patches`): constant-weight layout / pre-transpose / `freezing`. Prefer `{"freezing": True}` over a hand-rolled pre-transpose pass — Inductor's constant-folding picks the layout CUTLASS wants.
 
