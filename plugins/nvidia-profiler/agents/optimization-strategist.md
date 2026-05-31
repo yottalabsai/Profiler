@@ -89,14 +89,26 @@ Before writing any optimizations, use `<thinking>` tags to work through the prof
 **Rules — never break these:**
 - `duration_ns` values are 2–5× inflated by ncu counter-collection overhead. Use them only for relative comparisons within this profile — never as absolute latency estimates.
 - Never produce generic advice without citing specific operator names and hardware counter values from the profile.
-- Every proposed transformation must name the exact FX node targets it operates on at the Aten IR level (e.g., `torch.ops.aten.addmm.default`, `torch.ops.aten.mm.default`, `torch.ops.aten.native_layer_norm.default`). Never propose functional-level targets (`F.linear`, `torch.mm`, `F.scaled_dot_product_attention`) — these are not present in the Aten IR graph where passes execute.
+- Every proposed transformation must declare an **`ir_level`** (`functional` | `aten` | `inductor_config`) and name its targets in *that level's* vocabulary (see "IR-Level Selection" below). Aten-level passes name `torch.ops.aten.*` overloads (e.g. `torch.ops.aten.mm.default`); functional-level passes name the Dynamo-graph ops (`F.linear`, `F.scaled_dot_product_attention`); inductor_config "passes" name the config key (e.g. `freezing`). Do NOT force a fusion or op-substitution onto the Aten level just because the profiler reports `aten::` names — that is a diagnosis vocabulary, not the required transform site (see why below).
 - Explain the performance mechanism: what changes at the GPU level (fewer kernel launches, better memory locality, Tensor Core engagement, cuBLAS path switch, etc.).
 - Label all assumptions explicitly. If profiling data is incomplete for a given proposal, state what you assumed and why.
 - Novel transformations not in `fx-patterns.md` are encouraged. Do not limit proposals to the known-pattern list.
 
+## IR-Level Selection
+
+Each optimization carries an `ir_level` telling the backend-engineer where to apply it. Choose by where the pattern is *cleanly expressed and sound*, not by where the symptom was measured. Diagnosis is always at the `aten::`/kernel level (that is where counters attach); the transform site is a separate decision.
+
+| `ir_level` | Choose when the transform… | Targets named as |
+|---|---|---|
+| `functional` | keys on a **shared high-level op** — operator fusion (QKV/gate-up), SDPA formation, op substitution. At this (pre-decomposition) level the activation is ONE node and weights are clean params. | `F.linear`, `F.scaled_dot_product_attention`, `torch.matmul` |
+| `aten` | rewrites **decomposed primitives / dtypes** — bf16 promotion, BN-fold, channels_last annotation, intermediate-tensor contiguity. | `torch.ops.aten.mm.default`, `aten.addmm.default`, `aten._native_batch_norm_legit_no_training.default` |
+| `inductor_config` | is a **constant-weight layout / lowering** decision Inductor already owns — pre-transpose, alignment, weight freezing. | a `config_patches` key, e.g. `freezing` |
+
+**Why fusion must be `functional` (do not get this wrong):** a QKV/gate fusion keys on N projections sharing one activation. After AOTAutograd decomposition each projection consumes its **own** `aten.view` of that activation, and a preceding dtype pass inserts a distinct cast in front of each `aten.mm` — so at the Aten level the shared-activation identity the matcher needs is gone and the pass silently no-ops. Propose it at `functional`; decomposition then lowers the single fused `F.linear` to the single wide `aten.mm` the profiler will measure.
+
 ## Dependency DAG Construction
 
-The `prerequisite_for[]` field encodes transformation order constraints.
+The `prerequisite_for[]` field encodes transformation order constraints. The backend funnel runs levels in a fixed order (`functional` → `aten` → `inductor_config`), so a cross-level prerequisite is satisfied **by level** — e.g. QKV fusion (`functional`) automatically precedes bf16 promotion (`aten`), so the fused weight ends up bf16 without a within-level ordering constraint. Never encode a prerequisite that requires an earlier-level pass to depend on a later-level result (e.g. a `functional` pass depending on an `aten` pass's output) — that is unsatisfiable.
 
 **General rule:** Any pass that calls `register_buffer` must come after dtype promotion — the buffer is allocated at the runtime dtype and cannot be recast after registration. This covers: QKV fusion, SDPA replacement, pre-transposed weights, SiLU/GEGLU fusion.
 
@@ -127,6 +139,8 @@ Build the dependency DAG. If a cycle is detected, remove the lower-confidence tr
   "optimizations": [{
     "id": "OPT-<N>",
     "priority": "<int>",
+    "ir_level": "<functional|aten|inductor_config>",
+    "match_target": "<level-appropriate target, e.g. F.linear | torch.ops.aten.mm.default | freezing>",
     "operators": ["<op_name> (<count> nodes)"],
     "bottleneck": {
       "description": "<string>",

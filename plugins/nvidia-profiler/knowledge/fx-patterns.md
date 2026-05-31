@@ -18,9 +18,15 @@ logger = logging.getLogger(__name__)
 
 ---
 
-## IR Level: All Passes Run at Aten IR
+## IR Levels: Functional, Aten, Inductor-Config
 
-`@register_backend` receives the graph **before** Inductor lowers it (functional level). All FX passes run inside `_aten_inner_compile`, which `compile_fx` calls (as its `inner_compile` hook) with the fully decomposed **Aten IR** graph. `compile_fx_inner` inside `_aten_inner_compile` then only handles the Aten → Triton step.
+A pass runs at the level where its pattern is cleanly expressed (backend-engineer Rule 10). Three levels:
+
+- **`functional`** — `@register_backend` receives the Dynamo graph **before** `compile_fx`/AOTAutograd. Here `nn.Linear`→`F.linear` is one node, `F.scaled_dot_product_attention` is one node, parameters are clean nodes, and an activation shared by several ops is **one** node. Run fusion / op-substitution here, on `gm` before calling `compile_fx`. (AOTAutograd recomputes meta when it traces the rewritten graph, so no FakeTensorProp is needed at this level.)
+- **`aten`** — inside `_aten_inner_compile` (`compile_fx`'s `inner_compile` hook), on the fully decomposed Aten IR graph; `compile_fx_inner` then handles Aten → Triton. Run dtype/primitive rewrites here. The mapping table below is the source→Aten correspondence for these passes.
+- **`inductor_config`** — no graph surgery; a scoped `config_patches` dict on the `compile_fx` call (e.g. `{"freezing": True}` for constant-weight layout).
+
+**Aten IR forms (for `aten`-level passes):**
 
 | Source code | Aten IR node (inside `_aten_inner_compile`) |
 |---|---|
@@ -50,12 +56,14 @@ weight = ph_to_tensor[addmm_node.args[2].args[0]]  # unwrap aten.t.default
 
 ## Pass Taxonomy
 
-Two categories:
-
-| Category | Criteria | How to apply |
+| Category (`ir_level`) | Criteria | How to apply |
 |---|---|---|
-| **Aten IR pass** | Any graph transformation — dtype casts, op replacement, kernel selection, QKV fusion, BN fold, pre-transposed weights | Inside `_aten_inner_compile`; use the threaded `real_inputs` for weight value lookup |
+| **Functional pass** (`functional`) | Operator fusion (QKV / gate-up), SDPA formation, op substitution — keys on a shared high-level op (`F.linear`, `F.scaled_dot_product_attention`) | `_run_functional_passes(gm)` BEFORE `compile_fx`; AOTAutograd recomputes meta (no FakeTensorProp) |
+| **Aten IR pass** (`aten`) | dtype casts, BN fold, channels_last annotation, intermediate-tensor contiguity — decomposed primitives | Inside `_aten_inner_compile`; threaded `real_inputs` for weight values; `_repropagate_meta` after structural rewrites |
+| **Inductor-config pass** (`inductor_config`) | constant-weight layout / pre-transpose / freezing — owned by Inductor | return a dict merged into `compile_fx(config_patches=...)`; no graph surgery |
 | **Non-graph** | dtype, memory_format, batch shape — not visible in any FX graph | `get_model_and_input()` only; never in the backend |
+
+**Why fusion is `functional`, not `aten`:** a QKV fusion keys on three projections sharing one activation. After decomposition each consumes its own `aten.view` of that activation and any dtype-cast pass inserts a separate cast per `aten.mm`, so the shared-node identity is gone and an Aten-level matcher no-ops. Fuse at the functional level; decomposition lowers the single fused `F.linear` to the single wide `aten.mm`.
 
 ---
 
@@ -72,46 +80,60 @@ Two categories:
 
 ---
 
-## Standard Backend Pattern
+## Standard Backend Pattern (three-stage funnel)
 
-Strategy D: install the Aten-IR passes via `compile_fx`'s `inner_compile` hook. `compile_fx`
-owns AOTAutograd, the decomposition table, the boxed calling convention, and the fwd/bwd
-partitioner — you only swap the leaf compiler. **Do NOT** use `aot_autograd(fw_compiler=compile_fx)`:
-on torch 2.11 it raises `AssertionError: Expected tensors only, but got list` in
-`copy_misaligned_inputs` (a boxing mismatch). The `inner_compile` seam is scoped per `compile_fx`
-call (no process-global state) and forward-compatible via `**kwargs`.
+The backend is one funnel, `_compile_unit`, invoked identically on the flat graph and each dedup rep:
 
-### `_aten_inner_compile`
+```
+_run_functional_passes(gm)  ->  compile_fx(inner_compile=_aten_inner_compile, config_patches=...)
+   LEVEL 1 (functional)          LEVEL 2 (aten) + LEVEL 3 (inductor_config)
+```
+
+`compile_fx` owns AOTAutograd, the decomposition table, the boxed calling convention, and the
+fwd/bwd partitioner — functional passes run *before* it, you swap the leaf compiler for the aten
+passes, and config-level passes ride on `config_patches`. **Do NOT** use
+`aot_autograd(fw_compiler=compile_fx)`: on torch 2.11 it raises `AssertionError: Expected tensors
+only, but got list` in `copy_misaligned_inputs` (a boxing mismatch). The seam is scoped per
+`compile_fx` call (no process-global state) and forward-compatible via `**kwargs`.
 
 ```python
-def _aten_inner_compile(gm: fx.GraphModule, example_inputs, *, real_inputs=None, **kwargs) -> Callable:
-    """
-    Inductor `inner_compile` hook. `compile_fx` calls this with the Aten IR graph after
-    AOTAutograd decomposition. All graph passes run here, then delegate to compile_fx_inner.
+# A pass declares its ir_level; the router groups by level (default "aten" if absent).
+PASS_REGISTRY = [ {"id": "OPT-2", "level": "functional", "fn": _fpass_fuse_qkv}, ... ]
+def _passes(level): return [p for p in PASS_REGISTRY if p["level"] == level]
 
-    `example_inputs` may be FakeTensors (Inductor traces under FakeTensorMode), so
-    weight-VALUE-reading passes use `real_inputs` (genuine params/inputs threaded from the
-    backend) for the lookup. Forward `**kwargs` verbatim to stay forward-compatible.
-    """
+def _run_functional_passes(gm):                       # LEVEL 1 — Dynamo graph, pre-compile_fx
+    for p in _passes("functional"):
+        try: gm = p["fn"](gm)
+        except Exception as e: logger.warning("[%s] functional no-op: %s", p["id"], e)
+    return gm
+
+def _aten_inner_compile(gm, example_inputs, *, real_inputs=None, **kwargs):   # LEVEL 2 — post-decomp
     weight_source = real_inputs if real_inputs is not None else example_inputs
     placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
     ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}
-
-    gm = _pass_one(gm, ph_to_tensor)   # weight-access pass (QKV fusion, BN fold, etc.)
-    gm = _pass_two(gm)                  # op-target pass (BF16 casts, SDPA replacement, etc.)
+    for p in _passes("aten"):
+        try:
+            gm = p["fn"](gm, ph_to_tensor) if _reads_weight_values(p) else p["fn"](gm)
+            _repropagate_meta(gm, example_inputs)     # inserted nodes get meta['val']
+        except Exception as e: logger.warning("[%s] aten no-op: %s", p["id"], e)
     return compile_fx_inner(gm, example_inputs, **kwargs)
 
+def _config_patches():                                # LEVEL 3 — scoped Inductor config
+    patches = {}
+    for p in _passes("inductor_config"):
+        try: patches.update(p["fn"]() or {})
+        except Exception as e: logger.warning("[%s] config skipped: %s", p["id"], e)
+    return patches
 
-def _compile_with_aten_passes(gm: fx.GraphModule, example_inputs) -> Callable:
-    """Compile a (sub)graph through Inductor with the Aten-IR passes installed via inner_compile."""
+def _compile_unit(gm, example_inputs):
+    gm = _run_functional_passes(gm)
     inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
-    return compile_fx(gm, example_inputs, inner_compile=inner)
+    return compile_fx(gm, example_inputs, inner_compile=inner, config_patches=_config_patches())
 ```
 
-> **Pass-argument naming:** the weight-reading pass examples below take a parameter named
-> `fw_example_inputs` for historical reasons. Under Strategy D that argument receives the threaded
-> **`real_inputs`** list (`weight_source`) — i.e. pass them `real_inputs`, not `inner_compile`'s
-> (possibly Fake) `example_inputs`. The pass bodies are otherwise unchanged.
+> **Pass-argument naming:** the weight-reading aten-pass examples below take a parameter named
+> `fw_example_inputs` for historical reasons. It receives the threaded **`real_inputs`** list
+> (`weight_source`) — not `inner_compile`'s (possibly Fake) `example_inputs`. Bodies unchanged.
 
 ### Dedup-aware backend
 
@@ -123,13 +145,13 @@ def {model}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
 
     if not equiv_map:
         logger.info("{model}_opt: no repeated layers, flat compile path")
-        return _compile_with_aten_passes(gm, example_inputs)
+        return _compile_unit(gm, example_inputs)
 
     logger.info(f"{model}_opt: {len(equiv_map)} duplicate partition(s), dedup path")
     partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
     for rep_name, rep_mod in registry.unique_reps:
         inputs = partition_inputs.get(rep_name, example_inputs)
-        compiled = _compile_with_aten_passes(rep_mod, inputs)
+        compiled = _compile_unit(rep_mod, inputs)      # SAME funnel per rep
         rep_mod.forward = compiled
         for _, dup_mod in registry.duplicates_of(rep_name):
             dup_mod.forward = compiled
@@ -137,7 +159,7 @@ def {model}_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     return lambda *args: registry.split(*args)
 ```
 
-`UniqueSubgraphRegistry` splits at the functional level for structural dedup. Do NOT move the split inside `_aten_inner_compile`.
+`UniqueSubgraphRegistry` splits at the functional level for structural dedup. Functional passes run **per rep** inside `_compile_unit`, never on the pre-split graph. Do NOT move the split inside `_aten_inner_compile`.
 
 ---
 
@@ -167,79 +189,88 @@ def _capture_partition_inputs(
 
 ---
 
-## Pattern 1: QKV Weight Fusion
+## Pattern 1: QKV Weight Fusion — **`ir_level: functional`**
 
-Fuses 3 independent projections sharing the same input `x` into a single wider GEMM + chunk.
+Fuses 3 independent projections sharing the same input `x` into one wider GEMM + slices.
 
-**Detection signal:** Three `aten.addmm.default` nodes (or `aten.mm.default` for bias-free) whose second arg (input activation) is the same node.
+> **Apply this at the `functional` level — NOT at `aten`.** At the functional level the three
+> projections are `F.linear(x, W)` nodes that share the **identical** activation node `x` and carry
+> clean weight params. After AOTAutograd decomposition the activation is shattered into a
+> per-consumer `aten.view` (so the three `aten.mm` no longer share `args[0]`) and bias-free Linear
+> lowers to `aten.mm` (not `aten.addmm`) — an Aten-level shared-activation matcher will silently
+> find nothing. The Aten variant at the end of this pattern is kept only for reference.
 
-**Weight access:** weight placeholder is at `addmm_node.args[2].args[0]` (inside `aten.t.default`).
+**Detection signal (functional):** ≥3 `F.linear` nodes whose first arg (the activation) is the same node, all bias-free.
 
 ```python
-def _pass_fuse_qkv(gm: fx.GraphModule, fw_example_inputs: list) -> fx.GraphModule:
-    try:
-        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-        ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+_LINEAR_FNS = {torch.nn.functional.linear}
+try: _LINEAR_FNS.add(torch._C._nn.linear)
+except Exception: pass
+def _is_linear(n):
+    return (n.op == "call_function"
+            and (n.target in _LINEAR_FNS or getattr(n.target, "__name__", "") == "linear"))
 
-        # Group aten.addmm.default calls by their input activation arg (args[1])
-        addmm_groups: dict[str, list] = {}
-        for n in gm.graph.nodes:
-            if n.op == "call_function" and n.target is torch.ops.aten.addmm.default:
-                addmm_groups.setdefault(n.args[1].name, []).append(n)
-
-        fused = False
-        for x_name, addmm_list in addmm_groups.items():
-            if len(addmm_list) < 3:
-                continue
-            q_n, k_n, v_n = addmm_list[0], addmm_list[1], addmm_list[2]
-
-            # Unwrap aten.t.default to get weight placeholder
-            def _get_weight(addmm_node):
-                t_node = addmm_node.args[2]
-                if t_node.op == "call_function" and t_node.target is torch.ops.aten.t.default:
-                    return ph_to_tensor.get(t_node.args[0])
-                return None
-
-            W_q, W_k, W_v = _get_weight(q_n), _get_weight(k_n), _get_weight(v_n)
-            if W_q is None or W_k is None or W_v is None:
-                logger.warning("[pass_fuse_qkv] Weight tensors not in fw_example_inputs")
-                continue
-            if not (W_q.shape[1] == W_k.shape[1] == W_v.shape[1]):
-                logger.warning("[pass_fuse_qkv] Weight K dims differ — skipping")
-                continue
-
-            W_qkv = torch.cat([W_q, W_k, W_v], dim=0)
-            gm.register_buffer("_fused_qkv_weight", W_qkv)
-
-            with gm.graph.inserting_before(q_n):
-                w_buf   = gm.graph.get_attr("_fused_qkv_weight")
-                # Use aten.mm since we supply the pre-transposed fused weight directly
-                fused_mm = gm.graph.call_function(
-                    torch.ops.aten.mm.default, (q_n.args[1], w_buf)
-                )
-                chunks  = gm.graph.call_function(torch.ops.aten.chunk.default, (fused_mm, 3), {"dim": -1})
-                q_out   = gm.graph.call_function(operator.getitem, (chunks, 0))
-                k_out   = gm.graph.call_function(operator.getitem, (chunks, 1))
-                v_out   = gm.graph.call_function(operator.getitem, (chunks, 2))
-
-            q_n.replace_all_uses_with(q_out)
-            k_n.replace_all_uses_with(k_out)
-            v_n.replace_all_uses_with(v_out)
-            for dead in (q_n, k_n, v_n):
-                gm.graph.erase_node(dead)
-
-            gm.graph.lint()
-            gm.recompile()
-            logger.info("[pass_fuse_qkv] Fused 3 addmm into 1 (input '%s') [Aten IR]", x_name)
-            fused = True
-            break
-
-        if not fused:
-            logger.warning("[pass_fuse_qkv] Pattern not found — pass not applied")
-    except Exception as e:
-        logger.warning("[pass_fuse_qkv] Failed: %s", e)
+def _fpass_fuse_qkv(gm: fx.GraphModule) -> fx.GraphModule:   # runs in _run_functional_passes
+    g = gm.graph
+    groups = {}
+    for n in g.nodes:
+        if _is_linear(n) and isinstance(n.args[0], fx.Node):
+            groups.setdefault(n.args[0], []).append(n)
+    fused = 0
+    for act, lins in groups.items():
+        if len(lins) < 3:
+            continue
+        q, k, v = lins[:3]
+        wq, wk, wv = q.args[1], k.args[1], v.args[1]
+        if any((len(n.args) > 2 and n.args[2] is not None) or n.kwargs.get("bias") is not None
+               for n in (q, k, v)):
+            continue  # bias fusion not handled — degrade gracefully
+        def _out(w):                       # out-features = weight.shape[0]; cat on dim 0
+            mv = w.meta.get("example_value", w.meta.get("val"))
+            return int(mv.shape[0]) if mv is not None else None
+        nq, nk, nv = _out(wq), _out(wk), _out(wv)
+        if None in (nq, nk, nv):
+            logger.warning("[fuse_qkv] missing weight meta — pass not applied"); continue
+        with g.inserting_before(q):
+            w_cat = g.call_function(torch.ops.aten.cat.default, ([wq, wk, wv], 0))
+            fused_lin = g.call_function(q.target, (act, w_cat))           # one wide F.linear
+            def _chunk(lo, hi):
+                s = g.call_function(torch.ops.aten.slice.Tensor, (fused_lin, -1, lo, hi))
+                # last-dim slice is strided; make contiguous so downstream .view stays valid
+                return g.call_function(torch.ops.aten.clone.default, (s,),
+                                       {"memory_format": torch.contiguous_format})
+            q_out, k_out, v_out = _chunk(0, nq), _chunk(nq, nq+nk), _chunk(nq+nk, nq+nk+nv)
+        q.replace_all_uses_with(q_out); k.replace_all_uses_with(k_out); v.replace_all_uses_with(v_out)
+        for d in (q, k, v):
+            if not d.users: g.erase_node(d)
+        fused += 1
+        logger.info("[fuse_qkv] Fused 3 projections into 1 linear (N=%d+%d+%d) [functional]", nq, nk, nv)
+        break
+    if not fused:
+        logger.warning("[fuse_qkv] No 3-way shared-activation linear triplet found — pass not applied")
+        return gm
+    g.eliminate_dead_code(); g.lint(); gm.recompile()
     return gm
 ```
+
+After OPT-1 (bf16, `aten` level) casts the resulting single wide `aten.mm`, this lowers to one wide bf16 tensor-core GEMM — the intended end state.
+
+<details><summary>Aten-level variant (reference only — usually no-ops, see warning above)</summary>
+
+```python
+def _pass_fuse_qkv_aten(gm: fx.GraphModule, fw_example_inputs: list) -> fx.GraphModule:
+    # Groups aten.addmm.default by shared activation. Fails for bias-free Linear (which is
+    # aten.mm, not addmm) and when AOTAutograd splits the activation into per-consumer views.
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, fw_example_inputs)}
+    addmm_groups = {}
+    for n in gm.graph.nodes:
+        if n.op == "call_function" and n.target is torch.ops.aten.addmm.default:
+            addmm_groups.setdefault(n.args[1].name, []).append(n)
+    # ... (cat weights, aten.mm, aten.chunk, replace, erase) — see git history
+    return gm
+```
+</details>
 
 ---
 

@@ -21,7 +21,7 @@ if _WORKLOAD_DIR not in sys.path:
 _EXPECTED_INPUT_SHAPE = (16, 32, 56, 56)    # (BATCH_SIZE, IN_CHANNELS, H, W)
 _EXPECTED_OUTPUT_SHAPE = (16, 256, 56, 56)  # final block projects to 256 channels
 _EXPECTED_DTYPE = "float32"                  # analysis.dtype (fp32)
-_BACKEND_NAME = "depthwise_separable_conv_opt"
+_BACKEND_NAME = "depthwise_sep_conv_opt"
 
 
 def test_import():

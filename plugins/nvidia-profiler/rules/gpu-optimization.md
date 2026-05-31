@@ -63,6 +63,7 @@ if (node.target == torch.ops.aten.t.default
 - Backend name MUST be lowercase snake_case: `{model_name_lower}_opt`  (e.g. `conv_block_opt`)
 - Log at `INFO` level: start of backend execution, end of each pass, delegation to Inductor
 - ALWAYS use the dedup-aware structure (`UniqueSubgraphRegistry`). The flat `compile_fx(gm, example_inputs)` pattern does not handle repeated-layer models correctly.
+- The authoritative backend structure is the three-stage funnel `_compile_unit` in **backend-engineer Rule 9** / `knowledge/fx-patterns.md` (functional passes before `compile_fx`; aten passes via `inner_compile`; `inductor_config` via `config_patches`). The simplified example below shows only a `functional`-style pre-`compile_fx` pass; consult Rule 9 for the full funnel and the `inner_compile` seam for `aten` passes.
 
 ```python
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
@@ -125,15 +126,14 @@ if x.shape[0] < 64:
 
 ## Pass Application Order (CRITICAL)
 
-Apply FX passes in this fixed order. Passes that mutate weight nodes must run before passes that depend on those nodes existing in their original form.
+Passes are routed by `ir_level` (backend-engineer Rule 10). The funnel fixes the cross-level order **functional → (decomposition) → aten → inductor_config**, so a cross-level prerequisite is satisfied automatically (e.g. QKV fusion at `functional` precedes bf16 promotion at `aten`, so the fused weight is bf16).
 
-1. **Non-graph passes** (`dtype_promotion`, `channels_last`, `batch_padding`) — in `get_model_and_input()` only, before `torch.compile()`. Never inside `@register_backend`.
-2. **Node-count reducing passes:** `_pass_fuse_qkv`, `_pass_fold_bn`, `_pass_fuse_silu_geglu` — replace multiple nodes with fewer; run first so downstream passes see the simplified graph.
-3. **Attention restructuring:** `_pass_replace_sdpa` — must run after QKV fusion (needs QKV output nodes).
-4. **Weight layout:** `_pass_pretranspose_weights` — after all fusion passes have finalized the weight node set.
-5. **Activation substitution:** `_pass_tanh_to_gelu` — independent; convention places it last.
+1. **Non-graph** (`dtype_promotion` whole-module, `channels_last`, `batch_padding`) — in `get_model_and_input()` only, before `torch.compile()`. Never inside `@register_backend`.
+2. **`functional`** (on the Dynamo graph, before `compile_fx`): node-count-reducing **fusion** (`_fpass_fuse_qkv`, gate/up fusion) and **SDPA formation/replacement**. These key on a shared high-level op / shared activation node that decomposition shatters into per-consumer `aten.view`s, so they MUST run pre-decomposition. SDPA replacement runs after QKV fusion (needs the fused outputs) — both `functional`, ordered within the level.
+3. **`aten`** (inside `_aten_inner_compile`, post-decomposition): selective dtype casts, `_pass_fold_bn`, channels_last annotation, activation substitution (`_pass_tanh_to_gelu`).
+4. **`inductor_config`** (scoped `config_patches`): constant-weight layout / pre-transpose / `freezing`. Prefer `{"freezing": True}` over a hand-rolled pre-transpose pass — Inductor's constant-folding picks the layout CUTLASS wants.
 
-**Mutual exclusion:** `_pass_fuse_qkv` and `_pass_pretranspose_weights` are **mutually exclusive on the same weight nodes**. `_pass_fuse_qkv` eliminates the individual Q/K/V placeholder nodes; after fusion no `call_method "t"` node exists on those weights for pre-transpose to find. Never propose both for the same `F.linear` group.
+**Note on pre-transpose:** the old `_pass_pretranspose_weights` (aten-level, matching `aten.t`/`aten.permute` → `mm`) is superseded by `inductor_config` freezing for constant weights, and it conflicted with `_fpass_fuse_qkv` anyway (fusion removes the individual Q/K/V weight nodes). Do not hand-roll it unless freezing is unavailable.
 
 ## Graph-Break Defensive Traversal
 

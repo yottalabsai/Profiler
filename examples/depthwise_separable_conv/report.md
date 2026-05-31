@@ -1,6 +1,8 @@
-# Optimization Report — `depthwise_separable_conv`
+# Optimization Report — DepthwiseSepConv
 
-**On cleanly-attributed compute, the FX backend `depthwise_separable_conv_opt` achieved a 1.08× speedup at B=16 on an NVIDIA RTX PRO 6000 Blackwell Server Edition** — driven almost entirely by lowering the smaller pointwise (1×1) convolutions to cuBLAS GEMMs. See §6 for why the raw total-duration ratio (3.85×) overstates this and should not be quoted.
+**This optimization achieved ≈1.08× net speedup on per-operator-attributed kernel time (B=16, NVIDIA RTX PRO 6000 Blackwell).** The headline number is modest and deliberately conservative: the one transformation that landed (bf16 pointwise GEMMs, OPT-1) delivered a clear *efficiency* win — achieved occupancy on the 1×1 convolutions rose from ~8% to ~31% and the kernels moved onto the bf16 tensor-core path — but that gain was largely offset by ~110 µs of new fp32↔bf16 cast and channels-last copy traffic, and the single highest-value proposal (conv-BN folding, OPT-2) **did not apply** to the graph. The detailed accounting below explains why a clean total-vs-total ratio is not directly available for this workload and what the defensible per-operator comparison shows.
+
+> **Timing caveat (applies throughout).** All durations come from Nsight Compute (ncu) application-mode replay. ncu serializes kernels and adds counter-collection overhead, so absolute values are **2–5× longer than real wall-clock** and are meaningful only *relative to each other within the same capture*. Never read these as production latency.
 
 ---
 
@@ -9,205 +11,206 @@
 | Field | Value |
 |---|---|
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| Architecture | Blackwell (GB202-class, sm_120 — assumed; see note) |
-| PyTorch | 2.11.0+cu128 |
-| Baseline compile mode | `inductor` (built-in dedup backend) |
-| Optimized compile mode | `depthwise_separable_conv_opt` (custom `@register_backend`) |
-| Batch size | 16 (input `[16, 32, 56, 56]`, FP32) |
-| Iteration count | 2 warmup / 2 measure (ncu replay — **relative timing only**) |
-
-> **Caveat on all durations:** values come from ncu application-mode replay, which inflates kernel time 2–5× vs. wall clock. Treat every `ns` figure as *relative*, never as real execution latency.
->
-> **Architecture note:** `knowledge/hardware-limits.md` was unavailable during proposal; the strategist treated the device as GB202/sm_120 (~188 SMs). `warp_cycles_per_instruction` is null throughout, so the Blackwell latency-bound signal used was `eligible_cycles_pct < 20%`.
+| Architecture | Blackwell (sm_120) |
+| PyTorch | 2.11.0+cu128 (CUDA 12.8) |
+| Baseline compile mode | `inductor` (built-in layer-dedup backend) |
+| Optimized compile mode | `depthwise_sep_conv_opt` (custom `@register_backend`) |
+| Batch size | 16 |
+| Input | `[16, 32, 56, 56]` → `[16, 256, 56, 56]` |
+| Iteration count | warmup 2 / measure 2 (ncu replay — relative timing only) |
+| Captures | baseline 2026-05-29T22:15Z · optimized 2026-05-29T22:32Z (17 min apart, same GPU) |
 
 ---
 
 ## 2. Operator Summary (baseline)
 
-Sorted by share of attributed time. Note the first two rows are **NVTX-range / bucket aggregates** that overlap the per-instance conv rows below them — they do not represent additional distinct work (see §6).
+Durations are ncu-replay relative. The baseline was produced by the built-in **layer-dedup** backend, which emits a synthetic NVTX aggregate `layer::unique::prologue` wrapping the compiled unique-partition forward. **That aggregate (33 kernels) and the per-aten-op attributions (32 kernels) are disjoint kernel sets** — verified: 0 shared kernel IDs — i.e. they are two independent measurements of the same logical forward (one fused-compiled, one library-kernel). Summing them double-counts the forward pass, so the table below lists the prologue separately and the "Time (%)" column is normalized over the raw 818 µs sum only to show relative weight.
 
 | Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
 |---|---|---|---|---|
-| `layer::unique::prologue` *(aggregate)* | 50.9% | 437,850 | 30 | Mixed warm-up bundle (BN + relu6 + repack + convs) |
-| `aten::cudnn_convolution` *(aggregate bucket)* | 18.7% | 160,511 | 9 | Memory-bound (mem 45.7%, occ 40.9%) |
-| pointwise 1×1, 128→256 (×2) | 11.2% | 96,352 | 2 | **Latency-bound GEMM** (occ 8.3%, 228 reg/thr) |
-| pointwise 1×1, 64→128 (×2) | 6.3% | 53,952 | 2 | **Latency-bound GEMM** (occ 8.3%) |
-| `aten::convolution` (NCHW↔NHWC repack) | 2.5% | 21,536 | 2 | Layout overhead (sm 9.6%, TC 0%) |
-| depthwise 3×3, 128ch (×2) | 3.8% | 33,087 | 2 | Memory-bound (mem 73.5%, occ 86%) |
-| pointwise 1×1, 32→64 (×2) | 3.2% | 27,616 | 2 | Latency-bound GEMM (occ 8.3%) |
-| depthwise 3×3, 64ch (×2) | 2.0% | 17,632 | 2 | Memory-bound (mem 61%, occ 82%) |
-| depthwise 3×3, 32ch (×2) | 1.4% | 11,776 | 2 | Memory-bound (mem 47%, occ 72%) |
+| `layer::unique::prologue` *(synthetic aggregate — see note)* | 53.9% | 440,866 | 33 | Mixed (compiled forward) |
+| `aten::_native_batch_norm_legit_no_training` | 13.4% | 109,984 | 12 | Memory-bound (DRAM 74%, TC 0%) |
+| `aten::cudnn_convolution` (depthwise+pointwise group) | 6.3% | 51,233 | 6 | Memory-bound (DRAM 63%, TC 0%) |
+| `aten::cudnn_convolution` op_id 53 — pointwise 128→256 | 4.8% | 39,072 | 1 | Latency-bound GEMM (occ **8.3%**, TC 45%) |
+| `aten::cudnn_convolution` op_id 26 — pointwise 64→128 | 4.7% | 38,656 | 1 | Latency-bound GEMM (occ **8.4%**, TC 45%) |
+| `aten::cudnn_convolution` op_id 45/18 — pointwise 32→64 | 5.4% | 44,161 | 2 | Latency-bound GEMM (occ **8.2%**, TC 39%) |
+| `aten::convolution` (bare) | 2.4% | 20,000 | 2 | Memory-bound (TC 0%) |
+| `aten::cudnn_convolution` op_id 49/22 — depthwise 128 | 3.4% | 28,192 | 2 | Memory-bound (DRAM 71%, TC 0%) |
+| `aten::cudnn_convolution` op_id 10/37 — pointwise 32→64 | 2.7% | 21,984 | 2 | Latency-bound GEMM (occ **8.2%**, TC 19%) |
+| `aten::cudnn_convolution` op_id 41/14 — depthwise 64 | 1.8% | 14,624 | 2 | Memory-bound (DRAM 57%, TC 0%) |
+| `aten::cudnn_convolution` op_id 6/33 — depthwise 32 | 1.1% | 9,312 | 2 | Memory-bound (DRAM 46%, TC 0%) |
 
-**Bottleneck headline:** the pointwise 1×1 convs (lowered to the implicit-GEMM `Kernel2`) run at a pathological **8.3% occupancy** with 224–228 registers/thread and 81.92 KB dynamic shared memory — the single largest addressable inefficiency. Depthwise 3×3 convs are already near the memory-bandwidth ceiling (73% mem throughput) and are not GEMM-addressable.
+**Two root causes** (from `optimizations.json` analysis):
+1. **Pointwise 1×1 convs are latency-bound, not throughput-bound.** They run as Ampere-tuned `cutlass_80 s1688gemm` TF32 kernels on a Blackwell device, pinned at ~8% achieved occupancy (224 regs/thread) with only 16–20% eligible cycles — the SM is starved, not saturated.
+2. **BatchNorm + ReLU6 are unfused, pure-bandwidth Triton kernels** (DRAM 74–84%, TC 0%), because the convs went to library kernels that cannot accept a Triton epilogue. The 256-channel `hardtanh` variant alone writes up to 472 MB.
 
 ---
 
 ## 3. Reading the Metrics
 
-Only the metrics that drove this workload's bottlenecks:
+Only metrics that drive this workload's bottlenecks:
 
-- **`achieved_occupancy` (8.3%)** — fraction of the SM's warp slots kept resident. 8.3% means the kernel occupies ~1 of 12 warp schedulers' capacity; the SM stalls waiting on long-latency instructions with no other warps to hide behind. This is *the* signal for the pointwise convs. Above ~50% is healthy for a GEMM.
-- **`eligible_cycles_pct` (16–28%)** — share of active cycles with at least one warp ready to issue. Below ~20% on Blackwell indicates latency-bound execution (used here because `warp_cycles_per_instruction` is null). The 256-channel pointwise convs sit at ~16%.
-- **`registers_per_thread` (224–228)** — extreme register pressure caps how many warps can co-reside, directly causing the 8.3% occupancy. A balanced cuBLAS GEMM tile uses far fewer.
-- **`memory_throughput_pct` (47–74% on depthwise)** — the depthwise 3×3 convs are bandwidth-bound; there is no compute headroom to reclaim, so they were correctly left alone.
-- **`tensor_core_active_pct`** — on the pointwise GEMMs this reads 39–45% (Tensor Cores partially engaged but starved by occupancy). Where it reads `0.0` on depthwise/BN kernels, that is **expected** (non-GEMM kernels) and is not a bottleneck signal.
+- **`achieved_occupancy` (%)** — fraction of the SM's warp slots kept resident. The pointwise GEMMs sit at **~8%**, the dominant signal here: the kernel is latency-bound because too few warps are live to hide memory/instruction latency. Anything < ~30% on a GEMM means the kernel is leaving the machine idle. Post-optimization these convs reach ~31%.
+- **`tensor_core_active_pct` (%)** — fraction of cycles the tensor cores were issuing. **`0.0` (not null) means the GEMM ran on the FP32/SIMT path with tensor cores idle** — the highest-ROI signal available. A `null` value (seen on this workload's `aten::copy_` kernels) is expected for non-GEMM kernels and is *not* a problem. Baseline pointwise convs show 19–45% (TF32 tensorop); the optimized bf16 GEMMs show 36.2%.
+- **`dram_throughput_pct` (%)** — DRAM bandwidth utilization. The BatchNorm/ReLU6 kernels run at 74–84% — they are bandwidth-bound and the only way to speed them up is to *eliminate the pass*, which is exactly what conv-BN folding (OPT-2) was meant to do.
+- **`sm_throughput_pct` (%)** — compute-pipe utilization. Low (~25%) on the bandwidth-bound BN/copy kernels, consistent with memory-bound classification.
 
 ---
 
 ## 4. Optimizations Applied
 
+Status from `profiler_output/validation_report.json`.
+
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
 |---|---|---|---|---|---|
-| OPT-2 | Inference conv-BN folding | BN chain on all 6 convs (prologue + `aten::convolution`) | Standalone full-tensor BN normalize passes (`triton_poi_fused__native_batch_*`), one read+write per BN | high | **APPLIED** (folded into 7 convs) |
-| OPT-1 | 1×1 conv → `mm`/`addmm` | 6 pointwise convs (op_id 26,53,18,45,37,10) | `Kernel2` at 8.3% occ, 228 reg/thr, 81.92 KB smem, eligible 16% | high | **APPLIED** (3 sites → `addmm`, M=50176) |
-| OPT-3 | channels_last layout | depthwise convs + `aten::convolution` repack | `triton_poi_fused_convolution_0` repack kernels at 9.5% SM, 0% TC | medium | **NOT_APPLIED** (handled eager-side; no residual copy nodes to strip) |
+| OPT-1 | dtype_promotion (bf16 pointwise 1×1) | `aten.convolution.default` weight `[Cout,Cin,1,1]` | cutlass_80 s1688 TF32 GEMM, occ ~8%, 224 regs/thread, eligible-cycles 16–20% | medium | **APPLIED** (3 convs → bf16, Cout=64,128,256) |
+| OPT-2 | fusion (conv-BN fold) | `aten.convolution` → `aten._native_batch_norm_legit_no_training` | 12 standalone BN+ReLU6 Triton kernels, DRAM 74–84%, TC 0%, up to 472 MB written | high | **NOT_APPLIED** (no conv→BN pair matched in graph — graceful) |
+| OPT-3 | memory_layout (channels_last) | conv nodes + input placeholder | interior `triton_poi_fused_convolution_0` relayout copies, ~0% cache reuse | medium | **APPLIED** (input→NHWC eager-side; FX strip-copies a no-op — no redundant copies found) |
+| OPT-4 | fusion (depthwise ReLU6 epilogue) | `aten.convolution` `[C,1,3,3]` → `aten.hardtanh` | one full DRAM round-trip per depthwise stage | medium | **NOT_APPLIED** (no depthwise→hardtanh pair matched — graceful) |
 
-OPT-3's graph pass found nothing to strip because the layout was forced eager-side in `get_model_and_input()`; the pass degraded gracefully (INFO no-op), exactly as designed.
+Two of four passes degraded gracefully (warning + unchanged graph, no crash). Their non-application is the central finding of this run — see §6 and §8.
 
 ---
 
 ## 5. Implementation Notes
 
-# Implementation Notes — depthwise_separable_conv_opt
+# Implementation Notes — DepthwiseSepConv Optimized Backend
 
-Custom `torch.compile()` backend for `DepthwiseSepConv` (three MobileNet-style
-depthwise-separable blocks, channel progression 32 -> 64 -> 128 -> 256, spatial
-56x56, FP32, RTX PRO 6000 Blackwell, torch 2.11.0+cu128).
-
-Backend name (`@register_backend`): **`depthwise_separable_conv_opt`**
+Backend name (for `--compile-backend`): **`depthwise_sep_conv_opt`**
+Workload: `depthwise_separable_conv_optimized.py` (exposes `get_model_and_input()`).
+Target: torch 2.11.0+cu128, RTX PRO 6000 Blackwell sm_120, `compile_mode = "inductor"`.
 
 ## Backend Architecture
 
-All graph passes operate on the **decomposed Aten IR**, installed via Inductor's
-`post_grad_custom_pre_pass` hook (the torch 2.11 FX injection point; the
-`aot_autograd` `fw_compiler` path is broken on 2.11). The backend delegates
-AOTAutograd + lowering to `compile_fx`. Apply order respects the DAG
-`OPT-2 -> {OPT-1, OPT-3}`: BN fold first, then 1x1->GEMM, then layout.
+All graph passes run at **Aten IR** inside `_aten_inner_compile`, installed via
+`compile_fx`'s `inner_compile` hook (Strategy D, Rule 9). `compile_fx` owns AOTAutograd,
+the decomposition table, the boxed calling convention, and the partitioner; we only swap
+the leaf compiler `compile_fx_inner` and run the four passes just before it. Apply order
+follows the DAG `OPT-1 -> {OPT-2, OPT-3, OPT-4}`, `OPT-2 -> OPT-4`.
 
 | Pass | Method | Reason |
 |---|---|---|
-| OPT-2 conv-BN folding (`_pass_fold_conv_bn`) | `post_grad_custom_pre_pass` (Aten IR) | Detects the decomposed inference-BN affine chain (`sub -> mul(rstd) -> mul(gamma) -> add(beta)`) on a conv output and folds the affine into the conv weight/bias as structural graph nodes; Inductor constant-folds the weight math, deleting the standalone BN normalize/broadcast Triton kernels and letting relu6 epilogue-fuse. Must run first (prerequisite for OPT-1 and OPT-3). |
-| OPT-1 1x1 conv -> GEMM (`_pass_pointwise_to_gemm`) | `post_grad_custom_pre_pass` (Aten IR) | Rewrites each 1x1/stride-1/pad-0/groups-1 `aten.convolution` into `permute->reshape->addmm/mm->reshape->permute`, routing the 8.3%-occupancy implicit-GEMM "Kernel2" onto a tiled cuBLAS GEMM that engages Blackwell Tensor Cores. Consumes the OPT-2-folded bias via `aten.addmm`. |
-| OPT-3 channels_last (`_pass_strip_layout_copies` + eager-side) | `get_model_and_input()` (primary) + `post_grad_custom_pre_pass` (cleanup) | Eager-side `model/input.to(memory_format=channels_last)` makes NHWC the native layout so Inductor stops inserting per-conv `triton_poi_fused_convolution_0` pack kernels; the graph pass strips any residual redundant `clone/_to_copy(channels_last)` copies. |
+| OPT-1 dtype_promotion (bf16 pointwise 1×1 convs) | `_aten_inner_compile` (`_pass_bf16_pointwise_conv`) | Casts the 1×1 pointwise (`groups==1`, weight `[Cout,Cin,1,1]`) conv operands to bf16 so Inductor lowers them to an autotuned bf16 tensor-core GEMM for sm_120 instead of the prebuilt sm_80 cutlass s1688 (TF32) kernel pinned at ~8% occupancy; paired with `max_autotune_gemm`. Output re-cast to fp32. |
+| OPT-2 conv-BN fold | `_aten_inner_compile` (`_pass_fold_conv_bn`) | Bakes the inference BN per-channel affine into the preceding conv weight/bias (numerically exact), eliminating the 12 standalone DRAM-bound `_native_batch_norm_legit_no_training` + hardtanh Triton kernels. Reads real param tensors via threaded `real_inputs`. |
+| OPT-3 channels_last layout | `get_model_and_input()` (primary) + `_aten_inner_compile` (`_pass_strip_layout_copies`) | Eager-side `.to(memory_format=channels_last)` on model + input is the primary lever so conv/GEMM kernels run native NHWC and Inductor drops the per-block permute kernels; the graph pass strips any residual redundant channels_last copy nodes. |
+| OPT-4 depthwise ReLU6 epilogue fusion | config (`max_autotune` + `max_autotune_conv_backends='TRITON,ATEN'`) + `_aten_inner_compile` (`_pass_mark_depthwise_relu6_fusion`) | Config lever lets the scheduler lower the depthwise conv to a Triton template and fuse the clamp(0,6) + folded-bias epilogue, removing one DRAM round-trip per depthwise stage; the graph pass detects+tags the (depthwise conv → hardtanh) pairs. Detection-only graph mutation. |
 
-Stubs: none — all three optimizations from `optimizations.json` are implemented
-(OPT-2 and OPT-1 as transforming Aten-IR passes, OPT-3 as eager-side layout plus
-a graph cleanup pass).
+Non-graph levers (in `get_model_and_input()`): OPT-3 channels_last only. dtype promotion
+(OPT-1) is deliberately a graph pass (not an eager `model.half()`) so it can target *only*
+the pointwise convs and leave the memory-bound depthwise convs in fp32.
 
 ## Key Design Decisions
 
-**Why `post_grad_custom_pre_pass` and not a Dynamo-level rewrite.** The graph a
-`@register_backend` function receives is the functional Dynamo graph, not Aten IR.
-`aten.convolution`, `aten.clamp_min`/`clamp_max` (relu6), and the BN decomposition
-only appear after AOTAutograd. All target ops in `optimizations.json` are `aten::`
-names, so every pass is installed at the Aten IR layer via Inductor's documented
-post-grad pre-pass hook. The `aot_autograd(fw_compiler=...)` seam raises a boxing
-assertion on torch 2.11, so it is avoided.
+**OPT-1 before OPT-2 (buffer dtype).** OPT-1 casts the pointwise conv operands to bf16,
+so OPT-2's folded weight/bias buffers for those convs are materialized at bf16 (matching
+the conv runtime dtype); the depthwise conv stays fp32 and its folded buffers are fp32.
+OPT-2 unwraps the OPT-1 cast nodes (`aten.to.dtype` / `aten._to_copy`) to recover the
+*real* fp32 parameter values for the fold math (computed in fp32, then cast to the runtime
+dtype), and detects whether the conv ran bf16 by inspecting whether its weight arg is a
+cast node — emitting a fp32 re-cast after the folded bf16 conv to preserve the downstream
+dtype contract.
 
-**Structural (FakeTensor-safe) BN fold.** Inductor traces under FakeTensorMode, so
-placeholder inputs have no readable storage. The BN fold therefore never reads
-weight values; it emits `aten.mul`/`aten.reshape`/`aten.sub`/`aten.add` nodes on the
-existing weight/bias/BN-param placeholders. Inductor constant-folds this arithmetic
-at lower time, so there is no runtime cost and no per-conv normalize kernel.
+**OPT-2 before OPT-4 (fusion enablement).** The ReLU6 (hardtanh) can only fuse into the
+conv epilogue once BN has been folded out; before OPT-2 the BN node sits between the conv
+and the hardtanh and blocks epilogue fusion. OPT-4 therefore runs last and walks back
+through any OPT-1 fp32 re-cast to confirm the hardtanh's producer is a depthwise conv.
 
-**Ordering constraint (OPT-2 before OPT-1).** OPT-1 emits `aten.addmm(bias, x, w)` to
-absorb the conv bias into the GEMM epilogue. That bias only exists once OPT-2 has
-folded the BN affine into the (originally bias-free) conv, so OPT-2 must precede
-OPT-1. OPT-2 also simplifies the graph before OPT-3's layout pass sees it.
+**OPT-4 is config-driven, not node surgery.** Forcing a Triton conv template + epilogue
+fusion is an Inductor scheduler decision, not an FX rewrite. The graph pass only detects
+and tags the depthwise→hardtanh pairs (`conv.meta['fuse_relu6_epilogue']`) so the contract
+is logged/asserted; `max_autotune_conv_backends='TRITON,ATEN'` keeps the ATEN library
+kernel as a fallback when the Triton depthwise conv loses autotune (the depthwise kernel is
+already NHWC and competitive).
 
-**`_weight_shape` walk-back.** After OPT-2, a conv's weight arg is a freshly inserted
-`aten.mul(W, scale)` node with no populated `meta['val']` yet. OPT-1's pointwise guard
-walks back through the mul/reshape chain to the original weight placeholder (which
-carries `meta`) to read the `[C_out, C_in, 1, 1]` shape.
+**Flat compile path (no dedup).** The three `DWSepBlock`s have distinct channel counts
+(32→64, 64→128, 128→256), so `UniqueSubgraphRegistry.build_partition_equivalence_map()`
+returns no duplicates and the backend takes the flat `_compile_with_aten_passes(gm, ...)`
+path, preserving cross-block Inductor fusion. The dedup branch is retained for reuse if the
+model grows to repeated blocks.
 
-**`aten.permute([1,0])` instead of `aten.t`.** On torch 2.11 post-grad, `aten.t.default`
-collides with an Inductor decomp/fallback assertion; `aten.permute` for the weight
-transpose is equivalent and stable.
-
-**`_repropagate_meta` after mutation.** New nodes from OPT-2/OPT-1 lack `meta['val']`,
-which downstream Inductor post-grad passes (e.g. `should_prefer_unfused_addmm`) read.
-A scoped `FakeTensorProp` re-run inside the active FakeTensorMode repopulates meta
-before lowering.
-
-**Dedup path retained but inactive.** Per Rule 9 the backend builds a
-`UniqueSubgraphRegistry` partition equivalence map. The three blocks have different
-channel widths (32/64/128/256) and are not structural duplicates, so `equiv_map` is
-empty and the flat `compile_fx` path is taken (preserving cross-block Inductor fusion).
-The per-rep dedup branch is kept for models with repeated identical blocks.
-
-**Graceful degradation.** Each pass counts matches and logs INFO on application or
-WARNING (no-op) when its pattern is absent; the whole chain is wrapped in a
-try/except that logs a WARNING and returns the graph unchanged, so a pattern miss or
-API drift never crashes the compile.
+**Graceful degradation.** Every pass is wrapped: OPT-2 (high confidence) assumes the
+pattern exists and logs a warning + returns `gm` unchanged on a genuine exception; OPT-1/3/4
+(medium) additionally no-op with a warning when their pattern is absent. No pass can crash
+the compile.
 
 ---
 
 ## 6. Before/After Results
 
-Both profiles captured at **B=16**. Operators matched by `operator_name` and shape — the 6 pointwise 1×1 convs collapse to 6 `aten::mm` after OPT-1; the 6 depthwise 3×3 convs remain `aten::cudnn_convolution`.
+Both captures share **batch size 16** and the **same GPU** 17 minutes apart (< 6 h) — no cross-session caveat required.
 
-> **Why not "3.85×".** The naive ratio of total attributed duration (860,312 ns → 223,485 ns = 3.85×) is **not a valid speedup.** The baseline was captured with the built-in dedup backend, which emits a `layer::unique::prologue` NVTX aggregate (437,850 ns, 50.9%) that *bundles the warm-up copies of the same convs already counted per-instance below it* — the strategist flagged this as `fused_kernel_double_count` + `warm_up_inflation`. The optimized capture used the custom backend, which attributes every kernel individually with no overlapping aggregate. Comparing the two totals compares two different accounting schemes, not two amounts of work. The only rigorous comparison is operator-matched on the cleanly-attributed compute kernels:
+**Why no single total-vs-total ratio.** The two profiles were produced by *different backends* with *different attribution structure*:
+- **Baseline (dedup backend)** emits a `layer::unique::prologue` synthetic aggregate (33 kernels) **plus** a disjoint 32-kernel per-aten-op set — two independent measurements of the same forward. Raw sum = 818,084 ns is inflated by this double-measurement (strategist flags `fused_kernel_double_count`, `warm_up_inflation`).
+- **Optimized (flat backend)** has no prologue aggregate; its 26 operators are a single attributed kernel set, raw sum = 350,529 ns.
 
-### Operator-matched comparison (cleanly attributed kernels only)
+Comparing the raw sums (818 µs → 350 µs) would falsely report ~2.3×. The defensible comparison excludes the synthetic prologue aggregate from the baseline, leaving the per-aten-op attributed work on both sides:
 
-| Operator | Baseline (ns) | Optimized (ns) | Speedup |
+| Bucket (semantic role) | Baseline (ns) | Optimized (ns) | Δ |
 |---|---|---|---|
-| Pointwise 1×1, 128→256 (×2) → `aten::mm` | 96,352 | 100,735 | **0.96×** |
-| Pointwise 1×1, 64→128 (×2) → `aten::mm` | 53,952 | 39,391 | **1.37×** |
-| Pointwise 1×1, 32→64 (×2) → `aten::mm` | 27,616 | 20,863 | **1.32×** |
-| **Pointwise subtotal (OPT-1 target)** | **177,920** | **160,989** | **1.11×** |
-| Depthwise 3×3 (×6) → `aten::cudnn_convolution` | 62,495 | 62,496 | **1.00×** |
-| **Matched total** | **240,415** | **223,485** | **1.08×** |
+| Pointwise 1×1 conv (→ bf16 Triton GEMM in optimized) | 143,873 *(cudnn TF32)* | 60,833 *(bf16, TC 36%)* | **−83,040** |
+| Depthwise 3×3 conv | 52,128 | 63,872 | +11,744 |
+| `aten::convolution` / `cudnn_convolution` bare aggregate | 71,233 | *(folded into above)* | — |
+| BatchNorm + ReLU6 (`_native_batch_norm_legit_no_training`) | 109,984 | 115,520 | +5,536 |
+| **`aten::copy_` (fp32↔bf16 casts + channels_last copies)** | 0 | **110,304** | **+110,304 (new)** |
+| **Total (per-op attributed, excl. synthetic prologue)** | **377,218** | **350,529** | **−26,689 → ≈1.08×** |
 
-**Step B — Speedup attribution.** Per `validation_report.json`:
+> Bucket-level matching is approximate: the dedup backend split pointwise work across named `cudnn_convolution` ops *and* a bare `aten::convolution` aggregate (71 µs), while the flat backend routes all pointwise GEMMs through one `aten::convolution` entry (60.8 µs). Treat the per-bucket rows as directional and the **Total** as the headline.
 
-- **OPT-1 (APPLIED)** is credited with the pointwise gains. The kernels changed in the expected direction: the 64→128 and 32→64 convs moved off the 8.3%-occupancy `Kernel2` onto cuBLAS GEMMs and sped up 1.32–1.37×. **However**, the two largest (128→256) convs got marginally *slower* (0.96×) — their `aten::mm` still reports 8.3% occupancy and ~45% TC, i.e. the GEMM tile cuBLAS selected for M=50176, K=128, N=256 is itself latency-bound, so the substitution didn't help at that shape. Net OPT-1 effect: **1.11× on the pointwise group.**
-- **OPT-2 (APPLIED)** folded BN into 7 convs. Its target kernels (standalone `triton_poi_fused__native_batch_*` BN passes) appear in the baseline bundled inside the prologue aggregate and in the optimized profile as 24 unattributed Triton kernels that returned 0 ncu rows. **Neither capture isolates their timing**, so OPT-2's wall-clock contribution cannot be measured from these profiles — only confirmed structurally (BN no longer a standalone normalize pass; relu6 epilogue-fused). It is *not* credited with measured speedup.
-- **OPT-3 (NOT_APPLIED as a graph pass)** — layout was set eager-side; depthwise durations are unchanged (1.00×), consistent with the repack kernels being folded into native NHWC rather than measurably accelerating the convs.
+**Step B — Speedup attribution.** A gain is credited to a pass only if (1) `status == APPLIED`, (2) the expected counter moved, and (3) the operator improved.
 
-### Step C — Residual opportunity
+- **Pointwise convs improved and OPT-1 is APPLIED with the expected counter shift** → the 83 µs reduction on the pointwise bucket **is attributed to OPT-1**. Evidence: the cutlass_80 TF32 s1688 kernels (occ ~8%, 224 regs/thread) were replaced by `triton_tem_fused_convolution` bf16 templates at occ ~31% / TC 36.2%, flanked by explicit `bfloat16_copy_kernel` casts.
+- **BatchNorm did not improve (110 µs → 116 µs) and OPT-2 is NOT_APPLIED** → no speedup is attributed to conv-BN folding. The BN+ReLU6 kernels remain standalone, bandwidth-bound Triton passes — exactly the cost OPT-2 was designed to remove.
+- **`aten::copy_` overhead (+110 µs) is the cost side of OPT-1 + OPT-3**: the fp32↔bf16 boundary casts (OPT-1 re-casts pointwise operands and outputs) and the channels_last `.to(memory_format)` conversions. The FX `strip_layout_copies` pass (OPT-3) found no redundant *interior* copies to remove, so these casts persist and nearly cancel the pointwise GEMM win.
+- **OPT-4 NOT_APPLIED** → depthwise convs were not fused with their ReLU6 epilogue (depthwise bucket actually rose slightly, +11.7 µs, consistent with no fusion + channels_last relayout).
 
-Re-ranking the optimized profile, the **two 128→256 `aten::mm` are now the top cost (45% of attributed time, 100,735 ns) and remain latency-bound at 8.3% occupancy** — OPT-1 relocated the bottleneck onto cuBLAS but did not resolve it at this shape. The depthwise convs (62,496 ns, 28%) are bandwidth-bound and near-optimal. No unapplied proposal in `optimizations.json` targets the residual `mm` occupancy; closing it would require GEMM tile/split-K tuning or batching the two same-shape `mm` calls — neither is an FX-level transform and both are *not yet implemented*.
+**Net:** a real ~83 µs architectural win on the pointwise GEMMs, eroded to a ~27 µs (≈1.08×) net gain by ~110 µs of new cast/copy traffic, with the largest *safe* opportunity (BN folding, ~110 µs of pure-bandwidth work) left entirely on the table.
 
 ---
 
 ## 7. What Drove Each Speedup
 
-**1×1 pointwise convolution → cuBLAS GEMM (OPT-1, +1.11× on the pointwise group, mixed by shape):** rewriting each 1×1/stride-1/groups-1 conv as `permute→reshape→addmm→reshape→permute` routes the work off the implicit-GEMM `Kernel2` (8.3% occupancy, 228 reg/thread) onto a tiled cuBLAS GEMM. The hardware evidence is the disappearance of `Kernel2` and its replacement by `aten::mm` kernels; the 64→128 and 32→64 shapes gained 1.32–1.37× as occupancy pressure eased, while the 128→256 shape stayed at 8.3% occupancy and saw no gain — cuBLAS's chosen tile is latency-bound at that M/K/N.
+**bf16 pointwise convolution promotion (OPT-1, ≈2.4× on the pointwise bucket, 143.9 µs → 60.8 µs):** Casting the 1×1 pointwise convs to bf16 plus `max_autotune_gemm` routed Inductor away from the prebuilt Ampere `cutlass_80 s1688gemm` TF32 kernel and onto an sm_120-autotuned bf16 tensor-core GEMM template (`triton_tem_fused_convolution`). The decisive counter change is achieved occupancy rising from **~8% to ~31%** (the TF32 kernel's 224 regs/thread were the occupancy limiter) with tensor cores now active at **36.2%** — the latency-bound starvation identified as root cause #1 was relieved.
 
-**Conv-BN folding (OPT-2, applied, contribution not separately measurable):** folding the inference BN affine into conv weights eliminates the standalone full-tensor BN normalize passes and lets relu6 epilogue-fuse. Evidence is structural — the `triton_poi_fused__native_batch_*` kernels no longer appear as distinct attributed normalize ops — but because they fell into the prologue bundle (baseline) and into 0-row unattributed kernels (optimized), the profiler cannot assign them a wall-clock delta.
+*(No other proposed transformation contributed a measured speedup: OPT-2, OPT-3's interior-copy removal, and OPT-4 either did not apply or were no-ops, per §4 and §6.)*
 
 ---
 
 ## 8. Remaining Opportunities
 
+The two highest-leverage and unrealized proposals dominate residual gain.
+
 | ID | Type | Target | Reason Not Applied | Projected Gain |
 |---|---|---|---|---|
-| OPT-3 | channels_last layout (graph pass) | depthwise convs + repack | Layout forced eager-side in `get_model_and_input()`; no residual `clone/_to_copy` nodes for the pass to strip (graceful no-op) | ~2.4% of total (est.) — likely already realized eager-side |
+| OPT-2 | conv-BN fold | `aten.convolution` → `_native_batch_norm_legit_no_training` (12 nodes) | Pass matched no conv→BN pair as the backend saw the graph (BN consumed via `getitem`, or conv users ≠ 1 after OPT-1 cast insertion) — degraded gracefully | ~110,000 ns (13.4% of total); eliminates the 12 bandwidth-bound BN+ReLU6 kernels, incl. the 472 MB 256-ch hardtanh write |
+| OPT-4 | depthwise ReLU6 epilogue fusion | `aten.convolution` `[C,1,3,3]` → `aten.hardtanh` | No depthwise→hardtanh pair matched; depends on OPT-2 folding BN out first (BN node still sits between conv and hardtanh) | ~25,000 ns (3.1%); removes one DRAM round-trip per depthwise stage |
+| OPT-3 | channels_last (interior copies) | conv nodes + layout-change boundaries | Eager-side NHWC cast applied, but FX `strip_layout_copies` found no redundant *interior* copies; instead new boundary `aten::copy_` casts appeared (+110 µs) | ~40,000 ns (4.9%) *if* the boundary casts can be hoisted/eliminated — currently net-negative |
+| OPT-1 (residual) | dtype boundary | pointwise cast nodes | Applied, but per-conv fp32↔bf16 re-casts persist as `bfloat16_copy_kernel` | Keep activations in bf16 across consecutive stages (single up-front cast) to remove ~most of the 110 µs copy overhead |
 
-All three *proposed* optimizations were exercised (OPT-1 and OPT-2 as active Aten-IR passes, OPT-3 eager-side). The meaningful residual is **not** in the proposal list: the two 128→256 `aten::mm` kernels remain latency-bound at 8.3% occupancy after substitution. Resolving them requires GEMM-level tuning (tile selection / split-K) or fusing the two identical-shape matmuls — work outside the FX-pass scope and **not yet implemented**. Realistic additional upside if that residual were closed: the 128→256 group is ~45% of attributed optimized time, so even a 1.5× on those two kernels would yield roughly a further 1.2× on the matched total.
+**Highest priority: fix OPT-2 so conv-BN folding actually fires.** It is high-confidence, numerically exact in inference, and targets ~110 µs of pure-bandwidth work that the current run leaves untouched — by itself a larger prize than the bf16 win already banked. The likely fix is matching the BN through its `getitem(bn, 0)` tuple-return and relaxing the `len(conv.users) == 1` guard now that OPT-1 inserts a cast consumer on the conv output. Once BN is folded, OPT-4's depthwise epilogue fusion is unblocked. Pairing OPT-2 + OPT-4 + eliminating the redundant bf16 casts (keep activations in bf16 between stages) would plausibly push the workload past **1.4–1.6×** on per-operator-attributed time.
 
 ---
 
 ## Reproduction
 
 ```bash
-# Reuse the existing baseline profile.json (skip Stage 0)
-# Stage 1 — propose
-/propose examples/depthwise_separable_conv/profile.json
+# Baseline capture (built-in dedup backend)
+python3 nvidia/scripts/run_workload.py \
+    --workload examples/depthwise_separable_conv/depthwise_separable_conv.py \
+    --output-prefix profiler_output/depthwise_separable_conv \
+    --inductor-debug-dir profiler_output/depthwise_separable_conv_inductor_debug \
+    --correlation-pass --warmup-iters 2 --measure-iters 2
+nsys profile --trace=cuda,nvtx --output=profiler_output/depthwise_separable_conv \
+    python3 nvidia/scripts/run_workload.py \
+    --workload examples/depthwise_separable_conv/depthwise_separable_conv.py \
+    --output-prefix profiler_output/depthwise_separable_conv \
+    --inductor-debug-dir profiler_output/depthwise_separable_conv_inductor_debug \
+    --warmup-iters 2 --measure-iters 2
+# (ManifestBuilder → AttributionEngine → ncu replay [sudo] → build_profile → profile.json)
 
-# Stage 2 — generate backend  (registered name: depthwise_separable_conv_opt)
-/backend examples/depthwise_separable_conv/depthwise_separable_conv.py
-
-# Stage 3 — validate
-/validate examples/depthwise_separable_conv/depthwise_separable_conv_optimized.py
-
-# Stage 4 — re-capture under the custom backend
-/capture examples/depthwise_separable_conv/depthwise_separable_conv_optimized.py \
-    --profile-name=optimized --compile-backend=depthwise_separable_conv_opt
-
-# Stage 5 — report
-/report
+# Optimized capture (custom backend)
+#   run the same two phases on depthwise_separable_conv_optimized.py
+#   with --compile-backend depthwise_sep_conv_opt → profile_optimized.json
 ```
 
-> All `ns` figures are ncu application-mode replay values (2–5× inflated vs. wall clock) and are valid only for *relative* comparison within this report.
+Validate the backend before re-profiling: `pytest test_depthwise_separable_conv_optimized.py`.
+ncu requires sudo on this system (`ERR_NVGPUCTRPERM` otherwise); pass `PYTHONPATH=$(pwd)` through `sudo env`.

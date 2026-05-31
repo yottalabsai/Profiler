@@ -26,7 +26,12 @@
       "Bash(rm -rf /home/ubuntu/Profiler/examples/mlp_activations/profiler_output/inductor_cache/*)",
       "Bash(python3 -c \"from torch._inductor import config; import torch._inductor.codecache as cc; print\\('cache_dir:', cc.cache_dir\\(\\)\\)\")",
       "WebSearch",
-      "WebFetch(domain:awsdocs-neuron.readthedocs-hosted.com)"
+      "WebFetch(domain:awsdocs-neuron.readthedocs-hosted.com)",
+      "Bash(rm -f /home/ubuntu/Profiler/examples/conv_block/profile.json)",
+      "Bash(rm -rf /home/ubuntu/Profiler/examples/conv_block/profiler_output/*)",
+      "Bash(mkdir -p /home/ubuntu/Profiler/examples/conv_block/profiler_output/ncu_reps/)",
+      "Bash(cp /home/ubuntu/Profiler/plugins/nvidia-profiler/rules/gpu-optimization.md /home/ubuntu/.claude/plugins/cache/profiler-plugins/nvidia-profiler/0.4.0/rules/gpu-optimization.md)",
+      "Bash(git -C /home/ubuntu/Profiler diff --stat -- plugins/ examples/sdpa_attention/)"
     ]
   }
 }
