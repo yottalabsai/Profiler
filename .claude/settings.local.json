@@ -24,7 +24,9 @@
       "Read(//home/ubuntu/.claude/plugins/cache/profiler-plugins/nvidia-profiler/**)",
       "Bash(rm -rf /tmp/torchinductor_*)",
       "Bash(rm -rf /home/ubuntu/Profiler/examples/mlp_activations/profiler_output/inductor_cache/*)",
-      "Bash(python3 -c \"from torch._inductor import config; import torch._inductor.codecache as cc; print\\('cache_dir:', cc.cache_dir\\(\\)\\)\")"
+      "Bash(python3 -c \"from torch._inductor import config; import torch._inductor.codecache as cc; print\\('cache_dir:', cc.cache_dir\\(\\)\\)\")",
+      "WebSearch",
+      "WebFetch(domain:awsdocs-neuron.readthedocs-hosted.com)"
     ]
   }
 }
