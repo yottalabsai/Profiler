@@ -1,236 +1,163 @@
-# GPT-2 Small Optimization Report
+# GPT-2 Optimization Report
 
-This optimization achieved **3.45× total speedup** on GPT-2 small (B=4, RTX PRO 6000 Blackwell Server Edition) by engaging Tensor Cores via BF16 dtype promotion and eliminating explicit causal mask materialization.
+**This optimization achieved a 3.6× total GPU-time speedup on GPT-2 small (B=4, seq=128, NVIDIA RTX PRO 6000 Blackwell Server Edition)** by routing all transformer-block GEMMs off the FP32 SIMT path onto Blackwell Tensor Cores and eliminating an Ampere-ISA attention kernel that was running under backward compatibility on a Blackwell device.
 
 ---
 
 ## 1. Hardware Context
 
 | Field | Value |
-|-------|-------|
+|---|---|
 | GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| Architecture | Blackwell (sm100) |
-| Estimated SM count | 96–170 (GB202-class die) |
-| PyTorch version | 2.12.0+cu130 |
-| CUDA version | 13.0 |
-| Compile mode | Inductor (dedup backend for baseline; custom `gpt2_opt` for optimized) |
+| Architecture family | Blackwell (Sm100) |
+| PyTorch version | 2.11.0+cu128 |
+| Compile mode (baseline) | `inductor` (built-in layer-dedup backend) |
+| Compile mode (optimized) | `gpt2_opt` (custom `@register_backend`) |
+| Model | GPT-2 small (117M), 12 identical transformer blocks |
 | Batch size | 4 |
 | Sequence length | 128 |
-| Measurement iterations | 10 (ncu application-mode replay — durations are 2–5× longer than real execution; all comparisons are relative within this pipeline) |
-| Model | GPT-2 small (117M), 12 transformer blocks, hidden=768, heads=12, ffn=3072 |
+| Iteration count | warmup=3, measure=10 (ncu replay — **relative timing only**) |
+
+> All `duration_ns` values come from ncu counter-collection (application-mode replay), which inflates absolute kernel durations roughly 2–5× over true wall-clock. **Every number below is a relative comparison within or between these two profiles, not an absolute wall-clock prediction.**
 
 ---
 
 ## 2. Operator Summary (Baseline)
 
-Operators contributing ≥1% of attributed GPU time. Bottleneck class is derived from `dram_throughput_pct` and `eligible_cycles_pct` (Blackwell sm100 does not expose `warp_cycles_per_instruction`; `tensor_core_active_pct = 0.0` means SIMT path, distinct from null).
+Built from the granular per-block aten operators aggregated by class (representative per-call duration × 12 blocks), per the strategist's `fused_kernel_double_count` handling — the `layer::unique::modules` dedup roll-up is **not** summed here to avoid double counting.
 
 | Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
-|----------|----------|---------------|---------|-----------------|
-| `aten::mm` | 66.4% | 16,700,000 | 324 | **Compute-bound (SIMT)** — TC%=0.0, eligible_cycles=42–62%, DRAM=7–11% |
-| `aten::addmm` | 24.7% | 6,200,000 | 468 | **Compute-bound (SIMT)** — TC%=0.0, eligible_cycles=42–62%, L2 hit=89–92% |
-| `aten::_efficient_attention_forward` | 6.8% | 1,700,000 | 108 | **Latency-bound / low-occupancy** — TC%=32.3%, occupancy=8.5%, registers=168, local spills=49,152 bytes |
-| Other (≥30 operators) | 2.1% | ~550,000 | — | Various |
-| **Total attributed** | **100%** | **~25,150,000** | | |
+|---|---|---|---|---|
+| `aten::mm` (FFN down-proj, [512×3072]×[3072×768]) | 30.7% | 1,050,000 | 12 | Compute / **Tensor Cores idle** (SIMT FP32, occ 8.5%) |
+| `aten::mm` (FFN up-proj, [512×768]×[768×3072]) | 29.4% | 1,005,600 | 12 | Compute / **Tensor Cores idle** (SIMT FP32, occ 16.6%) |
+| `aten::addmm` (fused QKV proj, [512×768]×[768×2304]) | 20.7% | 706,800 | 12 | Compute / **Tensor Cores idle** (SIMT FP32, occ 20.1%) |
+| `aten::mm` (attn output-proj, [512×768]×[768×768]) | 11.4% | 388,800 | 12 | Compute / **Tensor Cores idle** (SIMT FP32) |
+| `aten::_efficient_attention_forward` (SDPA) | 7.0% | 240,000 | 12 | **Sm80 ISA on Sm100** (FP32 xFormers fallback) |
+
+GEMMs total ~92% of attributed time and **all** run on the CUTLASS SIMT FP32 path (`cutlass_80_simt_sgemm_*`) with Tensor Cores completely idle. LayerNorm and tanh-GELU Triton kernels are DRAM-bound, already Inductor-fused, and individually below the 1% actionable threshold — omitted from the table.
 
 ---
 
 ## 3. Reading the Metrics
 
-**`smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active` (TC%)**
+Only the metrics that drive the bottlenecks in this workload:
 
-The fraction of SM cycles spent issuing Tensor Core instructions. On Blackwell GEMM kernels, the threshold is: ≥40% = Tensor Cores are the primary execution unit (good), 0.0% (not null) = cuBLAS routed the GEMM to the legacy FP32 SIMT path (`Kernel2`). In this baseline, TC%=0.0 on every one of 792 GEMM launches — the SMs are computing entirely through CUDA cores, running at 3–8× lower throughput than available Tensor Cores for these shapes.
-
-A null value is expected for non-GEMM kernels and in some counter configurations; only an explicit 0.0% on a GEMM kernel is a problem.
-
-**`eligible_cycles_pct` (compute saturation)**
-
-Percent of cycles where at least one warp is eligible to issue. Values 42–62% on the GEMM kernels confirm the SMs are issuing instructions frequently — but through the slow SIMT pipeline. After OPT-1, the same eligible_cycles range indicates the workload shifted to Tensor Core throughput at the same SM activity level.
-
-**`achieved_occupancy` / `registers_per_thread`**
-
-The attention kernel's `registers_per_thread=168` (near the hardware maximum of 255) forces the warp scheduler to keep only 1–2 warps resident per SM, driving occupancy to 8.5%. This is the root cause of the attention kernel running at only 14.3% SM throughput.
-
-**`dram_throughput_pct` (memory saturation)**
-
-The GEMM kernels show 7–11% DRAM throughput with 89–92% L2 hit rate, confirming weights are L2-resident and the bottleneck is compute throughput, not memory bandwidth. Optimizing memory layout will not help here; the fix is engaging Tensor Cores.
+- **`tensor_core_active_pct = 0.0` (not null)** — the single highest-ROI signal here. A value of exactly `0.0` means the GEMM ran on the FP32 SIMT (scalar multiply-accumulate) pipeline with the Tensor Core MMA units completely idle. Every one of the 840 baseline GEMM kernels reports `0.0`. A *null* value, by contrast, is expected for non-GEMM kernels and is **not** a problem.
+- **`achieved_occupancy`** — fraction of resident-warp capacity used. The FFN-down GEMM sits at **8.5%** (FP32 SIMT burns 128–210 registers/thread, starving occupancy). Below ~30% on a compute kernel signals the scheduler can't hide latency; a lower-register Tensor Core kernel lifts this directly.
+- **`sm_throughput_pct`** — SM pipe utilization. FFN-down is at **19.95%**: the SM is mostly stalled, confirming the kernel is bound by pipeline selection (SIMT) rather than useful arithmetic.
+- **`dram_throughput_pct` (5.5–9%) + `l2_hit_rate` (~89%)** — weights are L2-resident and memory is nearly idle, so this is **compute/pipeline-bound, not memory-bound**. Halving operand bytes (BF16) is a side benefit; the real lever is the arithmetic pipeline.
+- **Kernel-name ISA token** — `fmha_cutlassF_f32_aligned_64x64_rf_sm80` carries `f32` (FP32, no Tensor Cores inside attention) and `sm80` (Ampere ISA running on Sm100 via backward compatibility). ncu returns an **empty metrics object** for these launches — the diagnostic fingerprint of an Sm80→Sm100 SASS mismatch.
 
 ---
 
 ## 4. Optimizations Applied
 
+Statuses from `profiler_output/validation_report.json`.
+
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
-|----|------|-----------------|-------------------|------------|--------|
-| OPT-1 | dtype_promotion | `aten::mm`, `aten::addmm` (792 launches) | TC%=0.0% on all 792 GEMM launches; eligible_cycles=42–62% confirms compute-bound on SIMT path | High | **APPLIED** |
-| OPT-2 | fusion / kernel dispatch | `aten::_efficient_attention_forward` (108 launches) | sm80 kernel on sm100 device; occupancy=8.5%, registers=168, local spills=49,152 bytes; 4 Triton mask-prep kernels per block | Medium | **APPLIED** |
-| OPT-3 | batch_padding | `aten::mm`, `aten::addmm` (sequential same-shape GEMMs) | 12 sequential launches per shape; sm_throughput=38–53% | Low | **NOT IMPLEMENTED** (stub only — see Section 8) |
+|---|---|---|---|---|---|
+| OPT-1 | `dtype_promotion` (aten) | all `aten.mm` / `aten.addmm` (48 block GEMMs) | `tensor_core_active_pct=0.0`, occ 8–20%, SIMT `cutlass_80_simt_sgemm` | high | **APPLIED** |
+| OPT-2 | `op_substitution` (functional) | `F.scaled_dot_product_attention` (12 blocks) | empty ncu metrics, `sm80` kernel name on Sm100 | high | **APPLIED** |
+| OPT-3 | `inductor_config` | 48 frozen GEMM weights + embeddings | FFN-down occ 8.5%, sm_throughput 19.95% | medium | **APPLIED** |
+| OPT-4 | `common_subexpression_hoist` (aten) | per-block causal-mask reconstruction | l2_hit 5%, sm 1%, 11 redundant launches | low | **NOT_APPLIED** (stub; subsumed by OPT-2 `is_causal=True`) |
 
 ---
 
 ## 5. Implementation Notes
 
-# GPT-2 Optimized Backend — Implementation Notes
+# gpt2_opt — Implementation Notes
 
-Generated by `/implement` from `optimizations.json` (schema_version 1.0).
-Backend registration name: `gpt2_opt`
-Source workload: `examples/gpt2/gpt2.py`
-Optimized output: `examples/gpt2/gpt2_optimized.py`
+Backend registered name: **`gpt2_opt`** (via `@register_backend` in
+`examples/gpt2/gpt2_optimized.py`, fired at module import).
 
----
+Target device: NVIDIA RTX PRO 6000 Blackwell Server Edition (Sm100). `compile_mode = "inductor"`.
+Workload: GPT-2 small (117M), 12 identical transformer blocks, batch=4, seq=128, FP32.
 
 ## Backend Architecture
 
-| Pass | Method | Reason |
-|---|---|---|
-| OPT-1 Stage 1: TF32 global flags (`allow_tf32=True`, `set_float32_matmul_precision('high')`) | Module-load-time side effect in `get_model_and_input()` preamble | Non-graph: these are process-global cuBLAS dispatch flags that must be set before `torch.compile` traces the model. No FX surgery needed; takes effect for every subsequent GEMM. |
-| OPT-1 Stage 2: BF16 casts around `aten.mm` / `aten.addmm` (`_pass_gemm_bf16_casts`) | Per-rep loop (dedup path) and flat-graph pass (no-dedup path) | FX surgery: inserts `aten.to.dtype(arg, bfloat16)` before each GEMM node and `aten.to.dtype(out, float32)` after. Applied to each unique partition representative; compiled callable shared with duplicates. |
-| OPT-2: Replace `_scaled_dot_product_efficient_attention` with `scaled_dot_product_attention(is_causal=True)` (`_pass_replace_efficient_attn_with_sdpa`) | Per-rep loop (dedup path) and flat-graph pass (no-dedup path) | FX surgery: replaces target node, fixes up `operator.getitem([0])` users, erases dead getitem nodes for indices 1–3, then calls `eliminate_dead_code()` to remove the 4 upstream mask-construction Triton nodes per block. Applied before OPT-1 Stage 2. |
-| OPT-3: Batch same-shape sequential GEMMs into strided-batched GEMM | **Stub — not applied** | Low confidence. Requires topological independence verification across all 12 transformer blocks and either FX surgery involving `aten.stack` / `aten.bmm` / `aten.select` on activation tensors plus pre-stacked weight buffers, or a model-level restructuring. GPT-2's residual stream precludes cross-layer batching; only same-level projections within a single forward pass are truly independent. Complexity is disproportionate to the ~4.8% projected gain (already small, and further dwarfed by OPT-1's 54.6% gain). |
-
----
+| Pass | Level | Method | Reason |
+|---|---|---|---|
+| OPT-2 — Flash SDPA backend selection | functional | `_run_functional_passes` (`_fpass_enable_flash_sdpa`) | Set `enable_flash_sdp(True)` / `enable_mem_efficient_sdp(False)` before `compile_fx` so Dynamo traces `F.scaled_dot_product_attention` to `aten._scaled_dot_product_flash_attention` (native Sm100) instead of the Sm80 xFormers `_efficient_attention`. Flag is read at Dynamo trace time, so it must run at the functional level. GPT-2 is causal → `is_causal=True` natively, dropping the explicit mask. |
+| OPT-1 — BF16 dtype promotion | aten | `_aten_inner_compile` (`_apass_bf16_promotion`) | Cast operands of every `aten.mm.default` and `aten.addmm.default` to BF16 and the result back to FP32. Routes all 48 block GEMMs off the SIMT FP32 `cutlass_80_simt_sgemm` path (`tensor_core_active_pct=0.0`) onto the Blackwell BF16 Tensor Core path. Runs at aten because the GEMM ops only exist post-AOTAutograd decomposition. The `addmm` branch covers GPT-2's already-fused QKV projection. |
+| OPT-4 — Causal-mask CSE/hoist | aten | `_aten_inner_compile` (`_apass_mask_hoist_stub`) — **stub, not applied** | Low confidence, ~0.5% of attributed time, and fully subsumed by OPT-2 (Flash with `is_causal=True` never materializes the additive `[4,12,128,128]` mask). Detect-only: logs whether any residual `_efficient_attention` node with an explicit `attn_bias` survives; no graph mutation. |
+| OPT-3 — Weight freezing + max_autotune | inductor_config | `config_patches` on `compile_fx` (`_cfg_freezing`) | Scoped `{"freezing": True, "max_autotune": True, "max_autotune_gemm_backends": "ATEN,TRITON"}`. Inductor constant-folds and pre-packs the 48 frozen (eval, `requires_grad=False`) GEMM weights into the BF16 Tensor Core layout and autotunes tiling. Inductor owns weight layout, so this is a config dict, not a graph pass. |
+| QKV projection fusion | — (N/A) | not implemented | GPT-2's QKV is already a single fused `[768->2304]` `addmm` (HuggingFace Conv1D packs Q/K/V into one weight). No fusion pass is applicable; OPT-1's `addmm` branch promotes that wide GEMM directly. |
 
 ## Key Design Decisions
 
-### OPT-1: Two-Stage Approach
+**Why OPT-1 handles both `aten.mm` and `aten.addmm`.** Unlike the `sdpa_attention` example (all bias-free `mm`), GPT-2's projections come from HuggingFace `Conv1D`, which decomposes to `addmm(bias, x, weight)`. The fused-QKV projection (20.7% of time) and the attention output / FFN projections appear as `addmm` when a bias is present and `mm` otherwise. The pass promotes `addmm` operands `args[1]`/`args[2]` plus the bias `args[0]`, leaving the bias-add fused into the Tensor Core GEMM.
 
-OPT-1 uses two stages because they target different layers of the stack.
+**Why the funnel ordering matters here.** OPT-2 (functional) must select the Flash op before AOTAutograd traces SDPA; OPT-1 (aten) then casts q/k/v to BF16 inside `inner_compile`, so the BF16 operands are in place when the Flash kernel dispatches. This is the prerequisite chain `OPT-1 -> OPT-3` and `OPT-2 -> OPT-1` from the proposal, satisfied automatically by the cross-level funnel order (functional → aten → inductor_config) with no within-level sequencing.
 
-**Stage 1** (TF32 flags) is applied unconditionally at module load. This is the "Level A" approach from `optimizations.json`: `torch.backends.cuda.matmul.allow_tf32 = True` and `torch.set_float32_matmul_precision('high')` instruct cuBLAS to use TF32 Tensor Core kernels for all FP32 GEMMs, replacing `Kernel2` (legacy SGEMM). No FX graph modification is required. This is the safer baseline fix and should alone eliminate the zero-Tensor-Core-activity finding.
+**Why `prims.convert_element_type` instead of `aten._to_copy`.** On torch 2.11, `aten._to_copy` carries both a fallback and a decomp registration; inserting it into an already-decomposed Aten graph triggers Inductor's "both a fallback and a decomp for same op" assertion. `prims.convert_element_type` lowers cleanly to a Triton elementwise cast and is CSE-folded by Inductor for shared weight casts.
 
-**Stage 2** (BF16 casts) is the "Level B" approach: explicit `aten.to.dtype` cast nodes are inserted in the FX graph before and after each GEMM. This routes the computation through the higher-throughput BF16 Tensor Core path on Blackwell, providing an additional 1.5–2x gain over Stage 1 alone for the M=512, K=768/3072, N=768/2304/3072 shapes present in GPT-2. All shapes are divisible by 16, satisfying BF16 Tensor Core alignment requirements.
+**Why per-rep compilation (dedup) instead of `replace_pattern`.** GPT-2 has 12 structurally identical blocks. `UniqueSubgraphRegistry` splits the graph, compiles one representative per equivalence class through the full funnel, and shares the compiled callable with the duplicates — the same mechanism the capture pipeline uses for ~12× ncu/compile reuse. Functional passes run per-rep inside `_compile_unit`, never on the pre-split graph. If no repeats are detected the flat compile path is used, preserving cross-layer Inductor fusion.
 
-The output cast back to `float32` is necessary because downstream ops (LayerNorm, residual adds, softmax) expect float32 inputs. Without the output cast, those ops would run in BF16 and accumulate BF16 error, producing visibly degraded activations.
+**Why OPT-4 is a stub.** It is sub-threshold on its own and made redundant by OPT-2: once Flash with `is_causal=True` is selected there is no explicit additive mask subgraph to hoist. The stub remains as a detector — if it logs residual `attn_bias` producers, that signals OPT-2 did not take and the mem-efficient backend was retained.
 
-The `replace_all_uses_with` / `cast_out.args = (node, ...)` idiom is used to fix the self-reference that `replace_all_uses_with` creates — this is a known FX mutation pattern where the output cast node would otherwise point at itself.
-
-### OPT-2: Pass Order (SDPA Before BF16 Casts)
-
-OPT-2 is applied **before** OPT-1 Stage 2 in both the flat and dedup paths. This is intentional: if BF16 casts were inserted first, the `q`, `k`, `v` arguments flowing into the attention node would become `aten.to.dtype` outputs (bfloat16 tensors) rather than the original float32 tensors. While the SDPA replacement itself would still pattern-match (it only checks `node.target`), downstream analysis (e.g. shape inference for `scale`) works more cleanly on pre-cast nodes. Additionally, `optimizations.json` notes that "OPT-2 yields additional benefit in the BF16 regime because Flash Attention 3 BF16 kernels are better optimized for Blackwell" — implying OPT-1 and OPT-2 are intended to coexist, with OPT-2 seeing BF16 q/k/v after OPT-1 lowers into Inductor.
-
-The `getitem` cleanup in OPT-2 handles the tuple-output contract of `_scaled_dot_product_efficient_attention`: the op returns `(output, log_sumexp, seed, offset)`, and downstream code always does `getitem(node, 0)` for the attention output. `SDPA` returns a tensor directly, so all `getitem(node, 0)` users are replaced with `new_node` and then erased. Indices 1–3 are dead in inference mode and are erased if they have no users; a warning is emitted if they unexpectedly have users (which would indicate a training-mode backward pass is present).
-
-### Dedup Path as Primary Path
-
-GPT-2 small has 12 structurally identical transformer blocks. `UniqueSubgraphRegistry` uses `split_module` to partition the FX graph by detected layer boundaries, then groups partitions by structural signature (`graph_signature`). For GPT-2, the expected result is one unique representative (e.g. `submod_1` for `modules_0`) and 11 duplicates (`modules_1` through `modules_11`), plus a `prologue` submodule for the embedding layers.
-
-In the dedup path, each FX pass is applied to both the unique representative and all its duplicates (duplicates receive the same graph mutations so that when the compiled callable from the rep is assigned to `dup_mod.forward`, the graph structure matches). The `compile_fx` call is made only once per unique representative with actual partition inputs (captured via `_capture_partition_inputs`), and the resulting callable is shared across all 12 transformer blocks. This yields ~12× speedup on the `ncu` replay step per the workload docstring.
-
-The flat-compile path (when `equiv_map` is empty) is retained as a fallback for cases where `split_module` fails, where the graph structure changes (e.g. different batch sizes that cause dynamic shapes), or where only the prologue/epilogue partitions are detected.
-
-### OPT-3: Stub Rationale
-
-The batched GEMM optimization (OPT-3) is not implemented because:
-
-1. **Low projected gain given OPT-1**: OPT-3 targets 4.8% of total attributed time (1.2 ms / 25.15 ms). After OPT-1 reduces GEMM time by ~54.6%, the GEMM kernels become individually much faster, making the relative launch overhead larger in percentage terms but absolutely still small.
-
-2. **Architectural complexity**: GPT-2 has distinct weight matrices per layer. A pure FX surgery approach would need to insert `aten.stack` on activations, detect topological independence across 12 layers, insert `aten.select` on the batched output, and handle the weight stacking. The `optimizations.json` notes this "requires either FX surgery that is complex to validate correctly, or a model restructuring that goes beyond pure compilation-level changes."
-
-3. **Residual stream constraint**: GPT-2's residual stream means layer `i` output feeds layer `i+1` input — independent GEMMs within a single forward pass are only the same projection type across layers (e.g. all 12 QKV projections of the *same* token positions). Confirming this independence requires full topological reachability analysis.
-
----
-
-## Validation Notes
-
-The test suite (`test_gpt2_optimized.py`) includes five tests:
-
-1. **test_import**: Confirms the module is importable and the module-load-time TF32 side effects execute without error.
-2. **test_backend_registration**: Confirms `gpt2_opt` appears in `torch._dynamo.list_backends()`.
-3. **test_get_model_and_input**: Validates input shape `(4, 128)` int64 (token ids), float32 model parameters, CUDA device, and eval mode.
-4. **test_compiled_forward_pass**: Full end-to-end smoke test with `caplog` capturing INFO-level logs; asserts output shape `(4, 128, 768)` and no NaN/Inf.
-5. **test_bf16_cast_pass_applied**: Monkey-patches `_pass_gemm_bf16_casts` to verify that the pass inserts at least one `aten.to.dtype(*, bfloat16)` node into the pre-Inductor graph, directly validating OPT-1 Stage 2 correctness.
-
-The `InternalTorchDynamoError` suppression in tests 4 and 5 handles a known PyTorch 2.11 behavior where a guard recompilation error can be raised after a dedup backend successfully compiles — the compiled output is still valid and the error is safe to suppress in test contexts.
+**Non-graph state.** `get_model_and_input()` keeps the original `gpt2.py` contract (FP32 model, int64 `(4,128)` input_ids, `.eval()`). BF16 promotion is selective and in-graph (GEMM operands only) rather than `model.bfloat16()`, so LayerNorm and softmax stay FP32 for numerical stability per the proposal. `.eval()` is required for OPT-3 freezing.
 
 ---
 
 ## 6. Before/After Results
 
-Both profiles captured with batch_size=4, seq_len=128, warmup=3, measure=10 iters (ncu replay).
+Both profiles were captured on the **same GPU** (RTX PRO 6000 Blackwell), 64 minutes apart (20:31 → 21:35 UTC) — within the same session window, so no cross-session clock caveat applies.
 
-**Note on operator matching:** `aten::mm` (baseline: 16,700,000 ns) is absent from the optimized profile. With the custom `gpt2_opt` backend, the BF16 cast FX pass transforms `torch.addmm(bias, mat1, mat2)` nodes directly. The partition subgraphs for GPT-2 under this backend do not produce a separate `aten::mm` operator attribution — what was split across `aten::mm` and `aten::addmm` in the built-in dedup backend attribution is consolidated under `aten::addmm` in the custom backend. The combined baseline GEMM time (16,700,000 + 6,200,000 = 22,900,000 ns) is compared to the optimized `aten::addmm` total.
+**Attribution-tier note (why this is an aggregate comparison, not a per-`operator_name` table).** The baseline used the built-in dedup backend, so Dynamo correlation succeeded and GEMMs are attributed per-`aten::mm`/`aten::addmm`. The optimized workload uses the custom `gpt2_opt` backend, which calls the precompiled callable directly and bypasses Dynamo's `aten::` RecordFunction scopes — so its `.corr.json` is empty and kernels fall to the Inductor-fusion tier, where the GEMM work appears as fused `triton_tem_fused_*` templates grouped under generic operator names. Per-`operator_name` matching is therefore unreliable; the comparison below is at the **work-class level**, which is robust to the attribution-tier change.
 
-| Operator | Baseline (ns) | Optimized (ns) | Speedup |
-|----------|--------------|----------------|---------|
-| `aten::mm` + `aten::addmm` (combined) | 22,900,000 | 2,855,000 | **8.02×** |
-| `aten::_efficient_attention_forward` | 1,700,000 | 792,000 | **2.15×** |
-| Other attributed | ~550,000 | ~3,645,000 | — |
-| **Total attributed** | **~25,150,000** | **7,292,000** | **3.45×** |
+| Work class | Baseline (ns) | Optimized (ns) | Speedup |
+|---|---|---|---|
+| Dense GEMM (FFN + QKV + attn-out projections) | 34,962,000 | 8,218,000 | **4.25×** |
+| Attention (SDPA → fused softmax+bmm) | 3,124,000 | 821,000 | **3.80×** |
+| **Total measured-region GPU time (10 iters)** | **49,566,000** | **13,828,000** | **3.58×** |
 
-> All durations are ncu replay values (2–5× longer than real wall-clock execution); speedup ratios are valid for comparison.
+- **GEMM:** 840 baseline `cutlass_80_simt_sgemm` launches (`tensor_core_active_pct=0.0` on every one) collapse to 720 `triton_tem_fused_*` Tensor Core GEMM templates. The optimized GEMM group reports `tensor_core_active_pct` up to **~31%** (peak 54.5%), confirming the MMA units are now engaged.
+- **Attention:** the Sm80 xFormers `fmha_cutlassF_f32_aligned_64x64_rf_sm80` kernel (156 launches, FP32, empty ncu metrics) is **completely eliminated** — zero `fmha`/`sm80` kernels remain. Attention is now realized as Inductor-fused Triton softmax + Tensor-Core `bmm` templates.
 
-**Key hardware counter changes:**
+**Speedup attribution** (all three conditions — APPLIED status, expected metric change, operator improvement — verified):
 
-| Metric | Baseline (GEMM kernels) | Optimized (GEMM kernels) |
-|--------|------------------------|--------------------------|
-| `smsp__pipe_tensor_cycles_active` | 0.0% (all 792 launches) | 45–75% (all GEMM launches) |
-| L2 sector hit rate | 89–92% | 85–90% |
-| SM throughput | 38–53% | 32–37% (higher absolute throughput, lower % due to faster kernel) |
-| Attention kernel name | `fmha_cutlassF_f32_aligned_64x64_rf_sm80` | `fmha_cutlassF_f32_aligned_64x64_rf_sm80` (unchanged dispatch) |
-| Attention kernel count | 108 | 60 (48 mask-prep kernels eliminated) |
-| Attention TC% | 32.3% | ~36.4% |
+- The GEMM speedup is attributed to **OPT-1** (`APPLIED`): `tensor_core_active_pct` moved `0.0 → ~31%` and the dense-GEMM class shrank 4.25×. **OPT-3** (`APPLIED`, freezing + max_autotune) contributed by selecting the `triton_tem` autotuned templates that now carry the work; its share is not separable from OPT-1's within this profile.
+- The attention speedup is attributed to **OPT-2** (`APPLIED`): the `sm80` FP32 kernel disappeared (expected direction) and the attention class shrank 3.8×.
+- **OPT-4** (`NOT_APPLIED`) contributed nothing — consistent with its stub status; the causal mask was never materialized because OPT-2's `is_causal=True` removed it.
 
-**Residual opportunities after optimization:**
-
-The `aten::_efficient_attention_forward` kernel is still dispatching to the sm80-targeting `fmha_cutlassF_f32_aligned_64x64_rf_sm80` backend despite the `is_causal=True` kwarg change — PyTorch 2.12's SDPA dispatcher on this device did not select Flash Attention 3 or cuDNN. The attention kernel is now the dominant residual opportunity at 10.9% of attributed time.
-
-| Operator | Baseline (ns) | Optimized (ns) | Notes |
-|----------|--------------|----------------|-------|
-| GEMM (`mm`+`addmm`) | 22,900,000 | 2,855,000 | OPT-1 applied |
-| `_efficient_attention_forward` | 1,700,000 | 792,000 | OPT-2 partial (mask eliminated; kernel dispatch unchanged) |
-| Other attributed | ~550,000 | ~3,645,000 | |
-| **Total** | **~25,150,000** | **7,292,000** | **3.45× speedup** |
+> Caveat: the optimized profile's unattributed bucket (5.14 ms) is larger than the baseline's (0.48 ms) because the custom backend produced an empty correlation map; part of that bucket is pre-NVTX warm-up init. The total-row figures are the measured-region kernel sums each capture-agent reported, and the 3.58× headline is robust to this — the GEMM-class comparison (4.25×), which is unaffected by the unattributed bucket, independently corroborates it.
 
 ---
 
 ## 7. What Drove Each Speedup
 
-**BF16 Tensor Core engagement (OPT-1, +8.02× on GEMM operators):** Setting `allow_tf32=True` and inserting explicit BF16 cast nodes around every `torch.addmm` call in the partition subgraphs forced cuBLAS to select Blackwell-native Tensor Core kernels, replacing `Kernel2` (legacy FP32 SIMT path) that had been running with 0% Tensor Core utilization. The counter evidence is definitive: `smsp__pipe_tensor_cycles_active` jumped from 0.0% on all 792 baseline GEMM launches to 45–75% on the optimized launches, with the total GEMM time collapsing from 22.9ms to 2.855ms (8.0×).
+**BF16 Tensor Core GEMM promotion (OPT-1, +4.25× on the dense-GEMM class):** Casting both operands of every `aten.mm`/`aten.addmm` to BF16 routes cuBLAS/Inductor off the scalar SIMT FP32 pipeline onto the Blackwell Tensor Core MMA path. The decisive evidence is `tensor_core_active_pct` moving from exactly `0.0` on all 840 baseline `cutlass_80_simt_sgemm` launches to ~31% (peak 54.5%) on the 720 `triton_tem_fused_*` templates that replaced them, with the dense-GEMM class dropping from 34.96 ms to 8.22 ms.
 
-**Causal mask elimination (OPT-2, +2.15× on attention, 48 kernel launches eliminated):** Modifying the `F.scaled_dot_product_attention` kwargs in-place from `attn_mask=<Node>, is_causal=False` to `attn_mask=None, is_causal=True` made the upstream mask-construction subgraph (two `torch.tensor` nodes and two `torch.cat` nodes per block, constructing a `[4,12,128,128]` float32 causal bias tensor) dead code, which was then removed by `eliminate_dead_code()`. This eliminated 4 Triton pointwise kernels per transformer block, confirmed by the kernel count drop from 108 to 60 for `aten::_efficient_attention_forward`. The per-kernel attention time also improved from ~15.7µs to ~13.2µs, co-attributed to the BF16 q/k/v tensors (from OPT-1) flowing into the attention op. The SDPA dispatcher did not switch to Flash Attention 3 on this device/PyTorch version — the primary gain was kernel launch elimination, not kernel replacement.
+**Flash SDPA backend selection (OPT-2, +3.80× on the attention class):** Setting `enable_flash_sdp(True)` / `enable_mem_efficient_sdp(False)` before compilation steered SDPA away from the Sm80 xFormers `_efficient_attention` fallback; Inductor then lowered attention into fused Triton softmax + Tensor-Core `bmm` kernels. The evidence is the disappearance of the `fmha_cutlassF_f32_aligned_64x64_rf_sm80` kernel entirely (156 launches → 0), resolving the Sm80-on-Sm100 ISA mismatch that had produced empty ncu metrics.
+
+**Weight freezing + max_autotune (OPT-3, contributes within the GEMM speedup):** Marking the 48 eval-mode weights as constants let Inductor constant-fold, pre-pack them into the Tensor Core layout, and autotune GEMM tiling — which is what materialized the `triton_tem` autotuned templates now carrying the GEMM work. Its contribution is real but not separable from OPT-1's in this profile, since both act on the same kernels.
 
 ---
 
 ## 8. Remaining Opportunities
 
 | ID | Type | Target | Reason Not Applied | Projected Gain |
-|----|------|--------|--------------------|----------------|
-| OPT-2 (partial) | Kernel dispatch | `aten::_efficient_attention_forward` | PyTorch 2.12 SDPA dispatcher on RTX PRO 6000 Blackwell did not select Flash Attention 3 or cuDNN despite `is_causal=True, attn_mask=None`. The `fmha_cutlassF_f32_aligned_64x64_rf_sm80` backend (sm80-targeting) was retained. A future PyTorch version with Blackwell FA3 kernel registration, or explicit `with sdpa_kernel(SDPBackend.FLASH_ATTENTION)` context, is needed to complete this path. | Estimated 1.5–2.5× additional attention speedup if a Blackwell-native kernel (FA3 BF16 or cuDNN) is selected. |
-| OPT-3 | batch_padding | `aten::addmm` (sequential same-shape GEMMs) | Not implemented — low confidence, complex topology analysis required. | ~4.8% of baseline total time (~1.2ms reduction), now smaller relative to optimized baseline. |
+|---|---|---|---|---|
+| OPT-4 | `common_subexpression_hoist` | per-block causal-mask reconstruction | STUB no-op; no explicit `attn_bias` mask producers found — subsumed by OPT-2 `is_causal=True` | ~0.5% (16,000 ns) |
 
-If OPT-2 kernel dispatch were completed (Blackwell FA3 kernel selection), the expected additional reduction is ~0.3–0.5ms on the attention operator (792µs baseline after partial OPT-2), potentially bringing total speedup to ~3.8–4.0×.
+OPT-4 is the only unapplied proposal, and it was intentionally left as a detect-only stub because OPT-2 already eliminates the additive causal mask it would hoist. Applying it would yield no measurable gain on this profile.
+
+**Second-order bottleneck (exposed post-optimization):** with GEMMs now ~4× faster, `aten::native_layer_norm` rises in relative cost (≈1.26 ms across the measured region, ~8.3% occupancy, DRAM-bound) and the fused-softmax reduction (`triton_red_fused__safe_softmax_*`, ~0.56 ms) become the next-largest residuals. Both are memory/launch-bound Triton kernels with no GEMM/attention FX transform available; a future pass would target LayerNorm fusion or a larger batch to amortize launch overhead. No further FX-level GEMM/attention gains are identified in this profile.
 
 ---
 
-## Reproduction Commands
+## Reproduction
 
 ```bash
-# Baseline capture
-python3 nvidia/scripts/run_workload.py \
-  --workload examples/gpt2/gpt2.py \
-  --output-prefix examples/gpt2/profiler_output/gpt2 \
-  --inductor-debug-dir examples/gpt2/profiler_output/gpt2_inductor_debug \
-  --warmup-iters 3 --measure-iters 10 --correlation-pass
+# Baseline capture (built-in dedup backend) → profile.json
+#   /capture examples/gpt2/gpt2.py
 
-nsys profile --trace=cuda,nvtx --output=examples/gpt2/profiler_output/gpt2 \
-  python3 nvidia/scripts/run_workload.py \
-    --workload examples/gpt2/gpt2.py \
-    --output-prefix examples/gpt2/profiler_output/gpt2 \
-    --warmup-iters 3 --measure-iters 10
+# Optimized capture (custom backend) → profile_optimized.json
+#   /capture examples/gpt2/gpt2_optimized.py --profile-name=optimized --compile-backend=gpt2_opt
 
-# Optimized capture (custom backend)
-python3 nvidia/scripts/run_workload.py \
-  --workload examples/gpt2/gpt2_optimized.py \
-  --output-prefix examples/gpt2/profiler_output/gpt2_optimized \
-  --compile-backend gpt2_opt \
-  --warmup-iters 3 --measure-iters 10 --correlation-pass
+# Validate the backend before re-profiling
+#   /validate examples/gpt2/gpt2_optimized.py
 
-nsys profile --trace=cuda,nvtx --output=examples/gpt2/profiler_output/gpt2_optimized \
-  python3 nvidia/scripts/run_workload.py \
-    --workload examples/gpt2/gpt2_optimized.py \
-    --output-prefix examples/gpt2/profiler_output/gpt2_optimized \
-    --compile-backend gpt2_opt \
-    --warmup-iters 3 --measure-iters 10
-
-# Validation
-PYTHONPATH=/home/ubuntu/Profiler python3 -m pytest examples/gpt2/test_gpt2_optimized.py -v
+# Full pipeline end-to-end
+#   /optimize examples/gpt2/gpt2.py
 ```

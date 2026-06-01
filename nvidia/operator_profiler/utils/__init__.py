@@ -9,10 +9,20 @@ from .clock_sync import (
 )
 from .validation import validate_input_shapes, ShapeMismatchError
 from .op_namespaces import is_attributed_op
+from .gpu_clocks import (
+    resolve_target_clocks,
+    lock_gpu_clocks,
+    reset_gpu_clocks,
+    gpu_clocks_locked,
+)
 
 __all__ = [
     "run_subprocess",
     "SubprocessError",
+    "resolve_target_clocks",
+    "lock_gpu_clocks",
+    "reset_gpu_clocks",
+    "gpu_clocks_locked",
     "NSYS_TIMESTAMP_DOMAIN",
     "NCU_TIMESTAMP_DOMAIN",
     "SAFE_JOIN_KEY",

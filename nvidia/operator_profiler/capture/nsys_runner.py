@@ -52,6 +52,9 @@ def run_nsys_profile(config: NsysRunConfig) -> Path:
         *config.script_args,
     ]
     log.info("Running nsys: %s", shlex.join(cmd))
+    # GPU clock locking is owned by run_workload.py (the script profiled here), so it
+    # applies on every capture path — including the agent's raw `nsys profile` command —
+    # and is not duplicated at this subprocess-wrapper layer.
     run_subprocess(cmd, description="nsys profile", extra_env=config.extra_env)
 
     # nsys appends .nsys-rep automatically

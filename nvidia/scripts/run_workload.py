@@ -103,11 +103,26 @@ def _load_workload(script_path: str):
 
 
 
+# Gates emission of the layer:: partition NVTX ranges. These must only be
+# active during the measured capture loop — never during warmup. The dedup
+# backend wraps every partition forward unconditionally, so without this gate
+# warmup iterations would also be wrapped in layer::unique:: ranges, which
+# prevents the manifest builder from skipping them as pre-NVTX init kernels
+# (they look attributable) and inflates the layer:: aggregate with warmup work.
+_NVTX_STATE = {"active": False}
+
+
 def _wrap_nvtx(submod: fx.GraphModule, nvtx_text: str) -> None:
-    """Replace submod.forward with a closure that pushes/pops an NVTX range."""
+    """Replace submod.forward with a closure that pushes/pops an NVTX range.
+
+    The range is only emitted while ``_NVTX_STATE['active']`` is True (set by the
+    capture loop), so warmup passes through the original forward untouched.
+    """
     original_forward = submod.forward
 
     def _wrapped(*args, **kwargs):
+        if not _NVTX_STATE["active"]:
+            return original_forward(*args, **kwargs)
         torch.cuda.nvtx.range_push(nvtx_text)
         try:
             return original_forward(*args, **kwargs)
@@ -284,6 +299,26 @@ def main() -> None:
             "both use CUPTI and cannot run simultaneously."
         ),
     )
+    parser.add_argument(
+        "--no-lock-clocks", action="store_false", dest="lock_clocks", default=True,
+        help=(
+            "Disable GPU clock locking during the NVTX capture. By default the SM and "
+            "memory clocks are pinned to a fixed frequency for the captured iterations "
+            "so kernel durations are reproducible across baseline/optimized captures. "
+            "Best-effort (sudo -n nvidia-smi); degrades to dynamic clocks with a warning "
+            "when clock-setting permission is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--lock-clocks-freq", default=None, metavar="SPEC",
+        help=(
+            "Clock lock target: 'probe' (default — measure the GPU's sustainable clock "
+            "under load and lock to it, reusing a per-GPU cached result so baseline and "
+            "optimized captures match), 'max' (highest supported, may exceed the "
+            "sustainable cap), or '<gr>,<mem>' in MHz e.g. '2430,12481'. Ignored with "
+            "--no-lock-clocks or --correlation-pass."
+        ),
+    )
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA required"
@@ -403,13 +438,34 @@ def main() -> None:
         print("[run_workload] Done.", flush=True)
         return
 
-    # NVTX capture
+    # NVTX capture. _NVTX_STATE gates the layer:: partition ranges so they align
+    # exactly with the aten:: ranges from emit_nvtx — both only the measure loop.
+    # Pin GPU clocks for the captured iterations so kernel durations are reproducible
+    # across baseline/optimized captures; gpu_clocks_locked guarantees a reset on exit
+    # (including on exception, subprocess timeout, or Ctrl-C). torch.cuda.synchronize()
+    # stays inside the lock so clocks hold until every captured kernel has finished.
+    from nvidia.operator_profiler.utils.gpu_clocks import gpu_clocks_locked
+    # Cache the probed clock beside the output (profiler_output/), so the baseline and
+    # optimized captures of a workload reuse the identical sustainable clock.
+    clock_cache_dir = str(Path(args.output_prefix).parent)
     print(f"[run_workload] Capture ({args.measure_iters} iters with NVTX)...", flush=True)
-    with torch.no_grad():
-        with autograd_profiler.emit_nvtx(record_shapes=True):
-            for _ in range(args.measure_iters):
-                run_fn()
-    torch.cuda.synchronize()
+    with gpu_clocks_locked(args.lock_clocks_freq, enabled=args.lock_clocks,
+                           cache_dir=clock_cache_dir) as locked:
+        if locked is not None:
+            print(f"[run_workload] GPU clocks locked to {locked[0]} MHz (graphics) / "
+                  f"{locked[1]} MHz (memory) for capture.", flush=True)
+        elif args.lock_clocks:
+            print("[run_workload] WARNING: capturing at dynamic boost clocks "
+                  "(clock lock not applied).", flush=True)
+        with torch.no_grad():
+            with autograd_profiler.emit_nvtx(record_shapes=True):
+                _NVTX_STATE["active"] = True
+                try:
+                    for _ in range(args.measure_iters):
+                        run_fn()
+                finally:
+                    _NVTX_STATE["active"] = False
+        torch.cuda.synchronize()
     print("[run_workload] Done.", flush=True)
 
 

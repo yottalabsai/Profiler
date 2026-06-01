@@ -1,58 +1,68 @@
 """
-mlp_activations_optimized.py — Custom torch.compile() backend for the
-MLPActivations workload (four nn.Linear layers, each with a different activation:
-ReLU, GELU, SiLU, Tanh).
+mlp_activations_optimized.py — Custom torch.compile() backend for MLPActivations.
 
-ALL graph passes run at the Aten IR level, inside ``_aten_inner_compile``, which
-``compile_fx`` invokes (as its ``inner_compile`` hook) with the fully decomposed
-Aten forward graph after AOTAutograd has run. At that level every biased
-nn.Linear is ``aten.addmm.default(bias, x, aten.t.default(weight))``, and the
-activations are ``aten.relu.default`` / ``aten.gelu.default`` / ``aten.silu.default``
-/ ``aten.tanh.default``.
+Registered backend: ``mlp_activations_opt``
 
-Profiling-guided optimizations (from optimizations.json):
+Implements the three optimizations from optimizations.json routed to the correct
+IR level via the three-stage funnel (functional -> aten -> inductor_config). This
+workload is a strictly sequential MLP (each Linear consumes the previous
+activation), so there is NO parallel-branch (QKV-style) fusion and NO SDPA; the
+functional level has no pass to run here.
 
-  OPT-1 (HIGH, priority 1) — dtype_promotion -> bf16 / Tensor-Core path  [primary]
-      Every GEMM (the 8 distinct aten::mm + the addmm prologue) executes on the
-      FP32 SIMT FFMA datapath with the Tensor Cores completely idle (ncu:
-      smsp__pipe_tensor_cycles_active = 0, tensor_core_active_pct = 0.0 on 100%
-      of GEMM kernels, 210 regs/thread, 16.5% occupancy on the 2048x2048 GEMM).
-      Cast each matmul's FP32 operands (and the addmm bias) to bfloat16 and cast
-      the GEMM result back to fp32 for the activation epilogue. This switches
-      cuBLAS/cutlass kernel selection from cutlass_80_simt_sgemm onto a
-      *_tensorop_* HMMA path. Root of the dependency DAG and the dominant win
-      (conservative ~18.8% of total). Prerequisite for OPT-2.
-      Target: every aten.mm.default / aten.addmm.default node (Aten IR graph pass).
+Backend name: mlp_activations_opt  (model "mlp_activations" -> snake-case + _opt)
 
-  OPT-2 (MEDIUM, priority 2) — max-autotune GEMM templates  [config; depends OPT-1]
-      The skinny/small GEMMs (2048->512, 512->2048) are wave- and launch-starved
-      (sm_throughput 6.3%, occupancy 8.3%, 176 blocks << one wave) because the
-      single fixed cutlass_80_simt tile is the wrong shape. Enable Inductor GEMM
-      autotuning so it benchmarks Triton matmul templates / cutlass / ATEN
-      candidates and selects a per-shape-optimal tile. With OPT-1 applied the
-      candidate set includes Tensor-Core templates. This is a configuration-level
-      optimization (no node surgery) applied via torch._inductor.config; it
-      directly changes the kernel chosen for each aten.mm / aten.addmm lowering.
-      Must run after OPT-1 (eligible template set depends on operand dtype).
+Pass summary (execution order: aten then inductor_config):
 
-  OPT-3 (MEDIUM, priority 3) — bias+activation epilogue fusion  [config; depends OPT-2]
-      Each layer currently runs as two kernels: a cutlass GEMM that writes the
-      full [256,2048] (or [256,512]) result to DRAM, immediately followed by a
-      separate triton_poi_fused_addmm_<act> kernel that reloads it, adds bias,
-      applies the activation, and writes it back — a redundant DRAM round-trip and
-      an extra launch per layer. Once OPT-2 selects a Triton GEMM template,
-      Inductor's pointwise scheduler folds the bias add and the pointwise
-      activation (relu/gelu/silu/tanh) into the GEMM epilogue, collapsing each
-      layer to a single triton_mm_* kernel. Configuration-level (no node surgery):
-      enable epilogue_fusion and constrain max_autotune_gemm_backends to TRITON
-      (extern cutlass kernels cannot host a fused Triton epilogue). Depends on
-      OPT-2 selecting the Triton template.
+  OPT-1  aten / high  — BF16 dtype promotion (matmul operands)
+      Inside _aten_inner_compile (post-AOTAutograd), cast the matmul operands of every
+      aten.mm.default AND aten.addmm.default node to bfloat16 via
+      prims.convert_element_type, computing the (add)mm in bf16, and cast the result
+      back to float32 to preserve the downstream dtype contract. Eval-mode nn.Linear
+      layers lower to aten.addmm.default (bias + matmul fused), so addmm — not mm — is
+      the node that actually appears in this MLP; promoting it is the dominant lever.
+      At execution this routes cuBLAS off the SIMT FP32 SGEMM path
+      (cutlass_80_simt_sgemm_*_tn_align1, tensor_core_active_pct=0.0) onto a Blackwell
+      BF16 Tensor Core GEMM path, lowering register pressure and raising occupancy.
+      Using prims.convert_element_type (not aten._to_copy) avoids the "both a fallback
+      and a decomp for same op" assertion on torch 2.11.
 
-Backend registration name: mlp_activations_opt
-Prerequisite DAG (strict order): OPT-1 -> OPT-2 -> OPT-3.
+  OPT-2  inductor_config / medium  — max_autotune + epilogue fusion
+      Pass config_patches={"max_autotune": True, "max_autotune_gemm_backends":
+      "ATEN,TRITON", "epilogue_fusion": True} to compile_fx. Lets Inductor emit Triton
+      GEMM templates that fuse the bias-add + ReLU/GELU/SiLU/Tanh pointwise epilogue
+      into the GEMM (removing the separate triton_poi_fused_addmm_* kernels and their
+      intermediate DRAM round-trips) and autotune tile/split-K per shape, repairing the
+      ~6% sm_throughput on the skinny 2048->512 projections.
+
+  OPT-3  inductor_config / medium  — weight freezing
+      Pass config_patches={"freezing": True} to compile_fx. Inductor treats the MLP
+      weights (requires_grad=False in eval) as compile-time constants, pre-transposes
+      them to the GEMM-preferred layout (hoisting the runtime _tn_ transpose to compile
+      time), drops per-call weight guards, and exposes a pre-packed BF16 weight layout
+      to OPT-2's autotuner. Requires model.eval(), which get_model_and_input() sets.
+
+Prerequisite / ordering rationale:
+  - OPT-1 (aten) is a prerequisite of OPT-2 and OPT-3 by pipeline-level ordering:
+    the funnel runs the aten BF16 promotion before Inductor lowering, so the
+    BF16 Tensor Core templates (where autotune + epilogue fusion + frozen pre-packed
+    layouts pay off most) are what the inductor_config passes operate on.
+  - OPT-2 and OPT-3 are both inductor_config with no within-level ordering; their
+    patches are merged into a single config dict for one compile_fx call.
+  - Cross-level ordering (aten -> inductor_config) is enforced by the funnel and
+    requires no explicit encoding.
+
+IR-level mechanics (torch 2.11):
+  compile_fx owns AOTAutograd, the decomp table, the boxed calling convention and the
+  partitioner. We do NOT use aot_autograd(fw_compiler=compile_fx) — on torch 2.11 that
+  raises AssertionError: Expected tensors only inside copy_misaligned_inputs. The funnel
+  passes functional-level rewrites BEFORE compile_fx (none here), aten-level passes
+  through its inner_compile seam, and inductor_config passes as scoped config_patches.
+
+compile_mode = "inductor" (from optimizations.json analysis.compile_mode).
 """
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Callable
 
@@ -61,241 +71,342 @@ import torch.fx as fx
 import torch.nn as nn
 import torch.nn.functional as F
 from torch._dynamo import register_backend
-
-# compile_fx is the callable (NEVER `from torch._inductor import compile_fx`,
-# which imports the module -> "'module' object is not callable"). compile_fx_inner
-# is the post-AOTAutograd leaf compiler that receives the fully decomposed Aten IR
-# graph; passing _aten_inner_compile as inner_compile lets our Aten-IR passes run
-# on that graph and then delegate to the real inner compiler (Aten -> Triton).
 from torch._inductor.compile_fx import compile_fx, compile_fx_inner
-import torch._inductor.config as inductor_config
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Backend name constant (used for torch.compile(backend=...) and --compile-backend)
+# Constants
 # ---------------------------------------------------------------------------
-BACKEND_NAME = "mlp_activations_opt"
+_BF16 = torch.bfloat16
+_FP32 = torch.float32
 
-# Aten op targets used across passes
 _MM = torch.ops.aten.mm.default
 _ADDMM = torch.ops.aten.addmm.default
-_GEMM_TARGETS = frozenset({_MM, _ADDMM})
-
-# prims.convert_element_type is the canonical Inductor dtype-cast primitive. We
-# use it instead of aten._to_copy.default (which optimizations.json names as
-# aten.to.dtype) because on torch 2.11 _to_copy carries BOTH a fallback and a
-# decomp registration; inserting it post-AOTAutograd makes Inductor raise "both a
-# fallback and a decomp for same op". convert_element_type lowers cleanly to a
-# Triton cast and is the form Inductor itself emits, so OPT-1's casts fuse into
-# the producing/consuming Triton epilogues.
+# Use prims.convert_element_type, not aten._to_copy. On torch 2.11, aten._to_copy has
+# both a fallback and a decomp registration; inserting it into an already-decomposed
+# Aten graph makes Inductor raise "both a fallback and a decomp for same op".
+# prims.convert_element_type lowers cleanly to a Triton elementwise cast.
 _CONVERT = torch.ops.prims.convert_element_type.default
 
-# OPT-1 cast target dtype. bf16 preferred over fp16 for numerical range on
-# inference; activations (gelu/silu/tanh) are computed in fp32 after the
-# cast-back so activation accuracy is unaffected.
-TARGET_DTYPE = torch.bfloat16
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _node_dtype(n: fx.Node) -> torch.dtype | None:
+    """Return the tensor dtype stored in node meta, or None if unavailable."""
+    if not isinstance(n, fx.Node):
+        return None
+    val = n.meta.get("val", None)
+    if val is None or not hasattr(val, "dtype"):
+        return None
+    return val.dtype
+
+
+def _insert_bf16_cast(g: fx.Graph, src: fx.Node, before: fx.Node) -> fx.Node:
+    """Insert a prims.convert_element_type cast to bf16 directly before ``before``.
+    Returns ``src`` unchanged if it already has bf16 dtype (no-op on already-cast)."""
+    if _node_dtype(src) is _BF16:
+        return src
+    with g.inserting_before(before):
+        return g.call_function(_CONVERT, (src, _BF16))
 
 
 # ---------------------------------------------------------------------------
-# OPT-2 / OPT-3 — Inductor configuration (max-autotune + epilogue fusion)
+# OPT-1 — BF16 dtype promotion (matmul operands). ir_level=aten. Confidence: high.
+#
+# Runs inside _aten_inner_compile after AOTAutograd has fully decomposed the
+# graph. Every aten.mm.default and aten.addmm.default node sees its matmul
+# operands cast to bfloat16 via prims.convert_element_type, the (add)mm is
+# computed in bf16, and its output is cast back to float32 to preserve the
+# downstream dtype contract.
+#
+# Eval-mode nn.Linear layers lower to aten.addmm.default(bias, mat1, mat2) — bias
+# + matmul fused — so addmm is the node that actually carries the GEMM in this MLP.
+# For addmm, all three operands (bias, mat1, mat2) are cast to bf16 so the addmm
+# dtype is internally consistent, then the bf16 result is cast back to fp32.
+#
+# This routes cuBLAS dispatch from the SIMT FP32 path
+# (cutlass_80_simt_sgemm_128x256_8x4_tn_align1, tensor_core_active_pct=0.0)
+# to the BF16 Tensor Core path on Blackwell (sm100).
 # ---------------------------------------------------------------------------
 
-def _apply_inductor_config() -> None:
+def _promote_node_to_bf16(g: fx.Graph, node: fx.Node, operand_idxs) -> bool:
+    """Cast the given operand positions of ``node`` to BF16 and cast the node's
+    output back to FP32. Returns True if the node was promoted, False if all the
+    targeted operands were already BF16 (no-op for this node).
+
+    The output cast-back is inserted via replace_all_uses_with with a guard so the
+    newly-inserted convert (the only legitimate consumer of the raw bf16 result) is
+    not itself rewired back onto its own input.
     """
-    OPT-2 + OPT-3 — configuration-level optimizations applied to the Inductor
-    compile config. Neither is a graph-node transformation:
+    new_args = list(node.args)
+    any_cast = False
+    for i in operand_idxs:
+        operand = new_args[i]
+        if not isinstance(operand, fx.Node):
+            continue
+        cast = _insert_bf16_cast(g, operand, node)
+        if cast is not operand:
+            new_args[i] = cast
+            any_cast = True
+    if not any_cast:
+        # Every targeted operand was already BF16 — leave the node untouched.
+        return False
 
-      OPT-2 (max-autotune GEMM): max_autotune / max_autotune_gemm let Inductor
-        benchmark per-shape GEMM templates instead of the single fixed
-        cutlass_80_simt tile, fixing the wave-starved skinny/small GEMMs.
-      OPT-3 (epilogue fusion): epilogue_fusion + a TRITON-only GEMM backend let
-        the bias add and the pointwise activation fold into the Triton matmul
-        template epilogue, collapsing each layer to one kernel.
+    node.args = tuple(new_args)
 
-    OPT-3 constrains max_autotune_gemm_backends to "TRITON" because extern
-    cutlass GEMM kernels cannot host a fused Triton epilogue. This is set *after*
-    (and overrides) OPT-2's broader backend list, honouring the OPT-1 -> OPT-2 ->
-    OPT-3 prerequisite DAG. Each setattr is individually guarded so a missing
-    attribute on this torch build degrades to a no-op instead of breaking compile.
-    """
-    # OPT-2 — max-autotune GEMM templates.
-    opt2_settings = {
-        "max_autotune": True,
-        "max_autotune_gemm": True,
-        # Broad candidate set for OPT-2; OPT-3 narrows this to TRITON below.
-        "max_autotune_gemm_backends": "TRITON,CUTLASS,ATEN",
-        "coordinate_descent_tuning": True,
-    }
-    applied_opt2 = []
-    for key, value in opt2_settings.items():
-        if hasattr(inductor_config, key):
-            try:
-                setattr(inductor_config, key, value)
-                applied_opt2.append(key)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[OPT-2] could not set inductor_config.%s: %s", key, exc)
-        else:
-            logger.warning("[OPT-2] inductor_config has no attribute '%s' — skipped", key)
-    if applied_opt2:
-        logger.info(
-            "[OPT-2] max-autotune GEMM enabled: %s [config, depends OPT-1]",
-            ", ".join(applied_opt2),
-        )
-    else:
-        logger.warning("[OPT-2] no max-autotune settings applied — pass not effective")
-
-    # OPT-3 — epilogue fusion; constrain GEMM backends to TRITON so the activation
-    # folds into the matmul template epilogue (extern cutlass cannot fuse it).
-    opt3_settings = {
-        "epilogue_fusion": True,
-        "max_autotune_gemm_backends": "TRITON",
-    }
-    applied_opt3 = []
-    for key, value in opt3_settings.items():
-        if hasattr(inductor_config, key):
-            try:
-                setattr(inductor_config, key, value)
-                applied_opt3.append(key)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[OPT-3] could not set inductor_config.%s: %s", key, exc)
-        else:
-            logger.warning("[OPT-3] inductor_config has no attribute '%s' — skipped", key)
-    if applied_opt3:
-        logger.info(
-            "[OPT-3] bias+activation epilogue fusion enabled (TRITON GEMM backend): "
-            "%s [config, depends OPT-2]",
-            ", ".join(applied_opt3),
-        )
-    else:
-        logger.warning("[OPT-3] no epilogue-fusion settings applied — pass not effective")
+    # Restore FP32 on the output so all downstream users keep float32.
+    with g.inserting_after(node):
+        back_fp32 = g.call_function(_CONVERT, (node, _FP32))
+    node.replace_all_uses_with(
+        back_fp32, delete_user_cb=lambda u: u is not back_fp32
+    )
+    return True
 
 
-# ---------------------------------------------------------------------------
-# OPT-1 (HIGH) — dtype_promotion: BF16 casts around aten.mm / aten.addmm
-# ---------------------------------------------------------------------------
+def _apass_bf16_promotion(gm: fx.GraphModule) -> fx.GraphModule:
+    """OPT-1: Cast aten.mm / aten.addmm matmul operands to BF16, output back to FP32.
 
-def _pass_gemm_bf16_casts(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    OPT-1 — force every tensor operand of every aten.mm.default and
-    aten.addmm.default node to bfloat16, then cast the result back to float32.
+    Aten IR level. High confidence: assume the pattern exists (this is an MLP of
+    eval-mode Linear layers, every one of which decomposes to aten.addmm.default —
+    bias + matmul fused). aten.mm.default is handled too (harmless if absent). An
+    exception is a real error and is logged with a warning so compilation can still
+    fall through to compile_fx_inner.
 
-    Confidence HIGH (smsp__pipe_tensor_cycles_active = 0 on 100% of GEMM kernels):
-    assume the pattern exists; an exception is a real error -> log WARNING + return
-    gm unchanged. A `matched` guard still degrades to a no-op if no GEMM is found.
-
-    Robustness: aten rejects a GEMM whose operands disagree in dtype ("expected
-    mat1 and mat2 to have the same dtype"). We therefore do NOT guard on float32 —
-    instead we guarantee that *both* matmul operands (and, for addmm, the bias)
-    end up bf16 regardless of their current dtype. For every tensor operand we
-    insert a convert_element_type(bf16) unless the operand is *already provably*
-    bf16 (meta dtype == torch.bfloat16), in which case the cast is skipped. When
-    meta is missing we cast defensively (convert to bf16 of a bf16 tensor is a
-    harmless no-op). Non-tensor args (ints, None bias) are left as-is.
-
-    The output is restored to float32 so the downstream activation (relu/gelu/
-    silu/tanh) runs in fp32 — activation accuracy is unaffected by the bf16 GEMM.
-    Inductor fuses the convert_element_type casts into neighbouring Triton kernels,
-    hiding their cost; with OPT-2's Triton template + OPT-3's epilogue fusion the
-    back-cast collapses into the layer's single fused kernel.
+    addmm(bias, mat1, mat2): bias is args[0], the matmul operands are args[1] (mat1)
+    and args[2] (mat2). All three are cast to BF16 so the addmm dtype is internally
+    consistent, then the BF16 result is cast back to FP32.
+    mm(mat1, mat2): args[0] and args[1] are the matmul operands.
     """
     try:
-        matched = False
-        graph = gm.graph
-        for node in list(graph.nodes):
-            if not (node.op == "call_function" and node.target in _GEMM_TARGETS):
+        g = gm.graph
+        mm_promoted = 0
+        addmm_promoted = 0
+
+        for node in list(g.nodes):
+            if node.op != "call_function":
                 continue
-            matched = True
+            if node.target is _MM:
+                if len(node.args) < 2:
+                    continue
+                if _promote_node_to_bf16(g, node, (0, 1)):
+                    mm_promoted += 1
+            elif node.target is _ADDMM:
+                if len(node.args) < 3:
+                    continue
+                # Cast bias (0), mat1 (1) and mat2 (2): the whole addmm runs in BF16,
+                # then the result is converted back to FP32 by _promote_node_to_bf16.
+                if _promote_node_to_bf16(g, node, (0, 1, 2)):
+                    addmm_promoted += 1
 
-            # Cast every tensor operand to bf16 before the GEMM so both matmul
-            # inputs (and the addmm bias) share one dtype. Skip the cast only when
-            # the operand is already provably bf16.
-            with graph.inserting_before(node):
-                cast_args = []
-                for a in node.args:
-                    if isinstance(a, fx.Node):
-                        val = a.meta.get("val")
-                        cur_dtype = getattr(val, "dtype", None)
-                        if cur_dtype == TARGET_DTYPE:
-                            cast_args.append(a)
-                        else:
-                            c = graph.call_function(_CONVERT, (a, TARGET_DTYPE))
-                            cast_args.append(c)
-                    else:
-                        cast_args.append(a)
-            node.args = tuple(cast_args)
-
-            # Restore float32 on the output for the fp32 activation epilogue.
-            with graph.inserting_after(node):
-                back = graph.call_function(_CONVERT, (node, torch.float32))
-            # Re-point all existing users to the float32 cast (but NOT the cast
-            # itself, which consumes `node`).
-            node.replace_all_uses_with(back, delete_user_cb=lambda u: u is not back)
-
-        if not matched:
+        if mm_promoted == 0 and addmm_promoted == 0:
             logger.warning(
-                "[_pass_gemm_bf16_casts] No aten.mm / aten.addmm nodes found "
+                "[OPT-1 bf16_promotion] No FP32 aten.mm / aten.addmm nodes found "
                 "— pass not applied"
             )
             return gm
 
-        graph.lint()
+        g.lint()
         gm.recompile()
         logger.info(
-            "[_pass_gemm_bf16_casts] Applied BF16 casts to aten.mm / aten.addmm "
-            "operands, fp32 back-cast on output [OPT-1, Aten IR]"
+            "[OPT-1 bf16_promotion] Promoted %d aten.mm + %d aten.addmm node(s) to "
+            "BF16 operands (FP32 output restored) [aten IR]",
+            mm_promoted,
+            addmm_promoted,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[_pass_gemm_bf16_casts] Failed: %s", exc)
-
+    except Exception as e:
+        logger.warning("[OPT-1 bf16_promotion] Failed: %s", e)
     return gm
 
 
 # ---------------------------------------------------------------------------
-# Aten IR inner compiler — graph passes run here, in prerequisite order
+# OPT-2 — max_autotune + epilogue fusion. ir_level=inductor_config. Confidence: medium.
+#
+# Returns a dict merged into compile_fx's config_patches (scoped to this compile
+# unit only — no process-global Inductor config mutation). Inductor benchmarks
+# Triton GEMM templates that fuse the bias-add + activation epilogue into the GEMM
+# and autotunes tile/split-K per shape for the small-M (batch=256) projections.
 # ---------------------------------------------------------------------------
 
-def _aten_inner_compile(gm: fx.GraphModule, example_inputs, **kwargs) -> Callable:
-    """
-    Inductor ``inner_compile`` hook. ``compile_fx`` calls this with the fully
-    decomposed **Aten IR** forward graph (after AOTAutograd has run), where every
-    biased nn.Linear is an aten.addmm.default and each activation is a pointwise
-    aten op. We run OPT-1 here (the only graph-node transformation), then delegate
-    to the real ``compile_fx_inner`` (Aten -> Triton).
+def _cfg_max_autotune() -> dict:
+    """OPT-2: Inductor config patches enabling max_autotune + epilogue fusion."""
+    try:
+        patches = {
+            "max_autotune": True,
+            "max_autotune_gemm_backends": "ATEN,TRITON",
+            "epilogue_fusion": True,
+        }
+        logger.info(
+            "[OPT-2 max_autotune] Inductor config_patches: max_autotune=True, "
+            "max_autotune_gemm_backends='ATEN,TRITON', epilogue_fusion=True "
+            "[inductor_config level]"
+        )
+        return patches
+    except Exception as e:
+        logger.warning("[OPT-2 max_autotune] Config patch failed: %s", e)
+        return {}
 
-    OPT-2 (max-autotune) and OPT-3 (epilogue fusion) are configuration-level and
-    are applied to torch._inductor.config in the backend before this compile runs;
-    they steer compile_fx_inner's GEMM lowering and pointwise scheduling rather
-    than editing nodes.
 
-    OPT-1 is the dtype root of the DAG, so it must precede the OPT-2/OPT-3 config
-    effects: the Tensor-Core template candidate set OPT-2 autotunes over depends
-    on the bf16 operands OPT-1 inserts here.
+# ---------------------------------------------------------------------------
+# OPT-3 — Weight freezing. ir_level=inductor_config. Confidence: medium.
+#
+# Returns a dict merged into compile_fx's config_patches. Inductor constant-folds
+# the requires_grad=False MLP weights, pre-transposes them to the GEMM-preferred
+# layout (hoisting the runtime _tn_ transpose to compile time), and drops per-call
+# weight guards. Requires model.eval() (set in get_model_and_input()).
+# ---------------------------------------------------------------------------
 
-    Using inner_compile (rather than re-wrapping the functional graph with a
-    second aot_autograd) avoids a torch 2.11 double-AOTAutograd input-flattening
-    bug ("Expected tensors only, but got list" in copy_misaligned_inputs).
-    """
-    gm = _pass_gemm_bf16_casts(gm)  # OPT-1 (HIGH) — Aten IR graph pass
+def _cfg_freezing() -> dict:
+    """OPT-3: Inductor config patch enabling weight freezing for the eval model."""
+    try:
+        patches = {"freezing": True}
+        logger.info(
+            "[OPT-3 freezing] Inductor config_patches: freezing=True "
+            "[inductor_config level]"
+        )
+        return patches
+    except Exception as e:
+        logger.warning("[OPT-3 freezing] Config patch failed: %s", e)
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Pass registry — routed by ir_level
+# ---------------------------------------------------------------------------
+
+PASS_REGISTRY = [
+    # No functional-level passes: this is a sequential MLP with no shared-activation
+    # branch fusion (no QKV) and no SDPA. The functional stage is a no-op here.
+    # Aten-level passes (run inside _aten_inner_compile, post-AOTAutograd)
+    {"id": "OPT-1", "level": "aten", "fn": _apass_bf16_promotion},
+    # Inductor config patches (merged into compile_fx config_patches)
+    {"id": "OPT-2", "level": "inductor_config", "fn": _cfg_max_autotune},
+    {"id": "OPT-3", "level": "inductor_config", "fn": _cfg_freezing},
+]
+
+_FUNCTIONAL_PASSES = [p for p in PASS_REGISTRY if p["level"] == "functional"]
+_ATEN_PASSES = [p for p in PASS_REGISTRY if p["level"] == "aten"]
+_CONFIG_PASSES = [p for p in PASS_REGISTRY if p["level"] == "inductor_config"]
+
+
+# ---------------------------------------------------------------------------
+# LEVEL 1 — Functional passes (Dynamo graph, pre-AOTAutograd)
+# ---------------------------------------------------------------------------
+
+def _run_functional_passes(gm: fx.GraphModule) -> fx.GraphModule:
+    """Run all functional-level passes on the Dynamo graph before compile_fx.
+
+    No functional passes are registered for this MLP (no QKV fusion / SDPA), so
+    this is a structural no-op kept for funnel uniformity and forward extension."""
+    for p in _FUNCTIONAL_PASSES:
+        try:
+            gm = p["fn"](gm)
+        except Exception as e:
+            logger.warning("[%s] functional pass error: %s", p["id"], e)
+    return gm
+
+
+# ---------------------------------------------------------------------------
+# LEVEL 3 — Inductor config patches
+# ---------------------------------------------------------------------------
+
+def _build_config_patches() -> dict:
+    """Collect and merge all inductor_config-level patches. Scoped to this
+    compile_fx call only — no global Inductor config mutation."""
+    patches: dict = {}
+    for p in _CONFIG_PASSES:
+        try:
+            result = p["fn"]()
+            if result:
+                patches.update(result)
+        except Exception as e:
+            logger.warning("[%s] config pass error: %s", p["id"], e)
+    return patches
+
+
+# ---------------------------------------------------------------------------
+# LEVEL 2 — Aten-level passes (inside compile_fx inner_compile hook)
+# ---------------------------------------------------------------------------
+
+def _repropagate_meta(gm: fx.GraphModule, example_inputs) -> None:
+    """Re-run FakeTensorProp after a structural graph rewrite so inserted nodes
+    (the new convert_element_type casts) get meta['val'] before compile_fx_inner."""
+    try:
+        from torch.fx.passes.fake_tensor_prop import FakeTensorProp
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        fake_inputs = []
+        fake_mode = None
+        for ph, ex in zip(placeholders, example_inputs):
+            val = ph.meta.get("val", ex)
+            fake_inputs.append(val)
+            fm = getattr(val, "fake_mode", None)
+            if fm is not None:
+                fake_mode = fm
+        if fake_mode is not None:
+            with fake_mode:
+                FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(
+                    *fake_inputs
+                )
+        else:
+            FakeTensorProp(gm).propagate_dont_convert_inputs(*fake_inputs)
+    except Exception as e:
+        logger.warning("[mlp_activations_opt] meta re-propagation skipped: %s", e)
+
+
+def _aten_inner_compile(
+    gm: fx.GraphModule, example_inputs, *, real_inputs=None, **kwargs
+) -> Callable:
+    """LEVEL 2 — Inductor inner_compile hook.
+
+    compile_fx calls this with the fully decomposed Aten IR graph (post-AOTAutograd).
+    Run aten-level passes (OPT-1 BF16 promotion), repropagating meta after each
+    structural rewrite, then delegate to compile_fx_inner (Aten -> Triton).
+
+    ``example_inputs`` may be FakeTensors under FakeTensorMode. ``real_inputs`` is
+    threaded from the backend for any pass that needs actual weight values (OPT-1 is
+    an op-target pass and does not read weight values, so it does not use it here).
+    ``**kwargs`` is forwarded verbatim to compile_fx_inner for forward-compatibility."""
+    for p in _ATEN_PASSES:
+        try:
+            gm = p["fn"](gm)
+            _repropagate_meta(gm, example_inputs)
+        except Exception as e:
+            logger.warning("[%s] aten pass error: %s", p["id"], e)
     return compile_fx_inner(gm, example_inputs, **kwargs)
 
 
-def _compile_with_aten_passes(gm: fx.GraphModule, example_inputs) -> Callable:
-    """Compile a (sub)graph through Inductor with the Aten-IR passes installed."""
-    return compile_fx(gm, example_inputs, inner_compile=_aten_inner_compile)
+# ---------------------------------------------------------------------------
+# Three-stage funnel: functional -> (AOTAutograd decomposition) -> aten -> config
+# ---------------------------------------------------------------------------
+
+def _compile_unit(gm: fx.GraphModule, example_inputs) -> Callable:
+    """Fixed three-stage funnel for one (sub)graph.
+
+    Stage 1: functional passes (no-op for this MLP).
+    Stage 2: compile_fx owns AOTAutograd + decomp; our _aten_inner_compile hook
+             runs OPT-1 BF16 promotion on the decomposed Aten IR.
+    Stage 3: OPT-2 max_autotune + OPT-3 freezing config_patches, scoped to this
+             compile_fx call."""
+    gm = _run_functional_passes(gm)
+    inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
+    config_patches = _build_config_patches()
+    return compile_fx(
+        gm, example_inputs, inner_compile=inner, config_patches=config_patches
+    )
 
 
 # ---------------------------------------------------------------------------
-# Utility: capture per-partition input tensors for the dedup compile path
+# Partition input capture (dedup path)
 # ---------------------------------------------------------------------------
 
 def _capture_partition_inputs(
-    split_gm: fx.GraphModule,
-    example_inputs: list,
+    split_gm: fx.GraphModule, example_inputs: list
 ) -> dict[str, list]:
-    """Run split_gm once under no_grad to capture each partition's input tensors."""
+    """Run split_gm once under no_grad to capture per-partition input tensors."""
     partition_inputs: dict[str, list] = {}
     hooks = []
     for name, submod in split_gm.named_children():
@@ -316,90 +427,79 @@ def _capture_partition_inputs(
 
 @register_backend
 def mlp_activations_opt(gm: fx.GraphModule, example_inputs) -> Callable:
-    """
-    Custom torch.compile() backend for MLPActivations.
+    """Custom torch.compile() backend for MLPActivations.
 
-    Structure (dedup-aware per the standard backend pattern):
-      - OPT-2/OPT-3 are configuration-level: set the Inductor config (max-autotune
-        + epilogue fusion, TRITON GEMM backend) BEFORE any compile so they steer
-        every GEMM lowering and the pointwise scheduler.
-      - UniqueSubgraphRegistry splits the functional FX graph into per-layer
-        partitions and groups them by structural signature. MLPActivations' four
-        layers have DISTINCT shapes/activations (relu/gelu/silu/tanh), so there is
-        no repeated structure; build_partition_equivalence_map() returns empty and
-        we take the flat compile path — preserving cross-op Inductor fusion of the
-        BF16 casts and the activation epilogues into neighbouring kernels.
-      - On the flat path the whole graph is compiled through
-        compile_fx(..., inner_compile=_aten_inner_compile); OPT-1 runs inside
-        _aten_inner_compile at the Aten IR level (post-AOTAutograd).
-      - The dedup branch is retained for protocol compliance and degrades safely
-        to the flat path on any per-partition compile failure.
+    Implements three optimizations from optimizations.json via the three-stage funnel
+    (functional -> aten -> inductor_config):
+
+      OPT-1 (aten):   BF16 promotion  — aten.mm operands BF16, output FP32
+      OPT-2 (config): max_autotune    — Triton GEMM templates + epilogue fusion
+      OPT-3 (config): freezing        — constant-fold + pre-transpose eval weights
+
+    Dedup-aware: the MLP is a strictly sequential stack with no repeated partitions;
+    UniqueSubgraphRegistry returns an empty equivalence map and the flat compile path
+    is taken (which also preserves cross-layer Inductor fusion). The dedup branch is
+    preserved for models with multiple identical blocks.
     """
     logger.info(
         "mlp_activations_opt backend: starting "
-        "(Aten IR passes via compile_fx inner_compile)"
+        "(functional[none] -> aten[OPT-1] -> inductor_config[OPT-2, OPT-3])"
     )
-
-    # OPT-2 + OPT-3 — apply Inductor config before compiling (depends on OPT-1
-    # supplying bf16 operands inside _aten_inner_compile; config does not edit nodes).
-    _apply_inductor_config()
 
     registry = UniqueSubgraphRegistry(gm)
     equiv_map = registry.build_partition_equivalence_map()
 
     if not equiv_map:
-        logger.info("mlp_activations_opt: no repeated layers — flat compile path")
-        return _compile_with_aten_passes(gm, example_inputs)
+        # No repeated layers — flat compile preserves cross-layer Inductor fusion.
+        logger.info("mlp_activations_opt: no repeated layers, flat compile path")
+        return _compile_unit(gm, example_inputs)
 
     logger.info(
-        "mlp_activations_opt: %d duplicate partition(s) — dedup compile path",
+        "mlp_activations_opt: %d duplicate partition(s), dedup compile path",
         len(equiv_map),
     )
 
-    try:
-        partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
-        for rep_name, rep_mod in registry.unique_reps:
-            inputs = partition_inputs.get(rep_name, example_inputs)
-            compiled = _compile_with_aten_passes(rep_mod, inputs)
-            rep_mod.forward = compiled
-            for _, dup_mod in registry.duplicates_of(rep_name):
-                dup_mod.forward = compiled
-        return lambda *args: registry.split(*args)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "mlp_activations_opt: dedup compile path failed (%s) — falling back "
-            "to flat compile path", exc
-        )
-        return _compile_with_aten_passes(gm, example_inputs)
+    # Compile each unique representative through the same funnel; share the
+    # compiled callable with all structural duplicates. Functional passes run
+    # per-rep (inside _compile_unit), never on the pre-split graph.
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:
+        inputs = partition_inputs.get(rep_name, example_inputs)
+        compiled = _compile_unit(rep_mod, inputs)
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    # registry.split is a GraphModule whose child partitions have Inductor-compiled
+    # .forward methods; routing each forward call through it reassembles the model.
+    return lambda *args: registry.split(*args)
 
 
 # ---------------------------------------------------------------------------
-# Workload interface (mirrors mlp_activations.py)
+# Workload interface
 # ---------------------------------------------------------------------------
-
-DEVICE     = "cuda"
+DEVICE = "cuda"
 BATCH_SIZE = 256
-DIM_IN     = 512
+DIM_IN = 512
 DIM_HIDDEN = 2048
-DIM_OUT    = 512
+DIM_OUT = 512
 
 
 class MLPActivations(nn.Module):
-    """
-    Four-layer MLP with heterogeneous activations.
+    """Four-layer MLP with heterogeneous activations (ReLU/GELU/SiLU/Tanh).
 
-      Linear(512  -> 2048) -> ReLU
-      Linear(2048 -> 2048) -> GELU
-      Linear(2048 -> 2048) -> SiLU
-      Linear(2048 -> 512)  -> Tanh
+    Identical architecture to the baseline mlp_activations.py. All graph-level
+    optimizations (OPT-1 BF16 promotion) and config-level optimizations (OPT-2
+    autotune, OPT-3 freezing) are applied by the mlp_activations_opt backend at
+    compile time, not by modifying the module here.
     """
 
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(DIM_IN,     DIM_HIDDEN, bias=True)
+        self.fc1 = nn.Linear(DIM_IN, DIM_HIDDEN, bias=True)
         self.fc2 = nn.Linear(DIM_HIDDEN, DIM_HIDDEN, bias=True)
         self.fc3 = nn.Linear(DIM_HIDDEN, DIM_HIDDEN, bias=True)
-        self.fc4 = nn.Linear(DIM_HIDDEN, DIM_OUT,    bias=True)
+        self.fc4 = nn.Linear(DIM_HIDDEN, DIM_OUT, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.fc1(x))
@@ -410,28 +510,27 @@ class MLPActivations(nn.Module):
 
 
 def get_model_and_input() -> tuple:
-    """
-    Workload interface — return (uncompiled model on CUDA, input tensor on CUDA).
+    """Return (raw_model, input_tensor) on CUDA — uncompiled, unwarmed.
 
-    Non-graph optimizations: none applied here. OPT-1 (BF16 dtype promotion) is a
-    graph pass applied inside the backend at the Aten IR level, so the public
-    model/input stay float32. OPT-2 (max-autotune) and OPT-3 (epilogue fusion) are
-    Inductor configuration applied inside the backend, not model state. No
-    channels_last (no NCHW conv tensors) and no batch padding (B=256, all GEMM
-    M/N/K dims are multiples of 16, already BF16 Tensor-Core aligned).
+    Model dtype: FP32 (matches optimizations.json analysis.dtype = "float32").
+    OPT-1 BF16 promotion is applied selectively inside the graph at the aten level,
+    not by casting the whole module, to preserve the FP32 input/output dtype contract.
 
-    Compilation and warmup are handled externally by run_workload.py via
-    --compile-backend mlp_activations_opt.
+    No non-graph (eager-side) optimizations are required for this workload: there are
+    no conv layers needing channels_last, and the GEMM M/N/K dims (256, 512, 2048) are
+    multiples of 16, so no batch padding is needed.
+
+    The model is returned with .eval() set; OPT-3 freezing requires eval mode.
     """
     assert torch.cuda.is_available(), "CUDA required"
     model = MLPActivations().to(DEVICE).eval()
-    x     = torch.randn(BATCH_SIZE, DIM_IN, device=DEVICE)
+    x = torch.randn(BATCH_SIZE, DIM_IN, device=DEVICE)
     return model, x
 
 
 if __name__ == "__main__":
     model, x = get_model_and_input()
-    compiled = torch.compile(model, backend=BACKEND_NAME)
+    compiled = torch.compile(model, backend="mlp_activations_opt")
     with torch.no_grad():
         out = compiled(x)
-    print(f"Output shape: {out.shape}, dtype: {out.dtype}")  # expect (256, 512)
+    print("output shape:", out.shape, "dtype:", out.dtype)

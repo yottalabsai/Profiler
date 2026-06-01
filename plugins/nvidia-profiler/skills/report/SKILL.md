@@ -29,9 +29,11 @@ Include these sections:
 
 ### 1. Hardware Context
 
-Open the report with a one-sentence headline: "This optimization achieved X× total speedup on [model] (B=[N], [GPU])." This ensures the document is scannable without requiring hardware expertise.
+Open the report with a one-sentence headline: "This optimization achieved X× total speedup on [model] (B=[N], [GPU])." The X× is the **end-to-end Total from Section 6** — never a single kernel's or single operator's best-case number, and never a compute-only figure that omits overhead the optimization itself introduced. If a standout per-operator speedup (e.g. a GEMM moved onto Tensor Cores) is larger than the Total, it belongs in Section 7 as the mechanism; add one clause to the headline paragraph naming what reabsorbs the difference (e.g. a newly-introduced dtype-cast kernel). This ensures the document is scannable without requiring hardware expertise.
 
-Key-value table. Fields to include: GPU model (with SM count), architecture family (Ampere / Hopper / Blackwell), PyTorch version, compile mode, batch size, iteration count with the note "(ncu replay — relative timing only)".
+Key-value table. Fields to include: GPU model (with SM count), architecture family (Ampere / Hopper / Blackwell), PyTorch version, compile mode, batch size, iteration count with the note "(nsys capture — durations measured at locked GPU clocks; relative comparison)".
+
+Note on timing source: the per-operator **durations** in `profile.json` come from the **nsys capture** phase (GPU kernel times), not from ncu. By default `run_workload.py` probes the clock the GPU *sustains* under load and locks to it during capture, caching the result per GPU so the baseline and optimized captures lock to an **identical** frequency — durations are reproducible and the comparison is fair. If the run shows a clock-lock warning (lock not applied), state that durations were captured at dynamic boost clocks and treat small differences with more caution. The ncu replay phase contributes only the hardware **counters** (tensor-core %, SM/DRAM throughput, occupancy), which it collects at its own base-clock lock.
 
 ### 2. Operator Summary
 
@@ -78,6 +80,8 @@ If either `capture_timestamp_utc` is missing or unparseable, fall back to the `d
 
 Match operators across profiles by `operator_name` (NOT `operator_id` — it changes between captures). When N baseline entries collapse to 1 optimized entry due to fusion, sum the baseline durations and compare the sum to the single optimized entry. Report a single row labeled e.g. `aten::linear (fused ×3)` with combined baseline, optimized, and speedup.
 
+**Optimization-introduced kernels.** The optimized-side total MUST include kernels the optimization newly introduced (dtype casts, transposes, layout copies). These may land in `unattributed_kernels`. Give each its own row with the Speedup column reading "new overhead". Omitting them inflates the total and hides the optimization's own cost — the single most common way a report overstates impact (e.g. a bf16 promotion whose fp32 output recast is as expensive as the GEMM it accelerated).
+
 **Step B — Speedup attribution**
 
 Read `validation_report.json → passes[].status`. A speedup is attributed to a transformation only when all three hold:
@@ -112,9 +116,11 @@ These make reports inaccurate and misleading:
 - **Do NOT** credit a transformation that has `status != APPLIED` in `validation_report.json` — even if the operator shows speedup (Inductor may have optimized it independently)
 - **Do NOT** omit the batch size in the results table — "1.95x speedup" is meaningless without it
 - **Do NOT** claim `tensor_core_active_pct = null` is a bottleneck — it's expected for non-GEMM kernels and on Blackwell
-- **Do NOT** state absolute latency values as wall-clock times — ncu replay values are 2–5× longer than real execution; always add the caveat
+- **Do NOT** misattribute the timing source — durations are **nsys-derived** GPU kernel times (close to real execution), captured at locked clocks; they are NOT "ncu replay values 2–5× longer than real execution". Present them as relative comparisons (baseline vs optimized), and if the capture warned that the clock lock was not applied, note the durations were taken at dynamic boost clocks
 - **Do NOT** describe future work without clearly labeling it as "not yet implemented" in the optimization table
 - **Do NOT** report a small speedup as a definitive win while the cross-session caveat is active — it may be clock variation, not the optimization
+- **Do NOT** headline a single kernel's or single operator's speedup — the headline is the end-to-end Total from Section 6. A per-operator win (e.g. a GEMM that moved onto Tensor Cores) is the mechanism (Section 7), not the result.
+- **Do NOT** exclude optimization-introduced overhead (dtype casts, transposes, layout copies) from the optimized Total — that inflates the speedup and hides the optimization's own cost.
 
 ## Post-Generation
 

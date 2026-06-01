@@ -1,8 +1,6 @@
-# LSTM Sequence Encoder — GPU Optimization Report
+# Optimization Report — `lstm_sequence_encoder`
 
-**This optimization achieved a 2.0× speedup on the dominant recurrent gate GEMM of LSTMSequenceEncoder (B=32, NVIDIA RTX PRO 6000 Blackwell) by promoting the FP32 SIMT matmuls onto the idle tensor cores.**
-
-The single highest-leverage transformation — bf16 dtype promotion of the per-timestep gate GEMMs — moved the dominant operator off the FP32 SIMT path (tensor cores 0% utilized) and onto the Blackwell HMMA tensor-core path, while eliminating the paired split-K reduction kernels. The two stacked LSTM layers' recurrent gate matmuls sped up **2.02×**; the batched input-projection GEMMs sped up **4.03×**.
+**This optimization achieved a 1.78× total speedup on the LSTMSequenceEncoder (B=32, NVIDIA RTX PRO 6000 Blackwell Server Edition)** by promoting the unrolled LSTM gate GEMMs from the FP32 SIMT path to the bf16 Tensor-Core path.
 
 ---
 
@@ -10,34 +8,33 @@ The single highest-leverage transformation — bf16 dtype promotion of the per-t
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| Architecture family | Blackwell |
-| PyTorch | 2.11.0+cu128 |
-| CUDA | 12.8 |
-| Compile mode | inductor (cuDNN RNN unrolled into per-timestep Aten ops) |
-| Model | LSTMSequenceEncoder (2-layer LSTM, hidden=512, input=256) → mean-pool → Linear(512→10) |
-| Batch size | 32 |
-| Sequence length | 128 |
-| Iterations | warmup=2, measure=2 *(ncu replay — relative timing only)* |
+| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs, inferred) |
+| Architecture family | Blackwell (Sm100 / GB202) |
+| PyTorch version | 2.11.0+cu128 |
+| Compile mode (baseline) | `inductor` (built-in dedup backend) |
+| Compile mode (optimized) | `lstm_sequence_encoder_opt` (custom `@register_backend`) |
+| Model | 2-layer `nn.LSTM` (in=256, hidden=512) → mean-pool over time → `nn.Linear(512, 10)` |
+| Batch size | 32 (seq_len=128) |
+| Iteration count | warmup=2 / measure=2 *(ncu replay — relative timing only)* |
 
-> **Caveat on all durations in this report.** Values are ncu application-replay timings, which run 2–5× longer than real wall-clock execution and are inflated by counter collection. Treat every `ns` value as a *relative within-/across-profile comparison*, never as an absolute latency.
+> **Timing caveat.** All durations below are **nsys-derived** GPU kernel times (from the capture phase), not ncu replay values — they are close to real execution time, but should be read as **relative** comparisons (baseline vs optimized, operator vs operator) rather than absolute latencies. This capture ran at **dynamic boost clocks** (it predates GPU clock locking), so the exact `1.78×` is subject to a few percent of clock variation between the two captures; the structural evidence (tensor-core engagement, kernel re-routing) is clock-independent and robust. Baseline and optimized profiles were captured on the same GPU ~1 h apart in the same session — no cross-session caveat applies. (Re-capturing with clock locking would tighten the figure.)
 
 ---
 
 ## 2. Operator Summary (baseline)
 
-Because `torch.compile` **unrolls** the cuDNN RNN, the same logical recurrent gate GEMM appears as ~256 per-timestep records (128 steps × 2 layers). Operators are grouped by kernel/shape family — the meaningful unit here. Bottleneck class is derived from tensor-core activity, SM throughput, and occupancy (Blackwell exposes `tensor_core_active_pct`).
+Times are percentages of the **5800.8 µs** of attributed aten-operator GPU time. The `layer::unique::prologue` NVTX envelope (8729.7 µs / 2325 kernels) is the single-partition wrapper that *nests* these operators — it is reported separately to avoid double-counting and excluded from the denominator.
 
-| Operator (shape family) | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
-|---|---|---|---|---|
-| `layer::unique::prologue` (NVTX catch-all + warmup) | 42.8% | 5,861,731 | 1567 | Mixed / warmup-inflated |
-| `aten::mm [32,512]×[512,2048]` recurrent gate GEMM | 31.3% | 4,279,596 | 1024 | Compute-bound, **tensor-core idle (0%)** |
-| `aten::mm` (generic NVTX catch-all) | 20.8% | 2,842,364 | 755 | **tensor-core idle (0%)** |
-| `aten::mm [4096,512]×[512,2048]` input projection | 3.1% | 425,508 | 2 | **tensor-core idle (0%)** |
-| `aten::mm [4096,256]×[256,2048]` input projection | 1.8% | 247,714 | 2 | **tensor-core idle (0%)** |
-| `aten::addmm [32,512]×[512,10]` classifier | 0.1% | 12,800 | 4 | Small GEMM, tensor-core idle |
+| Operator | Time (%) | Duration (µs) | Kernels | Bottleneck Class |
+|---|---:|---:|---:|---|
+| `aten::mm` (gate projections) | 85.9% | 4981.8 | 1028 | Compute-bound, FP32 SIMT — Tensor Cores idle (tc=0%), under-occupied (occ≈8%) |
+| `aten::_unsafe_view` | 7.0% | 405.1 | 254 | Memory / layout bookkeeping |
+| `aten::addmm` | 6.8% | 395.6 | 258 | Compute-bound, FP32 SIMT (tc=0%) |
+| `aten::transpose` | 0.2% | 10.4 | 4 | Memory / layout |
+| `aten::zeros` | 0.1% | 7.9 | 6 | Init |
+| *(envelope)* `layer::unique::prologue` | — | 8729.7 | 2325 | NVTX wrapper (nests all of the above) |
 
-**Core finding:** `tensor_core_active_pct == 0.0` across *every* GEMM. The inductor decomposition replaced the single fused cuDNN `elemWiseRNNcell` with a serial chain of tiny FP32 SIMT GEMMs (`Kernel2`) plus `splitKreduce` reductions. With M=32 (batch), the gate GEMM has almost no row-dimension parallelism, so cuBLAS routes it to the small-tile SIMT kernel and the Blackwell tensor cores sit completely idle (SM throughput ~15%, achieved occupancy ~12%).
+The workload is overwhelmingly **GEMM-bound**: the 1028 `aten::mm` kernels are the per-timestep recurrent gate projections (`[[32,512]×[512,2048]]`, M=32) across 2 layers × ~128 timesteps × {input-to-hidden, hidden-to-hidden}. Every one ran on the `cutlass_80_simt_sgemm_*` scalar FP32 pipeline with Tensor Cores completely idle.
 
 ---
 
@@ -45,11 +42,10 @@ Because `torch.compile` **unrolls** the cuDNN RNN, the same logical recurrent ga
 
 Only the metrics that drive this workload's bottleneck are explained.
 
-- **`tensor_core_active_pct = 0.0` (not null)** — the highest-ROI signal in this profile. A GEMM running at 0.0% executed entirely on the FP32 SIMT path with tensor cores idle. On a tensor-core-rich Blackwell part this is pure left-on-the-table throughput. (A *null* value is expected for non-GEMM kernels and is not a problem.)
-- **`sm_throughput_pct` ~15%** on the gate GEMM — the SMs are starved. A 32-row GEMM cannot fill 188 SMs; combined with 0% tensor-core use, this confirms the small-M SIMT path, not a memory wall.
-- **`achieved_occupancy` ~12%** — corroborates the under-utilization; the kernel is latency/launch-bound on the serial timestep dependency (h_t → h_{t+1}), not occupancy-limited by registers.
-- **`warp_cycles_per_instruction = null`** everywhere — this counter was removed on Blackwell; expected, not a defect. Latency diagnosis uses `eligible_cycles_pct` (~22%) + occupancy instead.
-- **Kernel count as evidence** — the gate-GEMM family carries 2 kernels per timestep-op: the `Kernel2` SIMT GEMM **and** its paired `splitKreduce_kernel`. Halving this count (see §6) is direct evidence the bf16 path dropped the split-K reduction.
+- **`tensor_core_active_pct = 0.0` (not null)** — the highest-ROI signal here. A GEMM reporting `0.0` ran on the FP32 SIMT scalar path with the Tensor Core MMA pipeline entirely unused. Every gate GEMM in the baseline reports exactly this. (A *null* value, by contrast, is expected for non-GEMM kernels like `view`/`transpose` and is never a problem.)
+- **`sm_throughput_pct`** — fraction of peak SM issue throughput. Baseline gate GEMMs sit at ~16.6%; anything below ~40% on a compute-bound GEMM signals an idle math pipeline or a tile too small to fill the machine.
+- **`achieved_occupancy`** — baseline ~8.3%. With M=32 the GEMM launches a grid of only ~128 CTAs (<1 wave on ~188 SMs), so most of the GPU sits idle regardless of clock.
+- **`memory_throughput_pct`** — baseline gate GEMMs ≈26% DRAM. Below the ~60% memory-bound threshold, confirming the bottleneck is **compute/scheduling**, not bandwidth.
 
 ---
 
@@ -57,79 +53,158 @@ Only the metrics that drive this workload's bottleneck are explained.
 
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
 |---|---|---|---|---|---|
-| OPT-1 | dtype promotion (fp32→bf16) | recurrent gate GEMM `aten.addmm` (258) + input-proj `aten.mm` (1) | `tensor_core_active_pct=0.0`, `sm_throughput=14.6%`, paired `splitKreduce` (60.2% of attributed time) | medium | **APPLIED** |
-| OPT-2 | memory layout (weight pre-transpose / bias fold) | recurrent gate weight `[512,2048]` | `l2_hit_rate=57.5%`, `dram_throughput=26.4%` | low | **NOT_APPLIED** (stub) |
-| OPT-3 | fusion (view/cat noop elimination) | `triton_poi_fused__unsafe_view` / `add_addmm_cat` (512) | `sm_throughput=0.36%`, grid=64 blocks, launch-bound | medium | **NOT_APPLIED** (no-op) |
-
-Statuses are read from `profiler_output/validation_report.json`. Only **OPT-1 transforms the graph**; OPT-2 and OPT-3 degraded gracefully (one INFO stub, one guarded WARNING no-op) with no exceptions — see §5/§8 for why.
+| OPT-1 | dtype_promotion (aten) | `aten.mm` / `aten.addmm` gate GEMMs | `tensor_core_active_pct=0.0`, `smsp__pipe_tensor_cycles_active=0`, SIMT `cutlass_80_simt_sgemm` kernel name, occ≈8% | high | **APPLIED** |
+| OPT-2 | hoist input projection (functional) | per-timestep `F.linear` | Input-to-hidden projection already batched by Inductor (`[4096,256]`/`[4096,512]` GEMMs) | high | **NOT_APPLIED** (no-op) |
+| OPT-3 | cuDNN fused-RNN restore (functional) | `nn.LSTM` recurrence | Eager path uses cuDNN `elemWiseRNNcell` + `cutlass_80_tensorop_*` | medium | **NOT_APPLIED** (mutually exclusive) |
+| OPT-4 | freezing + max_autotune (inductor_config) | all GEMMs | Per-GEMM `cublasLt::splitKreduce` epilogue + runtime `_tn_` transpose | medium | **APPLIED** |
 
 ---
 
 ## 5. Implementation Notes
 
-# Implementation Notes — LSTMSequenceEncoder optimized backend
+# Implementation Notes — lstm_sequence_encoder_opt
 
-Backend registration name: `lstm_sequence_encoder_opt`
-Target: NVIDIA RTX PRO 6000 Blackwell Server Edition · compile_mode `inductor` · dtype fp32
-torch 2.11.0+cu128. `torch._dynamo.config.allow_rnn = True` is set at module import (required to trace `nn.LSTM`).
+Backend registered name: **`lstm_sequence_encoder_opt`** (via `@register_backend`).
+Workload: `LSTMSequenceEncoder` (2-layer `nn.LSTM`, hidden=512, in=256, seq=128, batch=32)
++ mean-pool + `nn.Linear(512, 10)`. `compile_mode = inductor`, baseline `dtype = float32`.
+Strategist track: low-risk in-place — **OPT-2 → OPT-1 → OPT-4** (OPT-3 mutually exclusive,
+not applied).
 
 ## Backend Architecture
 
-| Pass | Method | Reason |
-|---|---|---|
-| OPT-1 — BF16 dtype promotion on recurrent gate GEMMs | `_aten_fw_compiler` (`_aten_inner_compile`) | Casts FP32 operands of all 258 `aten.addmm.default` gate GEMMs + the 1 `aten.mm.default` input projection to bf16 (FP32 accumulate), casts result back to fp32. Flips cuBLAS off the FP32 SIMT "Kernel2" onto the Blackwell HMMA tensor-core path and typically drops the paired `splitKreduce_kernel`. The single highest-leverage change. |
-| OPT-2 — recurrent weight pre-transpose / bias fold | stub — not applied | Bias is already folded into `aten.addmm.default` by the decomposition (no `mm -> add` chain to re-fuse); the `register_buffer` weight hoist conflicts with the OPT-1 bf16 cast on the same operand (register_buffer fixes dtype at registration). optimizations.json rates this LOW. Detection-only: reports the 258 addmm nodes. |
-| OPT-3 — view/cat layout-noop elimination | stub — not applied (guarded) | The actual graph has ZERO `aten._unsafe_view` and ZERO identity-shape `aten.view` nodes; all 516 views genuinely reshape between the `[32,2048]` gate tensor and four `[32,512]` slices (256 `aten.split.Tensor`). No safe layout-noop exists to erase; Inductor already fuses the gate activations (`triton_poi_fused_add_addmm_cat`). The pass keeps a real, guarded transform (`_is_identity_view`) but degrades to a no-op here. |
+| Pass | Level | Method | Reason |
+|---|---|---|---|
+| OPT-2 input-projection hoist (F.linear triplet) | functional | `_run_functional_passes` (detect/report) | Hoisting the input-to-hidden projection keys on per-timestep `F.linear` nodes sharing one weight — only expressible at the functional level. On `nn.LSTM` it is a single opaque node, and the hoist is **already realized by Inductor's `nn.LSTM` decomposition** (profile shows batched `[4096,256]`/`[4096,512]` input GEMMs), so the pass detects/reports and no-ops. |
+| OPT-3 cuDNN fused-RNN restore | functional | stub — not applied | Route A (keep `nn.LSTM` on the eager cuDNN fused path) changes the recurrent execution backend rather than transforming kernels in place; it is **mutually exclusive** with OPT-1/OPT-2 over the recurrent matmuls. Detection-only stub: logs the available cuDNN path, never transforms the graph. |
+| OPT-1 bf16 / Tensor-Core promotion of gate GEMMs | aten | `_aten_inner_compile` | After AOTAutograd decomposes `nn.LSTM` into per-timestep `aten.mm` + classifier `aten.addmm`, the dtype cast is cleanly expressed on the decomposed primitives. Casts both matmul operands to bf16 and the result back to fp32; engages the Blackwell bf16 Tensor-Core MMA pipeline (the FP32 SIMT path runs at 0% tensor-core utilization). The real win. |
+| OPT-4 freezing + max_autotune | inductor_config | `config_patches` on `compile_fx` | Constant-weight freezing (fold `_tn_` transpose, drop per-call weight guards, pre-pack the bf16 tensorop layout) and autotuning a non-split-K GEMM tile are owned by Inductor — expressed as a scoped `config_patches` dict, no graph surgery. |
+| (non-graph) eval() | non-graph | `get_model_and_input()` | `.eval()` is required for freezing (incompatible with training) and for the inference-only bf16 promotion. No dtype/memory_format whole-module change is needed. |
+
+All four passes execute through the fixed three-stage funnel `_compile_unit`:
+`_run_functional_passes(gm)` → `compile_fx(inner_compile=_aten_inner_compile, config_patches=...)`.
+`compile_fx` owns AOTAutograd / decomposition / the boxed calling convention exactly once;
+the funnel does **not** use `aot_autograd(fw_compiler=compile_fx)` (raises `AssertionError`
+in `copy_misaligned_inputs` on torch 2.11).
 
 ## Key Design Decisions
 
-**optimizations.json named the wrong op for the bottleneck.** It described the recurrent gate GEMM as `aten::mm [[32,512]x[512,2048]]` and wrote all three passes against `torch.ops.aten.mm.default`. Tracing the actual post-AOTAutograd Aten IR shows the gate GEMM is realized as `aten.addmm.default(bias[2048], h[32,512], W[512,2048])` (258 nodes) with the bias pre-folded, and there is exactly **one** `aten.mm.default` (the `[4096,256]x[256,2048]` input projection). OPT-1 was therefore broadened to cover both `aten.mm` and `aten.addmm`; targeting only `mm` would have promoted 1 of 259 GEMMs and missed the entire ~60%-of-time recurrent bottleneck. Verified end-to-end: 259 GEMMs promoted, no NaN/Inf, max abs logit drift 2.3e-4 vs eager FP32 across the 128-step recurrence.
+**OPT-2 is a detect/report no-op, not a graph rewrite.** The profile is decisive: Inductor's
+own lowering of `nn.LSTM` already batches the input-to-hidden projection into single
+`[seq*batch, in] × [in, 4h]` GEMMs (`[[4096,256],[256,2048]]` for layer 0 and
+`[[4096,512],[512,2048]]` for layer 1). The per-timestep `[[32,512],[512,2048]]` GEMMs that
+remain (512 of them) are the genuinely recurrent hidden-to-hidden term `W_hh @ h_{t-1}`,
+which is data-dependent and cannot be hoisted. A generic functional `F.linear`-triplet
+matcher therefore finds nothing to hoist on `nn.LSTM` (it is one opaque node), and forcing a
+structural rewrite would be both unsafe (recovering per-timestep slice topology generically)
+and redundant. The pass logs the situation and leaves the graph correctness-preserving;
+the canonical manual fix (a `FastLSTM` precompute rewrite) is documented in the source for
+the hand-written-cell case.
 
-**OPT-1 uses `prims.convert_element_type` rather than the `aten._to_copy` named in the fx_steps.** On torch 2.11 `aten._to_copy.default` carries both a fallback and a decomp registration; inserting it post-AOTAutograd makes Inductor raise "both a fallback and a decomp for same op". `convert_element_type` is the cast primitive Inductor itself emits, lowers cleanly to a fused Triton cast, and folds into neighbouring elementwise kernels.
+**OPT-1 is the load-bearing pass and is a pure op-target dtype cast.** It reads no weight
+values, so it needs no `ph_to_tensor` lookup; it matches every `aten.mm.default` /
+`aten.addmm.default` post-decomposition. For `mm` it casts operands 0,1; for `addmm` it casts
+the two matmul operands 1,2 (the bias arg 0 stays fp32, and the output is cast back to fp32
+so the bias add and downstream sigmoid/tanh/mul cell-state ops stay well-typed). The result
+cast back to fp32 preserves the recurrent-state dtype contract. Inductor CSE folds the
+repeated constant weight casts (`W_ih`/`W_hh` are constant across all timesteps), so the
+per-timestep cost is a single activation cast, dwarfed by the Tensor-Core GEMM speedup.
+`_repropagate_meta` re-runs FakeTensorProp after the structural rewrite so the inserted
+`aten._to_copy` casts carry `meta['val']` before `compile_fx_inner` lowers Aten → Triton.
 
-**OPT-2 downgraded to a stub for two independent reasons.** (1) The bias-fold half is already done by the decomposition (`addmm`, not `mm + add`). (2) The weight-hoist half requires `register_buffer`, which fixes the buffer dtype at registration time and directly conflicts with the OPT-1 bf16 cast applied to that same weight operand — exactly the register_buffer-after-dtype ordering hazard the optimizations.json OPT-2 notes flag. bf16 from OPT-1 already halves the weight read traffic that OPT-2 targeted, so the residual win does not justify the fragile 258-node buffer rewrite (rated LOW confidence in the proposal).
+**OPT-3 / OPT-1+OPT-2 mutual exclusion is honored by not transforming.** OPT-3 Route A and
+the in-place GEMM transforms target the same recurrent matmuls by different mechanisms;
+summing their estimated impacts would be incorrect. The strategist chose the in-place track,
+so OPT-3 is wired in as a detection-only stub that never mutates the graph — guaranteeing the
+two routes are never applied to the same nodes.
 
-**OPT-3 downgraded to a guarded no-op because the premise does not hold for this graph.** The proposal assumed `aten._unsafe_view` layout-noops between gate slices; the real decomposition emits genuine `aten.view` reshapes (input shape != output shape on all 516) paired with `aten.split.Tensor`. Erasing a genuine reshape corrupts downstream shapes, so the pass only erases views where `output_shape == input_shape` (`_is_identity_view`) and reports that none qualify. Inductor already performs the activation fusion the proposal sought.
+**Cross-level ordering needs no within-level prerequisites.** OPT-1's `prerequisite_for:
+["OPT-4"]` is satisfied automatically by the funnel order (functional → aten →
+inductor_config): the bf16 weights from the aten pass are in place before OPT-4's freezing
+emits the pre-packed tensorop layout at the config level. No explicit sequencing is required.
 
-**Flat compile path, not dedup.** `UniqueSubgraphRegistry` reports 1 partition / 1 signature: the LSTM unroll collapses into a single flat Aten graph with no repeated block structure, so `build_partition_equivalence_map()` is empty and the backend takes the flat `compile_fx(..., inner_compile=...)` path, preserving cross-timestep Inductor fusion. The dedup branch is retained for parity/robustness but is not exercised.
+**Flat compile path.** `UniqueSubgraphRegistry` finds no repeated structurally-identical
+partitions (the model is a single `nn.LSTM` + classifier), so `equiv_map` is empty and the
+backend takes the flat `_compile_unit(gm, example_inputs)` path, preserving cross-op Inductor
+fusion. The per-rep dedup branch is retained for models with repeated identical blocks.
 
-**Out-of-scope structural fix (noted, not implemented).** The fundamental inefficiency is that torch.compile decomposes the cuDNN fused RNN into hundreds of tiny tensor-core-idle GEMMs — the eager cuDNN `elemWiseRNNcell` path is faster. The highest-value action beyond FX-pass scope is to keep the LSTM in its fused cuDNN form (do not compile the `nn.LSTM`; compile only the mean-pool + classifier head). The three passes here are the best available improvements *within* the already-decomposed graph.
+## Validation Findings (bugs caught and fixed during bring-up)
 
-## Validation
+1. **`allow_rnn` is mandatory for the backend to ever run.** With a plain
+   `torch.compile(model, backend=...)`, Dynamo produces `graph_count == 0` for this model —
+   it silently graph-breaks around the entire `nn.LSTM` and runs it eagerly, so the custom
+   backend is **never invoked**. `torch._dynamo.config.allow_rnn = True` (which
+   `run_workload.py` sets before compiling) is required for Dynamo to trace through the RNN
+   and hand the backend the FX graph. The forward-pass test sets the same flag so it mirrors
+   the real capture path; without it the backend appears to "work" but applies nothing.
 
-`py_compile` clean on both generated files. All 4 tests pass (`test_import`, `test_backend_registration`, `test_get_model_and_input`, `test_compiled_forward_pass`) with `TORCHINDUCTOR_FX_GRAPH_CACHE=0`. The compiled forward emits the expected `(32, 10)` logits, no NaN/Inf, and the captured INFO logs confirm OPT-1 applied to 259 GEMMs with OPT-2/OPT-3 reporting their no-op rationale.
+2. **OPT-1 must use `prims.convert_element_type`, not `aten._to_copy`.** Under OPT-4's
+   `freezing` + `max_autotune`, Inductor registers `aten._to_copy.default` as **both** a
+   decomposition and a fallback, raising `InductorError: both a fallback and a decomp for
+   same op: aten._to_copy.default`. Switching the dtype cast to
+   `torch.ops.prims.convert_element_type.default` (the canonical primitive AOTAutograd emits)
+   lowers cleanly and is CSE-folded.
+
+3. **`addmm` requires the bias cast to match the matmul operands.** Casting only `mat1`/`mat2`
+   of the classifier `aten.addmm` to bf16 while leaving the fp32 bias raised
+   `RuntimeError: self and mat2 must have the same dtype, but got Float and BFloat16` inside
+   Inductor's `bias_addmm` lowering. OPT-1 therefore casts all three `addmm` operands
+   (`args 0,1,2`) to bf16; the fp32 result cast restores precision.
+
+**Numerical check:** compiled output vs eager fp32 max-abs-diff = `1.9e-4` (expected bf16
+GEMM tolerance), shape `[32, 10]`, no NaN/Inf. The autotuner selects bf16 `triton_mm` /
+`bias_addmm` kernels (`dtypes: bfloat16, bfloat16, bfloat16`) and freezing fixes the weight
+layout — confirming OPT-1 + OPT-4 engage the intended Tensor-Core path.
 
 ---
 
 ## 6. Before/After Results
 
-Both captures used identical iteration counts (warmup=2, measure=2) and batch size (B=32). **Operator matching caveat:** the baseline used the built-in dedup backend, which groups many kernels under a `layer::unique::prologue` NVTX range (and captures the eager warmup cuDNN path there); the optimized capture used the custom `lstm_sequence_encoder_opt` backend, which attributes per-op. Raw `operator_name` therefore does not match across captures, so operators are compared by **shape family** (op + tensor sizes), which is stable across both.
+Operators matched by name across captures. OPT-1's bf16 promotion re-routes most gate
+projections from the bias-less `aten::mm` form into Inductor's `bias_addmm` (`aten::addmm`)
+lowering, so the two GEMM families are reported **combined** to avoid a misleading per-name
+view. Both captures share batch size 32 on the same GPU.
 
-### Matched operators (by shape family)
+| Operator | Baseline (µs) | Optimized (µs) | Speedup |
+|---|---:|---:|---:|
+| Gate GEMMs — `aten::mm` + `aten::addmm` (combined) | 5377.4 | 2310.6 | **2.33×** |
+| `aten::_unsafe_view` | 405.1 | 317.8 | 1.27× |
+| `aten::transpose` | 10.4 | 8.2 | 1.27× |
+| `aten::zeros` | 7.9 | 6.4 | 1.24× |
+| `aten::t` (layout, new/grown) | 0.0 | 344.2 | — |
+| `aten::view` (layout, new/grown) | 0.0 | 265.3 | — |
+| **Total (attributed aten GPU time)** | **5800.8** | **3252.4** | **1.78×** |
 
-| Operator (shape family) | Baseline (ns) | Optimized (ns) | Speedup | Tensor-core % (before → after) |
-|---|---|---|---|---|
-| Recurrent gate GEMM `[32,512]×[512,2048]` (×256 timestep-ops) | 4,279,596 | 2,116,648 | **2.02×** | 0.0 → 10.9 |
-| Input-projection GEMM `[4096,*]×[*,2048]` | 673,222 | 167,232 | **4.03×** | 0.0 → 47.6 |
-| Classifier `addmm [32,512]×[512,10]` | 12,800 | 7,520 | 1.70× | 0.0 → 9.5 |
-| Weight transpose `aten::t` (new — bf16-path overhead) | — | 336,963 | — | n/a |
-| **Matched GEMM subtotal** | **4,965,618** | **2,291,400** | **2.17×** | — |
+**Speedup attribution (Step B):**
 
-**Kernel-count evidence for OPT-1:** the recurrent gate-GEMM family dropped from **1024 → 512 kernels** — exactly half. The bf16 tensor-core path no longer needs the paired `splitKreduce_kernel`, so one of the two kernels per timestep-op disappeared, precisely as OPT-1 predicted.
-
-### Raw total-profile ratio (reported, not headlined)
-
-Total profiled ncu duration: **13,681,233 ns → 2,634,571 ns (5.19×)**. This figure is **not** a reliable wall-clock proxy: the baseline total includes the dedup backend's `layer::unique::prologue` group (1567 kernels, 42.8%), which folds in the eager-cuDNN warmup path that the custom-backend capture attributes differently. The matched shape-family speedups above (2.0–4.0×) are the defensible numbers.
-
-### Speedup attribution
-
-The gate-GEMM and input-projection speedups are attributed to **OPT-1** — all three attribution criteria hold: (1) `status == APPLIED`; (2) `tensor_core_active_pct` moved 0.0 → 10.9% / 47.6% in the expected direction; (3) the containing operators show the measured speedup. OPT-2 and OPT-3 are `NOT_APPLIED` and contributed nothing.
+- **OPT-1 (bf16 Tensor-Core promotion)** — *attributed.* Status `APPLIED`; the gate-GEMM
+  cohort's `tensor_core_active_pct` moved in the expected direction (baseline `0.0` →
+  optimized 11.2% on `addmm`, 23.8% on the batched `mm`), `sm_throughput_pct` rose from
+  ~16.6% → ~64% on the batched GEMM, and the combined GEMM time fell 2.33×. This is the
+  dominant contributor to the 1.78× total.
+- **OPT-4 (freezing + max_autotune)** — *contributing, not separately isolable.* Status
+  `APPLIED`; it is the enabler for OPT-1's pre-packed bf16 tensorop layout and removes the
+  per-GEMM `splitKreduce` epilogue. Its effect is entangled with OPT-1 and not reported as a
+  standalone row.
+- **OPT-2 / OPT-3** — *no credit.* Both `NOT_APPLIED`. Any residual change in non-GEMM
+  bookkeeping ops is Inductor's own doing, not these passes.
 
 ---
 
 ## 7. What Drove Each Speedup
 
-**BF16 dtype promotion on recurrent gate GEMMs (OPT-1, +2.02× on the recurrent gate GEMM family):** casting the `aten.addmm`/`aten.mm` gate-projection operands to bf16 (with fp32 accumulate) routes cuBLAS off the small-tile FP32 SIMT `Kernel2` onto the Blackwell HMMA tensor-core path. The evidence is twofold: `tensor_core_active_pct` rose from 0.0 to 10.9% on the recurrent family (and to 47.6% / 74% on the larger-M projection GEMMs), and the per-family kernel count halved from 1024 to 512 as the paired `splitKreduce_kernel` reduction was eliminated.
+**bf16 / Tensor-Core promotion of gate GEMMs (OPT-1, +2.33× on the combined gate-GEMM cohort):**
+Casting both operands of every decomposed `aten.mm`/`aten.addmm` to bf16 (result cast back to
+fp32) moves the per-timestep gate projections off the scalar FP32 SIMT pipeline and onto the
+Blackwell bf16 Tensor-Core MMA pipeline. The evidence is unambiguous: `tensor_core_active_pct`
+went from exactly `0.0` (Tensor Cores fully idle, `cutlass_80_simt_sgemm` kernel) to 11–24%
+(bf16 `triton_mm`/`bias_addmm` kernels), and `sm_throughput_pct` on the batched input GEMM
+jumped from ~16.6% to ~64%.
+
+**freezing + max_autotune (OPT-4, enabler):** Constant-weight freezing pre-packs the bf16
+tensorop weight layout and folds the runtime `_tn_` transpose, while autotuning selects a
+non-split-K GEMM tile. The visible signature is the disappearance of the per-GEMM
+`cublasLt::splitKreduce` epilogue kernels that decorated every baseline gate GEMM, and the
+autotuner log selecting frozen bf16 `triton_mm` kernels.
 
 ---
 
@@ -137,12 +212,24 @@ The gate-GEMM and input-projection speedups are attributed to **OPT-1** — all 
 
 | ID | Type | Target | Reason Not Applied | Projected Gain |
 |---|---|---|---|---|
-| OPT-2 | memory layout (weight pre-transpose / bias fold) | recurrent gate weight `[512,2048]` | Bias already folded into `addmm`; `register_buffer` weight hoist conflicts with OPT-1's bf16 cast on the same operand (dtype fixed at registration). bf16 already halves the weight read traffic OPT-2 targeted. | ~7% (low conf.) |
-| OPT-3 | fusion (view/cat noop elimination) | per-timestep `view`/`cat` reshapes | Graph has zero `aten._unsafe_view` and zero identity-shape views; all 516 views genuinely reshape. Inductor already fuses the gate activations. Nothing safe to erase. | ~11% (medium conf., already partly realized by Inductor) |
+| OPT-2 | hoist input projection (functional) | per-timestep `F.linear` | No shared-weight per-timestep `F.linear` pattern; `nn.LSTM` is a single opaque node and Inductor's decomposition already batches the input projection (no-op) | ~37.9% (already realized by Inductor) |
+| OPT-3 | cuDNN fused-RNN restore (functional) | `nn.LSTM` recurrence | Mutually exclusive with the applied OPT-1/OPT-2 in-place track over the recurrent matmuls; would replace, not stack | ~75.7% (alternative track, discounted ~0.5 for medium confidence → ~38%) |
 
-**Second-order bottleneck exposed:** after OPT-1, a new `aten::t` weight-transpose group accounts for **12.8%** of optimized time — overhead introduced/exposed by the bf16 operand handling. Additionally, the recurrent gate GEMM still reaches only ~11% tensor-core activity at M=32 (vs 74% for the M=4096 batched projections): the small batch dimension limits tensor-core tiling even on the HMMA path, exactly the medium-confidence risk OPT-1 flagged.
+**Second-order bottleneck exposed.** With the GEMMs accelerated, layout/bookkeeping ops now
+dominate the optimized profile: `aten::t` (344.2 µs), `aten::_unsafe_view` (317.8 µs), and
+`aten::view` (265.3 µs) together account for ~28% of the 3252.4 µs optimized total. These are
+memory-bound reshape/transpose kernels introduced by the bf16 cast boundaries and the recurrent
+slice topology; `tensor_core_active_pct` is correctly null for them. No proposed FX pass targets
+them directly.
 
-**Largest remaining win is structural, not an FX pass.** The root inefficiency is that `torch.compile` decomposes the fused cuDNN RNN (`elemWiseRNNcell`) into a serial chain of hundreds of tiny GEMMs in the first place. The highest-value action beyond FX-pass scope is to **keep the LSTM in its fused cuDNN form** — do not compile/decompose the `nn.LSTM`; compile only the mean-pool + classifier head. Within the already-decomposed graph, OPT-1 is the best available win, and OPT-2/OPT-3 offer marginal residual gains discounted heavily by confidence and by what Inductor already does.
+**Estimated additional gain.** OPT-2 offers no further gain (its win is already captured by
+Inductor). The single largest untapped opportunity is **OPT-3** — running `nn.LSTM` on the
+eager cuDNN fused path keeps gate activations and cell state resident across the elementwise
+update and would eliminate the ~511 recurrent kernel launches entirely. Because it is mutually
+exclusive with the applied bf16 track, realizing it requires a re-run on the alternative track
+rather than a stacked pass; the strategist estimates a ceiling near ~75% reduction at medium
+confidence (~38% discounted). Attacking the residual view/transpose overhead would need a new
+proposal not present in the current `optimizations.json`.
 
 ---
 
@@ -150,14 +237,17 @@ The gate-GEMM and input-projection speedups are attributed to **OPT-1** — all 
 
 ```bash
 # Baseline capture
-python3 nvidia/scripts/run_workload.py \
-    --workload examples/lstm_sequence_encoder/lstm_sequence_encoder.py \
-    --correlation-pass --output-prefix profiler_output/lstm_sequence_encoder ...
-# (full nsys+ncu pipeline driven by /optimize Stage 0)
+/capture examples/lstm_sequence_encoder/lstm_sequence_encoder.py
 
-# Optimized capture (custom backend)
-#   uses @register_backend name: lstm_sequence_encoder_opt
-/optimize examples/lstm_sequence_encoder/lstm_sequence_encoder.py --from=validate
+# Propose → backend → validate
+/propose examples/lstm_sequence_encoder/profile.json
+/backend examples/lstm_sequence_encoder/lstm_sequence_encoder.py examples/lstm_sequence_encoder/optimizations.json
+/validate examples/lstm_sequence_encoder/lstm_sequence_encoder_optimized.py
+
+# Optimized re-capture (custom backend)
+/capture examples/lstm_sequence_encoder/lstm_sequence_encoder_optimized.py \
+    --profile-name=optimized --compile-backend=lstm_sequence_encoder_opt
+
+# Report
+/report examples/lstm_sequence_encoder/
 ```
-
-**Environment note for RNN/GRU/LSTM workloads:** `run_workload.py` now sets `torch._dynamo.config.allow_rnn = True`. Without it, Dynamo refuses to trace `nn.LSTM`, graph-breaks around the entire RNN, and never invokes the profiling backend (manifests as `KeyError: 'run_fn'`). This fix applies to any recurrent workload.

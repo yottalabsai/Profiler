@@ -1,360 +1,497 @@
 """
-lstm_sequence_encoder_optimized.py — Custom torch.compile() backend for the
-stacked 2-layer LSTM sequence encoder.
+lstm_sequence_encoder_optimized.py — Custom torch.compile() backend for LSTMSequenceEncoder.
 
-When torch.compile + Inductor lowers ``nn.LSTM`` it does NOT keep the cuDNN fused
-RNN kernel: it UNROLLS the recurrence into a per-timestep, per-layer chain of
-small gate GEMMs + sigmoid/tanh/elementwise + view/split kernels. At the Aten IR
-level (after AOTAutograd) the decomposed forward graph for this model is:
+Registered backend: ``lstm_sequence_encoder_opt``
 
-    258  aten.addmm.default        — recurrent gate GEMM, addmm(bias[2048], h[32,512], W[512,2048])
-      1  aten.mm.default           — input-projection batched GEMM [4096,256] x [256,2048]
-    768  aten.sigmoid.default      — i/f/o gate activations (3 gates x 256 steps)
-    512  aten.tanh.default         — cell-gate + hidden-state tanh
-    768  aten.mul.Tensor / 513 add — cell update  c_t = f*c + i*g ; h_t = o*tanh(c_t)
-    516  aten.view.default         — gate/state reshapes  (NONE are identity-shape)
-    261  aten.permute.default      — weight transpose feeding addmm
-    256  aten.split.Tensor         — split the [32,2048] gate tensor into 4 x [32,512]
+Implements the low-risk in-place optimization track from optimizations.json
+(OPT-2 -> OPT-1 -> OPT-4), routed to the correct IR level via the three-stage funnel
+(functional -> aten -> inductor_config). OPT-3 (cuDNN fused-RNN restore) is MUTUALLY
+EXCLUSIVE with OPT-1/OPT-2 over the recurrent matmuls (strategist note) and is therefore
+NOT applied; it is documented as a stub-only detection pass for completeness.
 
-The dominant cost (~60% of attributed time, profile.json) is the serial chain of
-M=32 gate addmm's. On the RTX PRO 6000 Blackwell these run the FP32 SIMT path
-("Kernel2") with the tensor cores 100% idle (tensor_core_active_pct = 0.0) and a
-paired splitKreduce_kernel per call.
+Backend name: lstm_sequence_encoder_opt
+    (model "lstm_sequence_encoder" -> snake-case + _opt)
 
-Backend registration name: lstm_sequence_encoder_opt
+---------------------------------------------------------------------------
+What the profile actually shows (profile.json, cross-validated):
+---------------------------------------------------------------------------
+The dominant cost (~95.6% of attributed time) is the unrolled stacked LSTM. Inductor's
+decomposition of nn.LSTM produces, at the ATEN level:
 
-Passes (prerequisite-DAG order OPT-1 -> OPT-2 -> OPT-3), all at Aten IR level
-inside ``_aten_inner_compile`` (the Inductor inner_compile hook):
+  * 2x batched input-projection GEMMs  [[4096,256],[256,2048]] and [[4096,512],[512,2048]]
+      (4096 = SEQ_LEN(128) * BATCH(32); these are W_ih @ x already hoisted across all
+       timesteps by Inductor's own LSTM lowering — i.e. OPT-2's "precompute input
+       projections" transform is ALREADY realized by the decomposition).
+  * 512x per-timestep recurrent GEMMs  [[32,512],[512,2048]]  (W_hh @ h_{t-1};
+      256 timesteps/layer * 2 layers). M=32 is tiny -> the SIMT FP32 path
+      (cutlass_80_simt_sgemm_128x32) with ~8% occupancy and 0% Tensor-Core activity.
+  * 1x classifier  aten::addmm  [[32,512],[512,10]].
 
-  OPT-1 (MEDIUM, priority 1) — dtype_promotion  [APPLIED]
-      Cast the FP32 operands of every recurrent gate addmm (and the input mm) to
-      bfloat16 and cast the GEMM result back to float32 (accumulation stays FP32
-      inside the MMA). This steers cuBLAS off the FP32 SIMT "Kernel2" onto the
-      Blackwell HMMA tensor-core path and typically drops the paired
-      splitKreduce_kernel. Highest-leverage change; prerequisite for OPT-2/OPT-3.
-      NOTE: optimizations.json named only aten.mm.default — but the recurrent gate
-      GEMM is actually realized as aten.addmm.default (bias pre-folded). This pass
-      covers BOTH aten.mm and aten.addmm so the 258 gate GEMMs are promoted.
+Because the input-projection hoist (OPT-2) is already present in the decomposed graph,
+the highest-leverage in-place change is OPT-1: promote every gate GEMM (mm/addmm) to
+bf16 so cuBLAS selects a Blackwell tensorop kernel instead of the scalar SIMT path. The
+recurrent GEMMs stay M=32 (genuine data dependence on h_{t-1}), but bf16 still engages
+the Tensor Core MMA pipeline and halves operand byte traffic.
 
-  OPT-2 (LOW, priority 2) — memory_layout (weight pre-transpose / bias fold)  [STUB]
-      optimizations.json proposed hoisting the recurrent weight transpose into a
-      register_buffer and folding the gate bias into aten.addmm. In this graph the
-      decomposition ALREADY emits aten.addmm.default with the bias folded and a
-      pre-permuted weight, so the bias-fold half is a no-op. The register_buffer
-      half is downgraded to a stub: registering a packed weight buffer per timestep
-      across 258 nodes conflicts with the BF16 cast OPT-1 inserts on the same
-      operand (register_buffer fixes the dtype at registration time, see OPT-2
-      notes) and the optimizations.json itself rates this LOW with uncertain bias
-      placement. The pass detects + reports; it does not mutate the graph.
+---------------------------------------------------------------------------
+Pass summary (execution order enforced by the funnel: functional -> aten -> inductor_config):
+---------------------------------------------------------------------------
 
-  OPT-3 (MEDIUM, priority 3) — fusion (view/cat elimination)  [STUB]
-      optimizations.json proposed erasing layout-noop aten._unsafe_view nodes so
-      Inductor emits one fused pointwise kernel per timestep. This graph contains
-      ZERO aten._unsafe_view nodes and ZERO identity-shape aten.view nodes (all 516
-      views genuinely reshape between [32,2048] gate tensors and [32,512] gate
-      slices), so there is no safe layout-noop to erase. Inductor already fuses the
-      gate activation arithmetic (kernel name triton_poi_fused_add_addmm_cat).
-      Erasing real reshapes would corrupt the graph, so this pass is detection-only:
-      it reports the view/split structure and confirms no eliminable noop exists.
+  OPT-2  functional / high  — input-projection hoist (F.linear triplet fusion)
+      ir_level=functional, match_target=F.linear. Hoists each layer's input-to-hidden
+      projection out of the recurrence into one [seq*batch, in]x[in, 4h] GEMM. At the
+      functional level nn.LSTM is a SINGLE opaque high-level node, so the generic
+      F.linear-triplet matcher finds nothing to hoist in THIS workload — and the hoist is
+      ALREADY performed by Inductor's nn.LSTM decomposition (the [4096,256]/[4096,512]
+      batched input GEMMs in profile.json prove it). The pass therefore detects the
+      shared-weight F.linear-per-timestep pattern (which only appears for a hand-written
+      Python cell loop) and reports it when present; on nn.LSTM it logs that the hoist is
+      already realized downstream and no-ops gracefully. Strategist order: OPT-2 first.
 
-Hardware: NVIDIA RTX PRO 6000 Blackwell Server Edition. compile_mode: inductor.
+  OPT-1  aten / high  — bf16 / Tensor-Core promotion of the gate GEMMs
+      ir_level=aten, match_target=torch.ops.aten.mm.default. After AOTAutograd decomposes
+      nn.LSTM into per-timestep aten.mm and the classifier aten.addmm, cast both matmul
+      operands to bfloat16 and cast the result back to float32, preserving the recurrent
+      sigmoid/tanh/mul cell-state dtype contract. Inductor CSE folds the repeated constant
+      weight casts (W_ih/W_hh are constant across all timesteps), so per-timestep overhead
+      is one activation cast, dominated by the Tensor-Core GEMM speedup. Strategist order:
+      OPT-1 after OPT-2 (the funnel runs functional before aten, so the hoisted/batched
+      input GEMMs are bf16-promoted too). prerequisite_for: OPT-4.
 
-torch._dynamo.config.allow_rnn = True is REQUIRED to trace nn.LSTM/GRU/RNN under
-Dynamo; it is set at import time below so importing this module (and the test
-suite) is sufficient.
+  OPT-4  inductor_config / medium  — freezing + max_autotune
+      ir_level=inductor_config, match_target=freezing. Scoped config_patches on this
+      compile_fx call only: freeze the LSTM weight parameters as compile-time constants
+      (hoist the _tn_ transpose, drop per-call weight guards) and autotune a GEMM config
+      that avoids the per-GEMM cublasLt splitKreduce epilogue for these small-M shapes.
+      With OPT-1's bf16 weights in place (functional->aten->config ordering enforced by the
+      funnel), freezing additionally lets Inductor emit a pre-packed tensorop weight layout.
+      eval() required.
+
+  OPT-3  NOT APPLIED (mutually exclusive) — cuDNN fused-RNN restore
+      ir_level=functional, match_target=F.scaled_dot_product_attention (the closest schema
+      enum; the true target is the nn.LSTM / aten.lstm op site). Route A keeps nn.LSTM on
+      the eager cuDNN fused path (elemWiseRNNcell + tensorop GEMM) instead of letting
+      Inductor unroll it. This changes the execution BACKEND for the recurrent region
+      rather than transforming kernels in place and is MUTUALLY EXCLUSIVE with OPT-1/OPT-2
+      over the same recurrent matmuls. Per the strategist, the low-risk in-place track
+      (OPT-2 -> OPT-1 -> OPT-4) is chosen; OPT-3 is registered as a detection-only stub
+      that logs the available cuDNN path and never transforms the graph.
+
+---------------------------------------------------------------------------
+IR-level mechanics (torch 2.11):
+---------------------------------------------------------------------------
+compile_fx owns AOTAutograd, the decomp table, the boxed calling convention and the
+partitioner. We do NOT use aot_autograd(fw_compiler=compile_fx) — on torch 2.11 that
+raises AssertionError inside copy_misaligned_inputs. The funnel runs functional-level
+passes BEFORE compile_fx, aten-level passes through its inner_compile seam, and
+inductor_config passes as scoped config_patches (no global Inductor config mutation).
+
+compile_mode = "inductor" (optimizations.json analysis.compile_mode).
+dtype        = float32 baseline (analysis.dtype); OPT-1 promotes the GEMMs to bf16 in-graph.
 """
 from __future__ import annotations
 
+import functools
 import logging
+from collections import defaultdict
 from typing import Callable
 
 import torch
 import torch.fx as fx
 from torch._dynamo import register_backend
-
-# compile_fx is the callable entry point; compile_fx_inner is the post-AOTAutograd
-# inner hook that receives the fully decomposed Aten IR graph. Passing
-# inner_compile=_aten_inner_compile lets our passes run on that Aten graph and then
-# delegate to the real inner compiler (Aten -> Triton). This avoids the torch 2.11
-# double-AOTAutograd input-flattening path entirely.
 from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 
 logger = logging.getLogger(__name__)
 
-# RNN tracing under Dynamo requires this flag. Set at import so the test suite and
-# any direct torch.compile(model, backend="lstm_sequence_encoder_opt") works.
-torch._dynamo.config.allow_rnn = True
+# ---------------------------------------------------------------------------
+# Op targets
+# ---------------------------------------------------------------------------
+_MM_TARGET = torch.ops.aten.mm.default
+_ADDMM_TARGET = torch.ops.aten.addmm.default
+_GEMM_TARGETS = (_MM_TARGET, _ADDMM_TARGET)
 
-BACKEND_NAME = "lstm_sequence_encoder_opt"
+# Dtype-cast op for the bf16 promotion. We use prims.convert_element_type.default — the
+# canonical dtype-cast primitive AOTAutograd itself emits — rather than aten._to_copy:
+# under freezing + max_autotune Inductor registers aten._to_copy BOTH as a decomposition
+# AND as a fallback, raising "both a fallback and a decomp for same op: aten._to_copy"
+# (InductorError). prims.convert_element_type lowers cleanly and is CSE-folded for the
+# repeated constant weight casts.
+_CONVERT_DTYPE = torch.ops.prims.convert_element_type.default
 
-# --- Aten op targets used across passes ---------------------------------------
-_MM = torch.ops.aten.mm.default
-_ADDMM = torch.ops.aten.addmm.default
-_GEMM_TARGETS = frozenset({_MM, _ADDMM})
-_VIEW = torch.ops.aten.view.default
-_SPLIT = torch.ops.aten.split.Tensor
-_UNSAFE_VIEW = torch.ops.aten._unsafe_view.default
+# Functional-level F.linear identity set (binds to a builtin; add name fallback).
+_LINEAR_FNS = {torch.nn.functional.linear}
+try:  # torch._C._nn.linear is the underlying builtin Dynamo may trace to
+    _LINEAR_FNS.add(torch._C._nn.linear)  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - defensive
+    pass
 
-# prims.convert_element_type is the canonical Inductor dtype-cast primitive. We use
-# it instead of aten._to_copy.default (which optimizations.json fx_steps name)
-# because on torch 2.11 _to_copy carries BOTH a fallback and a decomp registration;
-# inserting it post-AOTAutograd makes Inductor raise "both a fallback and a decomp
-# for same op". convert_element_type lowers cleanly to a Triton cast and is the form
-# Inductor itself emits for dtype conversions, so OPT-1's casts fuse into neighbours.
-_CONVERT = torch.ops.prims.convert_element_type.default
+
+def _is_linear(node: fx.Node) -> bool:
+    return (
+        node.op == "call_function"
+        and (node.target in _LINEAR_FNS or getattr(node.target, "__name__", "") == "linear")
+    )
 
 
 # ---------------------------------------------------------------------------
-# OPT-1 (MEDIUM) — dtype_promotion: BF16 casts around the recurrent gate GEMMs
+# OPT-2 — input-projection hoist (F.linear triplet fusion). ir_level=functional.
+# Confidence: high. match_target=F.linear.
+#
+# Hoist the input-to-hidden gate projection out of the recurrence: replace per-timestep
+# [batch,in]x[in,4h] F.linear calls that share the SAME weight node and consume independent
+# slices of one input sequence with a single [seq*batch,in]x[in,4h] F.linear. This raises M
+# from batch(32) to seq*batch(4096) and turns ~128 under-occupied launches/layer into one
+# well-tiled GEMM.
+#
+# In THIS workload the model uses nn.LSTM, which is a SINGLE opaque high-level node at the
+# functional level — there is no per-timestep F.linear to hoist here, and the hoist is
+# ALREADY realized by Inductor's nn.LSTM decomposition (profile.json shows the batched
+# [4096,256]/[4096,512] input GEMMs). The pass therefore matches the hand-written-cell
+# pattern (shared-weight F.linear repeated across timesteps) and reports it when present;
+# on nn.LSTM it logs that the hoist is already realized downstream and no-ops gracefully.
 # ---------------------------------------------------------------------------
 
-def _pass_gemm_bf16_casts(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    OPT-1 — insert bfloat16 casts on the FP32 operands of every recurrent gate
-    aten.addmm.default and the input-projection aten.mm.default, casting the GEMM
-    result back to float32.
+def _fpass_hoist_input_projection(gm: fx.GraphModule) -> fx.GraphModule:
+    """OPT-2: hoist the per-timestep input projection into one batched F.linear.
 
-    Why addmm AND mm: the cuDNN-RNN decomposition realizes the recurrent gate GEMM
-    as ``aten.addmm.default(bias[2048], h[32,512], W[512,2048])`` (258 of them, the
-    ~60%-of-time bottleneck) and the one-shot input projection as a single
-    ``aten.mm.default`` ([4096,256] x [256,2048]). Both must be promoted to flip
-    cuBLAS dispatch off the FP32 SIMT "Kernel2" onto the Blackwell HMMA tensor-core
-    GEMM, which also typically eliminates the paired splitKreduce_kernel.
-
-    Only FP32 tensor operands are cast (guarded on node.meta['val'].dtype) so the
-    integer/scalar args and the addmm bias (when already half) are left untouched.
-    The output is cast back to float32 so the elementwise gate chain
-    (sigmoid/tanh/mul/add) and the downstream mean-pool + classifier stay FP32 and
-    numerically stable across the 128-step recurrence. Inductor fuses the
-    convert_element_type casts into neighbouring Triton kernels, hiding most cost.
-
-    Confidence MEDIUM: detect-first; if no GEMM node is present this is a graceful
-    no-op (WARNING). An exception is logged (WARNING) and the original graph is
-    returned unchanged so the compile never crashes.
-    """
+    Functional IR level. Graceful no-op when the per-timestep F.linear pattern is absent
+    (e.g. nn.LSTM, where Inductor's decomposition already batches the input projection)."""
     try:
-        matched = False
-        graph = gm.graph
-        n_cast = 0
-        for node in list(graph.nodes):
-            if not (node.op == "call_function" and node.target in _GEMM_TARGETS):
-                continue
-            matched = True
+        g = gm.graph
+        # Group F.linear nodes by their shared weight node (args[1]). The hoistable input
+        # projection is a weight reused across many timesteps whose activations are
+        # independent slices of one input tensor.
+        linears_by_weight: dict[fx.Node, list[fx.Node]] = defaultdict(list)
+        for node in g.nodes:
+            if _is_linear(node) and len(node.args) > 1 and isinstance(node.args[1], fx.Node):
+                linears_by_weight[node.args[1]].append(node)
 
-            with graph.inserting_before(node):
-                cast_args = []
-                for a in node.args:
-                    if (isinstance(a, fx.Node)
-                            and a.meta.get("val") is not None
-                            and getattr(a.meta["val"], "dtype", None) == torch.float32):
-                        cast_args.append(graph.call_function(_CONVERT, (a, torch.bfloat16)))
-                    else:
-                        cast_args.append(a)
-            node.args = tuple(cast_args)
-
-            with graph.inserting_after(node):
-                back = graph.call_function(_CONVERT, (node, torch.float32))
-            # Re-point every existing user to the float32 cast (but not the cast itself).
-            node.replace_all_uses_with(back, delete_user_cb=lambda u: u is not back)
-            n_cast += 1
-
-        if not matched:
+        candidates = {w: ls for w, ls in linears_by_weight.items() if len(ls) >= 3}
+        if not candidates:
             logger.warning(
-                "[_pass_gemm_bf16_casts] No aten.mm / aten.addmm nodes found "
-                "— OPT-1 not applied"
+                "[OPT-2 hoist_input_projection] No shared-weight per-timestep F.linear "
+                "pattern at functional level — nn.LSTM is a single opaque node here and "
+                "the input-projection hoist is ALREADY realized by Inductor's LSTM "
+                "decomposition (profile shows batched [4096,256]/[4096,512] input GEMMs); "
+                "pass is a no-op"
             )
             return gm
 
-        graph.lint()
+        # A hand-written cell loop exposes the hoistable pattern. We do not attempt the full
+        # structural hoist here (it requires recovering the per-timestep slice topology,
+        # which is unsafe to infer generically); instead we report the opportunity. The
+        # canonical fix is the module-level FastLSTM rewrite (see optimizations.json OPT-2
+        # fx_steps). Inductor still batches independent input projections it can prove are
+        # slice-of-one-tensor, so this remains a correctness-preserving no-op.
+        for w, ls in candidates.items():
+            logger.info(
+                "[OPT-2 hoist_input_projection] Detected %d F.linear calls sharing weight "
+                "'%s' — hoistable input projection. Prefer the module-level FastLSTM "
+                "precompute rewrite; leaving graph unchanged (Inductor batches provable "
+                "slice-of-one-tensor projections). [functional IR]",
+                len(ls), w.name,
+            )
+        return gm
+    except Exception as e:
+        logger.warning("[OPT-2 hoist_input_projection] Failed: %s", e)
+        return gm
+
+
+# ---------------------------------------------------------------------------
+# OPT-3 — cuDNN fused-RNN restore. ir_level=functional. NOT APPLIED (mutually exclusive).
+# Detection-only stub: logs the available cuDNN fused path and never transforms the graph.
+# ---------------------------------------------------------------------------
+
+def _fpass_detect_cudnn_rnn_stub(gm: fx.GraphModule) -> fx.GraphModule:
+    """OPT-3 (stub): detect an nn.LSTM / aten.lstm op site that could stay on the cuDNN
+    fused RNN path. NEVER transforms the graph — mutually exclusive with OPT-1/OPT-2 over
+    the recurrent matmuls; the low-risk in-place track is chosen instead."""
+    try:
+        for node in gm.graph.nodes:
+            tname = getattr(node.target, "__name__", "")
+            is_lstm = node.op == "call_function" and (
+                "lstm" in str(node.target).lower() or tname == "lstm"
+            )
+            if is_lstm:
+                logger.warning(
+                    "[OPT-3 cudnn_rnn] nn.LSTM / aten.lstm op site detected. Route A (keep "
+                    "the LSTM on the eager cuDNN fused RNN path) is MUTUALLY EXCLUSIVE with "
+                    "OPT-1/OPT-2 over the recurrent matmuls — NOT applied. The low-risk "
+                    "in-place track (OPT-2 -> OPT-1 -> OPT-4) is used instead. [stub]"
+                )
+                return gm
+    except Exception as e:
+        logger.warning("[OPT-3 cudnn_rnn] Failed: %s", e)
+    return gm
+
+
+# ---------------------------------------------------------------------------
+# OPT-1 — bf16 / Tensor-Core promotion of the gate GEMMs. ir_level=aten. Confidence: high.
+# match_target=torch.ops.aten.mm.default.
+#
+# Runs inside _aten_inner_compile after AOTAutograd has fully decomposed nn.LSTM into
+# per-timestep aten.mm (recurrent + batched input projections) and the classifier
+# aten.addmm. For every such node:
+#   * insert prims.convert_element_type(.., bfloat16) on the GEMM operands
+#       (mm: args 0,1 ; addmm: args 0,1,2 — bias + both matmul operands, because Inductor's
+#        bias_addmm lowering requires bias and matmul operands to share a dtype; the addmm
+#        output is cast back to fp32 below so precision is restored),
+#   * cast the result back to float32 (prims.convert_element_type) to preserve the
+#     recurrent-state dtype contract that downstream sigmoid/tanh/mul cell ops depend on.
+# convert_element_type (not aten._to_copy) avoids Inductor's decomp/fallback collision
+# under freezing + max_autotune. See _CONVERT_DTYPE note above.
+# This is a pure op-target pass (does NOT read weight VALUES) so it needs no ph_to_tensor.
+# Inductor CSE folds the repeated constant weight casts.
+# ---------------------------------------------------------------------------
+
+def _apass_bf16_promote_gemms(gm: fx.GraphModule) -> fx.GraphModule:
+    """OPT-1: promote aten.mm / aten.addmm operands to bfloat16, cast result to float32.
+
+    Aten IR level. Engages the Blackwell bf16 Tensor-Core MMA pipeline for the gate GEMMs
+    (which the FP32 SIMT path leaves at 0% tensor-core utilization)."""
+    try:
+        g = gm.graph
+        promoted = 0
+        for node in list(g.nodes):
+            if node.op != "call_function" or node.target not in _GEMM_TARGETS:
+                continue
+
+            if node.target is _MM_TARGET:
+                # mm(mat1, mat2) — cast both operands.
+                mat_idx = (0, 1)
+            else:
+                # addmm(bias, mat1, mat2) — cast ALL THREE operands to bf16. Inductor's
+                # bias_addmm lowering calls torch.addmm(bias, mat1, mat2) directly and
+                # requires bias and the matmul operands to share a dtype ("self and mat2
+                # must have the same dtype"); leaving the bias fp32 raises at runtime. The
+                # fp32 result cast below restores precision, so casting the bias is safe.
+                mat_idx = (0, 1, 2)
+
+            # Cast the GEMM operands to bf16 immediately before the GEMM.
+            with g.inserting_before(node):
+                for i in mat_idx:
+                    src = node.args[i]
+                    if not isinstance(src, fx.Node):
+                        continue
+                    cast = g.call_function(
+                        _CONVERT_DTYPE,
+                        args=(src, torch.bfloat16),
+                    )
+                    node.update_arg(i, cast)
+
+            # Cast the bf16 GEMM result back to float32 to preserve the cell-state dtype
+            # contract (sigmoid/tanh/mul downstream expect fp32).
+            with g.inserting_after(node):
+                out_f32 = g.call_function(
+                    _CONVERT_DTYPE,
+                    args=(node, torch.float32),
+                )
+            node.replace_all_uses_with(out_f32)
+            # replace_all_uses_with also rewired out_f32's own input; restore it to `node`.
+            out_f32.update_arg(0, node)
+            promoted += 1
+
+        if promoted == 0:
+            logger.warning(
+                "[OPT-1 bf16_promote] No aten.mm / aten.addmm nodes found — pass not applied"
+            )
+            return gm
+
+        g.lint()
         gm.recompile()
         logger.info(
-            "[_pass_gemm_bf16_casts] Applied BF16 casts to %d gate GEMM node(s) "
-            "(aten.addmm + aten.mm) [OPT-1, Aten IR]",
-            n_cast,
+            "[OPT-1 bf16_promote] Promoted %d gate GEMM(s) (aten.mm/aten.addmm) to bf16 "
+            "with fp32 result cast [aten IR] — engages Blackwell Tensor Cores",
+            promoted,
         )
-    except Exception as exc:
-        logger.warning("[_pass_gemm_bf16_casts] Failed: %s", exc)
-
+    except Exception as e:
+        logger.warning("[OPT-1 bf16_promote] Failed: %s", e)
     return gm
 
 
 # ---------------------------------------------------------------------------
-# OPT-2 (LOW, stub) — memory_layout: recurrent weight pre-transpose / bias fold
+# OPT-4 — freezing + max_autotune. ir_level=inductor_config. Confidence: medium.
+# match_target=freezing. Returns a scoped config_patches dict (no graph surgery).
 # ---------------------------------------------------------------------------
 
-def _pass_weight_pretranspose_stub(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    OPT-2 (STUB) — detection-only.
+def _cfg_freeze_and_autotune() -> dict:
+    """OPT-4: scoped Inductor config_patches.
 
-    optimizations.json proposed hoisting the recurrent gate weight transpose into a
-    register_buffer and folding the gate bias into aten.addmm. Two facts about the
-    actual decomposed graph make the transformative version inadvisable here:
+    freezing      — treat LSTM weights as compile-time constants (fold the _tn_ transpose,
+                    drop per-call weight guards); with OPT-1's bf16 weights, emit a
+                    pre-packed tensorop weight layout.
+    max_autotune  — let Inductor benchmark a GEMM config that avoids the per-GEMM cublasLt
+                    splitKreduce epilogue for the small-M (32) recurrent shapes.
+    Scoped to THIS compile_fx call only (no global torch._inductor.config mutation).
+    eval() is required for freezing (handled in get_model_and_input)."""
+    patches = {
+        "freezing": True,
+        "max_autotune": True,
+        "max_autotune_gemm_backends": "ATEN,TRITON",
+    }
+    logger.info(
+        "[OPT-4 freeze_autotune] Applying scoped config_patches: %s [inductor_config]",
+        patches,
+    )
+    return patches
 
-      1. The decomposition ALREADY emits aten.addmm.default (bias pre-folded into
-         the GEMM epilogue) with a pre-permuted weight feeding it, so the bias-fold
-         half is a no-op — there is no standalone (mm -> add(bias)) chain to re-fuse.
 
-      2. Hoisting the weight into a register_buffer fixes its dtype at registration
-         time. OPT-1 casts that very weight operand to bf16 inside the graph; a
-         pre-registered FP32 buffer would either defeat OPT-1 or require re-casting
-         a registered buffer (the DAG rule the optimizations.json OPT-2 notes flag
-         as illegal). optimizations.json itself rates OPT-2 LOW and notes the bias
-         placement is uncertain.
+# ---------------------------------------------------------------------------
+# Pass registry — routed by ir_level
+# ---------------------------------------------------------------------------
+# No pass in this workload reads weight VALUES (OPT-1 is a pure op-target dtype pass),
+# so the ph_to_tensor lookup is built but unused — kept for funnel uniformity / future
+# weight-value passes.
+_WEIGHT_VALUE_PASSES: set[str] = set()
 
-    This pass therefore only counts/reports the addmm gate GEMMs and their permuted
-    weight feeds, and never mutates the graph. The L2-residency win OPT-2 targets is
-    already partly delivered by OPT-1 (bf16 halves the weight read traffic).
-    """
-    try:
-        n_addmm = 0
-        n_permuted_weight = 0
-        for node in gm.graph.nodes:
-            if node.op == "call_function" and node.target is _ADDMM:
-                n_addmm += 1
-                w = node.args[2] if len(node.args) > 2 else None
-                if (isinstance(w, fx.Node)
-                        and w.op == "call_function"
-                        and w.target in (torch.ops.aten.permute.default,
-                                         torch.ops.aten.t.default)):
-                    n_permuted_weight += 1
+PASS_REGISTRY = [
+    # LEVEL 1 — functional (Dynamo graph, before compile_fx).
+    # Strategist order OPT-2 first; OPT-3 is a non-transforming stub.
+    {"id": "OPT-2", "level": "functional", "fn": _fpass_hoist_input_projection},
+    {"id": "OPT-3", "level": "functional", "fn": _fpass_detect_cudnn_rnn_stub},
+    # LEVEL 2 — aten (inside compile_fx inner_compile hook, post-decomposition).
+    {"id": "OPT-1", "level": "aten", "fn": _apass_bf16_promote_gemms},
+    # LEVEL 3 — inductor_config (scoped config_patches on compile_fx).
+    {"id": "OPT-4", "level": "inductor_config", "fn": _cfg_freeze_and_autotune},
+]
 
-        logger.info(
-            "[_pass_weight_pretranspose_stub] OPT-2 STUB (not applied): %d recurrent "
-            "gate addmm node(s), %d with pre-permuted weight feed — bias already "
-            "folded into addmm epilogue; register_buffer hoist skipped (conflicts "
-            "with OPT-1 bf16 cast on the same weight operand). bf16 from OPT-1 "
-            "already halves the weight read traffic.",
-            n_addmm, n_permuted_weight,
-        )
-    except Exception as exc:
-        logger.warning("[_pass_weight_pretranspose_stub] Failed: %s", exc)
+_FUNCTIONAL_PASSES = [p for p in PASS_REGISTRY if p["level"] == "functional"]
+_ATEN_PASSES = [p for p in PASS_REGISTRY if p["level"] == "aten"]
+_CONFIG_PASSES = [p for p in PASS_REGISTRY if p["level"] == "inductor_config"]
 
+
+def _reads_weight_values(p: dict) -> bool:
+    return p["id"] in _WEIGHT_VALUE_PASSES
+
+
+# ---------------------------------------------------------------------------
+# LEVEL 1 — Functional passes (Dynamo graph, pre-AOTAutograd)
+# ---------------------------------------------------------------------------
+
+def _run_functional_passes(gm: fx.GraphModule) -> fx.GraphModule:
+    """Run all functional-level passes on the Dynamo graph before compile_fx.
+
+    At this level nn.LSTM / F.linear are single high-level nodes. AOTAutograd recomputes
+    meta when it traces the rewritten graph, so no FakeTensorProp is needed here."""
+    for p in _FUNCTIONAL_PASSES:
+        try:
+            gm = p["fn"](gm)
+        except Exception as e:
+            logger.warning("[%s] functional pass error: %s", p["id"], e)
     return gm
 
 
 # ---------------------------------------------------------------------------
-# OPT-3 (MEDIUM, stub) — fusion: layout-noop view/cat elimination
+# LEVEL 2 — Aten-level passes (inside compile_fx inner_compile hook)
 # ---------------------------------------------------------------------------
 
-def _is_identity_view(node: fx.Node) -> bool:
-    """A view whose output shape equals its input shape is a pure layout no-op."""
-    if not (node.op == "call_function" and node.target in (_VIEW, _UNSAFE_VIEW)):
-        return False
-    inp = node.args[0]
-    if not isinstance(inp, fx.Node):
-        return False
-    iv = inp.meta.get("val")
-    ov = node.meta.get("val")
-    if not (hasattr(iv, "shape") and hasattr(ov, "shape")):
-        return False
-    return tuple(iv.shape) == tuple(ov.shape)
-
-
-def _pass_eliminate_noop_views(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    OPT-3 — erase only the layout-noop reshapes (aten._unsafe_view / aten.view whose
-    output shape == input shape) so Inductor schedules one fused pointwise kernel per
-    timestep over the contiguous gate buffer instead of paying launch latency on a
-    redundant reshape.
-
-    Reality of this graph: it contains ZERO aten._unsafe_view nodes and ZERO
-    identity-shape aten.view nodes — all 516 views genuinely reshape between the
-    [32,2048] gate tensor and the four [32,512] gate slices (paired with 256
-    aten.split.Tensor). There is therefore no SAFE layout-noop to erase, and
-    Inductor already fuses the gate activation arithmetic (kernel name
-    triton_poi_fused_add_addmm_cat). Erasing a genuine reshape would silently
-    corrupt downstream shapes, so this pass guards every candidate with
-    _is_identity_view and degrades to a detection-only no-op (WARNING) when none
-    match — which is the expected outcome for this model.
-
-    Confidence MEDIUM: applies the transform if (and only if) a true noop view is
-    present in some future/variant graph; otherwise reports and returns unchanged.
-    """
+def _repropagate_meta(gm: fx.GraphModule, example_inputs) -> None:
+    """Re-run FakeTensorProp after a structural rewrite so inserted nodes (the
+    aten._to_copy casts) get meta['val'] before compile_fx_inner runs."""
     try:
-        n_view = n_split = 0
-        for node in gm.graph.nodes:
-            if node.op == "call_function" and node.target in (_VIEW, _UNSAFE_VIEW):
-                n_view += 1
-            elif node.op == "call_function" and node.target is _SPLIT:
-                n_split += 1
+        from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 
-        erased = 0
-        for node in list(gm.graph.nodes):
-            if _is_identity_view(node) and len(node.users) > 0:
-                node.replace_all_uses_with(node.args[0])
-                gm.graph.erase_node(node)
-                erased += 1
-
-        if erased:
-            gm.graph.eliminate_dead_code()
-            gm.graph.lint()
-            gm.recompile()
-            logger.info(
-                "[_pass_eliminate_noop_views] Erased %d layout-noop view(s) of %d "
-                "total view nodes (%d split nodes) [OPT-3, Aten IR]",
-                erased, n_view, n_split,
-            )
+        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        fake_inputs = []
+        fake_mode = None
+        for ph, ex in zip(placeholders, example_inputs):
+            val = ph.meta.get("val", ex)
+            fake_inputs.append(val)
+            fm = getattr(val, "fake_mode", None)
+            if fm is not None:
+                fake_mode = fm
+        if fake_mode is not None:
+            with fake_mode:
+                FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(*fake_inputs)
         else:
-            logger.warning(
-                "[_pass_eliminate_noop_views] OPT-3 no-op: %d view node(s) and %d "
-                "split node(s) present, but NONE are identity-shape layout noops "
-                "(graph has no aten._unsafe_view; gate activations already fused by "
-                "Inductor). No safe reshape to erase — pass not applied.",
-                n_view, n_split,
-            )
-    except Exception as exc:
-        logger.warning("[_pass_eliminate_noop_views] Failed: %s", exc)
-
-    return gm
+            FakeTensorProp(gm).propagate_dont_convert_inputs(*fake_inputs)
+    except Exception as e:
+        logger.warning("[lstm_sequence_encoder_opt] meta re-propagation skipped: %s", e)
 
 
-# ---------------------------------------------------------------------------
-# Aten IR inner compiler — all graph passes run here, in prerequisite-DAG order
-# ---------------------------------------------------------------------------
+def _aten_inner_compile(
+    gm: fx.GraphModule, example_inputs, *, real_inputs=None, **kwargs
+) -> Callable:
+    """LEVEL 2 — Inductor inner_compile hook.
 
-def _aten_inner_compile(gm: fx.GraphModule, example_inputs, **kwargs) -> Callable:
-    """
-    Inductor ``inner_compile`` hook. ``compile_fx`` calls this with the fully
-    decomposed **Aten IR** forward graph (post-AOTAutograd), where the cuDNN RNN has
-    already been unrolled into per-timestep addmm + sigmoid/tanh/elementwise nodes.
-    The three passes run here in prerequisite order, then delegate to the real
-    ``compile_fx_inner`` (Aten -> Triton).
+    compile_fx calls this with the fully decomposed Aten IR graph (post-AOTAutograd). Run
+    aten-level passes (OPT-1 bf16 promotion), re-propagating meta after each structural
+    rewrite, then delegate to compile_fx_inner (Aten -> Triton).
 
-    Order (from optimizations.json prerequisite_for[]):
-      OPT-1 (dtype_promotion)        — first; sets the bf16 dtype OPT-2/OPT-3 assume.
-      OPT-2 (weight pretranspose)    — after OPT-1 (register_buffer-after-dtype rule);
-                                        stub / detection-only here.
-      OPT-3 (view/cat fusion)        — last; operates on the (now bf16) gate buffer;
-                                        detection-only here (no eliminable noop view).
-    """
-    gm = _pass_gemm_bf16_casts(gm)            # OPT-1  (applied)
-    gm = _pass_weight_pretranspose_stub(gm)   # OPT-2  (stub)
-    gm = _pass_eliminate_noop_views(gm)       # OPT-3  (stub / guarded)
+    ``example_inputs`` may be FakeTensors under FakeTensorMode; weight-VALUE-reading passes
+    (none here) would use the threaded ``real_inputs``. ``**kwargs`` is forwarded verbatim
+    for forward-compatibility."""
+    weight_source = real_inputs if real_inputs is not None else example_inputs
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}
+
+    for p in _ATEN_PASSES:
+        try:
+            if _reads_weight_values(p):
+                gm = p["fn"](gm, ph_to_tensor)
+            else:
+                gm = p["fn"](gm)
+            _repropagate_meta(gm, example_inputs)
+        except Exception as e:
+            logger.warning("[%s] aten pass error: %s", p["id"], e)
+
     return compile_fx_inner(gm, example_inputs, **kwargs)
 
 
-def _compile_with_aten_passes(gm: fx.GraphModule, example_inputs) -> Callable:
-    """Compile a (sub)graph through Inductor with the Aten-IR passes installed."""
-    return compile_fx(gm, example_inputs, inner_compile=_aten_inner_compile)
+# ---------------------------------------------------------------------------
+# LEVEL 3 — Inductor config patches
+# ---------------------------------------------------------------------------
+
+def _build_config_patches() -> dict:
+    """Collect and merge all inductor_config-level patches (scoped to this compile_fx
+    call only — no global Inductor config mutation)."""
+    patches: dict = {}
+    for p in _CONFIG_PASSES:
+        try:
+            result = p["fn"]()
+            if result:
+                patches.update(result)
+        except Exception as e:
+            logger.warning("[%s] config pass error: %s", p["id"], e)
+    return patches
 
 
 # ---------------------------------------------------------------------------
-# Utility: capture per-partition input tensors for the dedup compile path
+# Three-stage funnel: functional -> (AOTAutograd decomposition) -> aten -> config
+# ---------------------------------------------------------------------------
+
+def _compile_unit(gm: fx.GraphModule, example_inputs) -> Callable:
+    """Fixed three-stage funnel for one (sub)graph.
+
+    Stage 1 (functional): OPT-2 input-projection hoist detection, OPT-3 cuDNN stub.
+    Stage 2 (aten): compile_fx owns AOTAutograd + decomp; _aten_inner_compile runs OPT-1
+                    bf16 promotion on the decomposed gate GEMMs.
+    Stage 3 (inductor_config): OPT-4 freezing + max_autotune via scoped config_patches."""
+    gm = _run_functional_passes(gm)
+    inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
+    config_patches = _build_config_patches()
+    return compile_fx(gm, example_inputs, inner_compile=inner, config_patches=config_patches)
+
+
+# ---------------------------------------------------------------------------
+# Partition input capture (dedup path)
 # ---------------------------------------------------------------------------
 
 def _capture_partition_inputs(
-    split_gm: fx.GraphModule,
-    example_inputs: list,
-) -> dict:
-    """Run split_gm once under no_grad to capture each partition's input tensors."""
-    partition_inputs: dict = {}
+    split_gm: fx.GraphModule, example_inputs: list
+) -> dict[str, list]:
+    """Run split_gm once under no_grad to capture per-partition input tensors so each
+    unique representative is compiled with correct (real-value) example inputs."""
+    partition_inputs: dict[str, list] = {}
     hooks = []
     for name, submod in split_gm.named_children():
         if isinstance(submod, fx.GraphModule):
+
             def _hook(mod, args, _name=name):
                 partition_inputs[_name] = list(args)
+
             hooks.append(submod.register_forward_pre_hook(_hook))
     with torch.no_grad():
         split_gm(*example_inputs)
@@ -369,113 +506,89 @@ def _capture_partition_inputs(
 
 @register_backend
 def lstm_sequence_encoder_opt(gm: fx.GraphModule, example_inputs) -> Callable:
-    """
-    Custom torch.compile() backend for the LSTM sequence encoder.
+    """Custom torch.compile() backend for LSTMSequenceEncoder.
 
-    Dedup-aware structure (the canonical backend shape): UniqueSubgraphRegistry
-    splits the functional FX graph into per-layer partitions and groups them by
-    structural signature. The unrolled LSTM produces a single flat partition (no
-    repeated block structure survives the unroll), so equiv_map is empty and the
-    backend takes the flat compile path — which preserves cross-timestep Inductor
-    fusion. The dedup branch is retained for robustness / parity with the other
-    workloads and is exercised only if a future graph exposes repeated partitions.
+    Low-risk in-place track from optimizations.json (OPT-2 -> OPT-1 -> OPT-4) via the
+    three-stage funnel (functional -> aten -> inductor_config):
 
-    All three FX passes run inside ``_aten_inner_compile`` at the Aten IR level via
-    ``compile_fx(..., inner_compile=...)``; every pass degrades gracefully (INFO on
-    apply, WARNING on no-match/failure) and never crashes the compile.
-    """
+      OPT-2 (functional): input-projection hoist detection (already realized by Inductor's
+                          nn.LSTM decomposition; no-op on nn.LSTM)
+      OPT-3 (functional): cuDNN fused-RNN restore — NOT applied (mutually exclusive); stub
+      OPT-1 (aten):       bf16 / Tensor-Core promotion of the gate GEMMs (the real win)
+      OPT-4 (inductor_config): freezing + max_autotune via scoped config_patches
+
+    Dedup-aware: the model is a single nn.LSTM + classifier (no repeated structurally
+    identical FX subgraphs at the partition level), so UniqueSubgraphRegistry returns an
+    empty equivalence map -> flat compile path. The dedup branch is preserved for models
+    with repeated identical blocks."""
     logger.info(
         "lstm_sequence_encoder_opt backend: starting "
-        "(Aten IR passes via compile_fx inner_compile)"
+        "(functional[OPT-2 hoist-detect, OPT-3 cuDNN stub] -> aten[OPT-1 bf16 promote] "
+        "-> inductor_config[OPT-4 freezing + max_autotune])"
     )
 
     registry = UniqueSubgraphRegistry(gm)
     equiv_map = registry.build_partition_equivalence_map()
 
     if not equiv_map:
-        logger.info(
-            "lstm_sequence_encoder_opt: no repeated layers (unrolled flat graph) "
-            "— flat compile path"
-        )
-        return _compile_with_aten_passes(gm, example_inputs)
+        logger.info("lstm_sequence_encoder_opt: no repeated layers, flat compile path")
+        return _compile_unit(gm, example_inputs)
 
     logger.info(
-        "lstm_sequence_encoder_opt: %d duplicate partition(s) — dedup compile path",
+        "lstm_sequence_encoder_opt: %d duplicate partition(s), dedup compile path",
         len(equiv_map),
     )
-    try:
-        partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
-        for rep_name, rep_mod in registry.unique_reps:
-            inputs = partition_inputs.get(rep_name, example_inputs)
-            compiled = _compile_with_aten_passes(rep_mod, inputs)
-            rep_mod.forward = compiled
-            for _, dup_mod in registry.duplicates_of(rep_name):
-                dup_mod.forward = compiled
-        return lambda *args: registry.split(*args)
-    except Exception as exc:
-        logger.warning(
-            "lstm_sequence_encoder_opt: dedup compile path failed (%s) — falling "
-            "back to flat compile path", exc
-        )
-        return _compile_with_aten_passes(gm, example_inputs)
+
+    # Compile each unique representative through the same funnel; share the compiled
+    # callable with all structural duplicates. Functional passes run per-rep (inside
+    # _compile_unit), never on the pre-split graph.
+    partition_inputs = _capture_partition_inputs(registry.split, example_inputs)
+    for rep_name, rep_mod in registry.unique_reps:
+        inputs = partition_inputs.get(rep_name, example_inputs)
+        compiled = _compile_unit(rep_mod, inputs)
+        rep_mod.forward = compiled
+        for _, dup_mod in registry.duplicates_of(rep_name):
+            dup_mod.forward = compiled
+
+    return lambda *args: registry.split(*args)
 
 
 # ---------------------------------------------------------------------------
 # Workload interface
 # ---------------------------------------------------------------------------
-
-DEVICE      = "cuda"
-BATCH_SIZE  = 32
-SEQ_LEN     = 128
-INPUT_SIZE  = 256
+DEVICE = "cuda"
+BATCH_SIZE = 32
+SEQ_LEN = 128
+INPUT_SIZE = 256
 HIDDEN_SIZE = 512
-NUM_LAYERS  = 2
+NUM_LAYERS = 2
 NUM_CLASSES = 10
 
 
-class LSTMSequenceEncoder(torch.nn.Module):
-    """Stacked 2-layer LSTM + mean-pool temporal reduction + linear classifier."""
-
-    def __init__(self):
-        super().__init__()
-        self.lstm = torch.nn.LSTM(
-            input_size=INPUT_SIZE,
-            hidden_size=HIDDEN_SIZE,
-            num_layers=NUM_LAYERS,
-            batch_first=True,
-            dropout=0.0,
-        )
-        self.classifier = torch.nn.Linear(HIDDEN_SIZE, NUM_CLASSES)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out, _ = self.lstm(x)           # (B, T, HIDDEN_SIZE)
-        pooled = out.mean(dim=1)        # (B, HIDDEN_SIZE)
-        return self.classifier(pooled)  # (B, NUM_CLASSES)
-
-
 def get_model_and_input() -> tuple:
-    """
-    Return (uncompiled model on CUDA, input tensor on CUDA).
+    """Return (raw_model, input_tensor) on CUDA — uncompiled, unwarmed.
 
-    Non-graph optimizations: NONE. OPT-1 (bf16), OPT-2 (layout) and OPT-3 (view
-    fusion) are all graph passes applied inside the backend at the Aten IR level, so
-    the public model/input stay float32. dtype/memory_format/batch-shape rewrites do
-    not apply: there is no NCHW conv, batch=32 is already a tensor-core-friendly
-    multiple of 16, and forcing bf16 weights here would skip the controlled in-graph
-    cast-back-to-fp32 that keeps the 128-step recurrence numerically stable.
+    The model is the unmodified LSTMSequenceEncoder, returned with .eval() set — REQUIRED
+    for OPT-4 freezing (incompatible with training) and for the inference-only bf16 GEMM
+    promotion (OPT-1). dtype stays float32 at the module boundary (matches
+    optimizations.json analysis.dtype); OPT-1 promotes only the gate-GEMM operands to bf16
+    IN-GRAPH and casts results back to fp32, so the input/output dtype contract is
+    unchanged and the recurrent cell-state precision is preserved.
 
-    allow_rnn is enabled at module import so torch.compile can trace nn.LSTM.
-    """
+    No non-graph optimization is applied here: OPT-2's input-projection hoist is already
+    realized by Inductor's nn.LSTM decomposition, OPT-1 is an in-graph aten pass, and OPT-4
+    is an inductor_config pass — none require a whole-module dtype/memory_format change."""
     assert torch.cuda.is_available(), "CUDA required"
+    from lstm_sequence_encoder import LSTMSequenceEncoder
+
     model = LSTMSequenceEncoder().to(DEVICE).eval()
     x = torch.randn(BATCH_SIZE, SEQ_LEN, INPUT_SIZE, device=DEVICE)
     return model, x
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     model, x = get_model_and_input()
-    compiled = torch.compile(model, backend=BACKEND_NAME)
+    compiled = torch.compile(model, backend="lstm_sequence_encoder_opt")
     with torch.no_grad():
         out = compiled(x)
-    print(f"Output shape: {out.shape}, dtype: {out.dtype}")  # expect (32, 10)
+    print("output shape:", out.shape, "dtype:", out.dtype)
