@@ -1,74 +1,69 @@
 """
-gpt2_optimized.py — Custom torch.compile() backend for GPT-2 small (117M).
+gpt2_optimized.py — custom torch.compile() backend for GPT-2 small (gpt2.py).
 
-Registered backend: ``gpt2_opt``
+Backend name:  gpt2_opt   (registered via @register_backend; analysis.model = "gpt2")
 
-Implements the optimizations from optimizations.json routed to the correct IR level
-via the three-stage funnel (functional -> aten -> inductor_config). Each pass executes
-at the level where its pattern is unambiguous and the rewrite is sound.
+GPT-2 small: 12 identical transformer decoder blocks, hidden=768, heads=12,
+ffn=3072, batch=4, seq_len=128, fp32 inference on an RTX PRO 6000 Blackwell
+(torch 2.11.0+cu128, CUDA 12.8). All 12 blocks are structurally identical, so
+the dedup path compiles one representative and shares the callable across blocks.
 
-Backend name: gpt2_opt  (model "gpt2" -> snake-case + _opt suffix)
+Optimizations implemented (from optimizations.json, routed by ir_level). The
+recommended application order is OPT-2 -> OPT-1 -> OPT-4 -> OPT-3; the funnel
+(functional -> aten -> inductor_config) enforces the cross-level ordering, and
+within the aten level OPT-1 is registered before OPT-4.
 
-Pass summary (execution order enforced by the funnel: functional then aten then config):
+  OPT-2  canonicalize attention to F.scaled_dot_product_attention(is_causal=True)
+         level: functional  (medium)
+         At the Dynamo graph level, find F.scaled_dot_product_attention calls and
+         canonicalize them to the is_causal=True form, dropping any materialized
+         additive attn_mask argument. HF GPT-2's sdpa attention path already emits
+         an F.scaled_dot_product_attention node; switching it to is_causal=True lets
+         the mask construction (constant_pad_nd / scalar_tensor / where) become dead
+         code that AOTAutograd / Inductor eliminate, collapsing the 48-launch
+         memory-bound SDPA-prep family. Defensive: if no SDPA node is found, or it
+         is already causal with no mask, the pass is a logged no-op.
 
-  OPT-2  functional / high  — Flash SDPA backend selection (Option A)
-      Before compile_fx owns the graph, enable the Flash Attention SDPA backend and
-      disable the mem-efficient (xFormers) backend. The profile showed every SDPA call
-      dispatching to fmha_cutlassF_f32_aligned_64x64_rf_sm80 — an Ampere-ISA (Sm80)
-      xFormers kernel running on a Blackwell (Sm100) device with empty ncu metrics.
-      With flash_sdp enabled and mem_efficient_sdp disabled, Dynamo traces
-      F.scaled_dot_product_attention to aten._scaled_dot_product_flash_attention
-      (native Sm100). GPT-2 uses a causal mask, so Flash takes is_causal=True natively.
-      No graph nodes added — process-level flag side effect read during Dynamo tracing.
+  OPT-1  bf16 dtype promotion for mm / addmm operands
+         level: aten  (high)
+         Inside _aten_inner_compile (post-AOTAutograd), cast the GEMM operands of
+         every aten.mm.default and aten.addmm.default to bfloat16 via
+         prims.convert_element_type, and cast the result back to the original dtype.
+         Routes the four projection families (QKV addmm 768->2304, attn-out mm
+         768->768, FFN fc_up 768->3072, FFN fc_down 3072->768; ~84% of attributed
+         time) off the cutlass_80_simt_sgemm SIMT path (tensor_core_active_pct=0.0)
+         onto the Blackwell bf16 tensor-core HGEMM path. prims.convert_element_type
+         is used instead of aten._to_copy to avoid the torch 2.11
+         "both a fallback and a decomp for same op" assertion in an already
+         decomposed graph.
 
-  OPT-1  aten / high  — BF16 dtype promotion (matmul operands)
-      Inside _aten_inner_compile (post-AOTAutograd), cast both operands of every
-      aten.mm.default AND aten.addmm.default node to bfloat16 via
-      prims.convert_element_type, and cast the GEMM result back to float32 to preserve
-      downstream dtype contracts. Routes cuBLAS from the SIMT FP32 path
-      (cutlass_80_simt_sgemm_*, tensor_core_active_pct=0.0) to the Blackwell BF16
-      Tensor Core GEMM across all 48 block GEMMs (FFN-down, FFN-up, fused-QKV addmm,
-      attn-out). LayerNorm and softmax reductions are left in FP32 for numerical
-      stability — only GEMM operands are promoted. NOTE: GPT-2's QKV is already a
-      single fused [768->2304] addmm (HuggingFace Conv1D), so there is no QKV-fusion
-      pass; the addmm branch below promotes that wide GEMM directly.
+  OPT-4  cast cancellation (cleanup for OPT-1)
+         level: aten  (medium)
+         After OPT-1, walk the graph and cancel adjacent inverse
+         prims.convert_element_type pairs (fp32 -> bf16 -> fp32 and the reverse) so
+         consecutive GEMMs connected through a pointwise/LayerNorm epilogue run
+         bf16 end-to-end instead of round-tripping through DRAM. Registered AFTER
+         OPT-1 in the aten level so it operates on OPT-1's freshly inserted casts
+         (a genuine within-level ordering edge).
 
-  OPT-3  inductor_config / medium  — Weight freezing + autotune
-      Pass config_patches={"freezing": True, "max_autotune": True, ...} to compile_fx.
-      Inductor treats requires_grad=False parameters (eval mode) as compile-time
-      constants, constant-folds and pre-packs the 48 frozen GEMM weights into the
-      layout the selected BF16 Tensor Core kernel prefers, drops per-call guards, and
-      autotunes GEMM tiling (most valuable in the BF16 TC regime exposed by OPT-1).
-      Scoped to this compile_fx call only — no global Inductor config mutation.
+  OPT-3  Inductor freezing (weight pre-pack + epilogue fusion)
+         level: inductor_config  (medium)
+         Pass config_patches={"freezing": True} to compile_fx. For this eval /
+         no_grad inference graph Inductor constant-folds the LayerNorm affine +
+         projection bias and pre-transposes / pre-packs the weight constants into
+         the tensor-core-friendly layout, letting cuBLASLt/CUTLASS pick a
+         fused-epilogue HGEMM and removing standalone memory-bound bias/GELU Triton
+         kernels (the addmm_0 family). Satisfied-by-level after OPT-1, so the frozen
+         weight is materialized along the bf16 path.
 
-  OPT-4  aten / low (STUB — detect only, never transform)
-      Causal-mask CSE/hoist across the 12 blocks. This is sub-threshold (~0.5% of
-      attributed time) and is entirely subsumed by OPT-2: FlashAttention with
-      is_causal=True never materializes the additive [4,12,128,128] mask, so the
-      redundant mask-reconstruction subgraphs disappear. The stub only detects and
-      logs whether any explicit attn_bias-producing efficient_attention nodes remain;
-      it performs no graph mutation.
-
-Prerequisite / ordering rationale:
-  - OPT-2 (functional) runs before compile_fx so Dynamo selects the Flash SDPA op.
-  - OPT-1 (aten) runs inside inner_compile after AOTAutograd; by funnel ordering the
-    BF16 q/k/v operands are in place at FlashAttention dispatch time.
-  - OPT-3 (inductor_config) is a scoped config_patches dict; freezing is most impactful
-    once GEMMs are BF16 Tensor Core (OPT-1 is its prerequisite by pipeline level).
-  - OPT-4 (aten stub) would run after OPT-1; it is a no-op because OPT-2 removes the
-    explicit mask. Cross-level ordering is enforced by the funnel; no within-level cycle.
-
-IR-level mechanics (torch 2.11):
-  compile_fx owns AOTAutograd, the decomp table, the boxed calling convention and the
-  partitioner. We do NOT use aot_autograd(fw_compiler=compile_fx) — on torch 2.11 that
-  raises AssertionError: Expected tensors only inside copy_misaligned_inputs. The funnel
-  passes functional rewrites BEFORE compile_fx, aten passes through its inner_compile
-  seam, and inductor_config passes as scoped config_patches.
-
-Dedup-aware: GPT-2 has 12 structurally identical transformer blocks. UniqueSubgraphRegistry
-detects the repeated partitions, compiles one representative per equivalence class through
-the funnel, and shares the compiled callable with the duplicates. If no repeats are found,
-the flat compile path is taken.
+The backend is the canonical three-stage funnel
+    _run_functional_passes(gm) -> compile_fx(inner_compile=_aten_inner_compile,
+                                              config_patches=_config_patches())
+invoked identically on the flat graph and on every dedup representative. We do NOT
+use aot_autograd(fw_compiler=compile_fx): on torch 2.11 that raises
+AssertionError inside copy_misaligned_inputs. compile_fx owns AOTAutograd exactly
+once; functional passes run before it, aten passes run inside its inner_compile
+seam, and config patches are scoped to each compile_fx call (no global state).
 
 compile_mode = "inductor" (from optimizations.json analysis.compile_mode).
 """
@@ -80,7 +75,11 @@ from typing import Callable
 
 import torch
 import torch.fx as fx
+import torch.nn as nn
+import torch.nn.functional as F
+
 from torch._dynamo import register_backend
+# Import the callable functions — NOT the module (module is not callable).
 from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 
 from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
@@ -88,20 +87,25 @@ from nvidia.operator_profiler.fx import UniqueSubgraphRegistry
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Workload constants (cross-validated against optimizations.json analysis)
+#   GPT-2 small: hidden=768, heads=12, ffn=3072, 12 layers. batch=4, seq_len=128,
+#   fp32, CUDA. Output is [4, 128, 768].
 # ---------------------------------------------------------------------------
+DEVICE   = "cuda"
+BATCH    = 4
+SEQ_LEN  = 128
+MODEL_ID = "gpt2"
+
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
 
-# Op targets
+# Op targets.
 _MM = torch.ops.aten.mm.default
 _ADDMM = torch.ops.aten.addmm.default
-_EFF_ATTN = torch.ops.aten._scaled_dot_product_efficient_attention.default
-
-# Use prims.convert_element_type, not aten._to_copy. On torch 2.11, aten._to_copy has
-# both a fallback and a decomp registration; inserting it into an already-decomposed
-# Aten graph makes Inductor raise "both a fallback and a decomp for same op".
-# prims.convert_element_type lowers cleanly to a Triton elementwise cast.
+# Use prims.convert_element_type, not aten._to_copy. On torch 2.11, aten._to_copy
+# carries both a fallback and a decomp registration; inserting it into an already
+# decomposed Aten graph makes Inductor raise "both a fallback and a decomp for the
+# same op". prims.convert_element_type lowers cleanly to a Triton elementwise cast.
 _CONVERT = torch.ops.prims.convert_element_type.default
 
 
@@ -109,7 +113,7 @@ _CONVERT = torch.ops.prims.convert_element_type.default
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _node_dtype(n) -> "torch.dtype | None":
+def _node_dtype(n) -> torch.dtype | None:
     """Return the tensor dtype stored in node meta, or None if unavailable."""
     if not isinstance(n, fx.Node):
         return None
@@ -119,325 +123,409 @@ def _node_dtype(n) -> "torch.dtype | None":
     return val.dtype
 
 
-def _insert_bf16_cast(g: fx.Graph, src: fx.Node, before: fx.Node) -> fx.Node:
-    """Insert a prims.convert_element_type cast to bf16 directly before ``before``.
-    Returns ``src`` unchanged if it already has bf16 dtype (no-op on already-cast)."""
-    if _node_dtype(src) is _BF16:
+def _insert_cast(g: fx.Graph, src: fx.Node, dtype: torch.dtype, before: fx.Node) -> fx.Node:
+    """Insert a prims.convert_element_type cast to ``dtype`` directly before
+    ``before``. Returns ``src`` unchanged if it already has the target dtype."""
+    if _node_dtype(src) is dtype:
         return src
     with g.inserting_before(before):
-        return g.call_function(_CONVERT, (src, _BF16))
+        return g.call_function(_CONVERT, (src, dtype))
 
 
-# ---------------------------------------------------------------------------
-# OPT-2 — Flash SDPA backend selection (Option A). ir_level=functional. high.
-#
-# Sets process-level SDPA backend flags before compile_fx takes the graph. Dynamo
-# reads these flags when tracing F.scaled_dot_product_attention to choose the Aten
-# op. With flash_sdp enabled and mem_efficient_sdp disabled, Dynamo emits
-# aten._scaled_dot_product_flash_attention (native Sm100) instead of
-# aten._scaled_dot_product_efficient_attention (Sm80 xFormers fallback). No graph
-# modifications — this is a process-level side effect only.
-# ---------------------------------------------------------------------------
+def _is_sdpa_target(target) -> bool:
+    """True if ``target`` is F.scaled_dot_product_attention (functional level)."""
+    if target is F.scaled_dot_product_attention:
+        return True
+    # Robustness against re-binding / overload wrappers.
+    return getattr(target, "__name__", "") == "scaled_dot_product_attention"
 
-def _fpass_enable_flash_sdpa(gm: fx.GraphModule) -> fx.GraphModule:
-    """OPT-2: Steer SDPA dispatch toward Flash Attention, away from the Sm80 xFormers path.
 
-    GPT-2 attention is causal; FlashAttention takes is_causal=True natively, so the
-    additive causal-mask machinery (see OPT-4) is no longer materialized.
+# ===========================================================================
+# LEVEL 1 (functional) pass — OPT-2: canonicalize attention to SDPA is_causal=True
+# ===========================================================================
+def _fpass_canonicalize_sdpa(gm: fx.GraphModule) -> fx.GraphModule:
+    """OPT-2 (functional, medium): canonicalize F.scaled_dot_product_attention to
+    the is_causal=True form and drop any materialized additive attn_mask argument.
+
+    HF GPT-2 (sdpa attention implementation) emits an
+    F.scaled_dot_product_attention node at the functional level. Replacing an
+    explicit additive causal mask with is_causal=True makes the mask-construction
+    chain (constant_pad_nd / scalar_tensor / where / expand) dead, so AOTAutograd
+    and Inductor eliminate the 48-launch memory-bound SDPA-prep family
+    (aten::view_0). The signature is
+    scaled_dot_product_attention(query, key, value, attn_mask=None,
+    dropout_p=0.0, is_causal=False, scale=None). seq_len=128 is static, so there is
+    no dynamic-shape guard issue.
+
+    Defensive (medium confidence): if no SDPA node is found, or all SDPA nodes are
+    already causal with no mask, the pass is a logged no-op.
     """
     try:
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(False)
-        # Keep math_sdp enabled as a valid FP32 fallback during Dynamo metadata tracing.
-        # At kernel dispatch the BF16 q/k/v from OPT-1 route to Flash, not math.
+        g = gm.graph
+        canonicalized = 0
+        for node in list(g.nodes):
+            if not (node.op == "call_function" and _is_sdpa_target(node.target)):
+                continue
+
+            args = list(node.args)
+            kwargs = dict(node.kwargs)
+
+            # Determine current attn_mask and is_causal from args/kwargs.
+            # Positional layout: (query, key, value, attn_mask, dropout_p,
+            #                     is_causal, scale)
+            attn_mask = kwargs.get("attn_mask", args[3] if len(args) > 3 else None)
+            is_causal = kwargs.get("is_causal", args[5] if len(args) > 5 else False)
+
+            if attn_mask is None and is_causal is True:
+                # Already in the canonical causal form — nothing to do.
+                continue
+
+            # Rebuild as F.sdpa(q, k, v, attn_mask=None, dropout_p=<preserve>,
+            # is_causal=True, scale=<preserve>). Keep only q/k/v positionally.
+            q, k, v = args[0], args[1], args[2]
+            dropout_p = kwargs.get("dropout_p", args[4] if len(args) > 4 else 0.0)
+            scale = kwargs.get("scale", args[6] if len(args) > 6 else None)
+
+            new_kwargs = {
+                "attn_mask": None,
+                "dropout_p": dropout_p,
+                "is_causal": True,
+            }
+            if scale is not None:
+                new_kwargs["scale"] = scale
+
+            with g.inserting_before(node):
+                new_sdpa = g.call_function(
+                    F.scaled_dot_product_attention, (q, k, v), new_kwargs
+                )
+            node.replace_all_uses_with(new_sdpa)
+            g.erase_node(node)
+            canonicalized += 1
+
+        if canonicalized == 0:
+            logger.warning(
+                "[OPT-2 canonicalize_sdpa] No non-causal / masked SDPA node found "
+                "— attention already canonical or expressed differently; pass not applied"
+            )
+            return gm
+
+        g.eliminate_dead_code()
+        g.lint()
+        gm.recompile()
         logger.info(
-            "[OPT-2 flash_sdpa] Flash SDPA enabled, mem_efficient (Sm80 xFormers) "
-            "disabled, math kept as FP32 fallback [functional IR, flag side-effect]"
+            "[OPT-2 canonicalize_sdpa] Canonicalized %d SDPA node(s) to "
+            "is_causal=True (additive mask dropped) [functional IR]",
+            canonicalized,
         )
-    except Exception as e:
-        logger.warning("[OPT-2 flash_sdpa] Failed to set SDPA backend flags: %s", e)
+    except Exception as e:  # noqa: BLE001 — medium confidence: degrade gracefully
+        logger.warning("[OPT-2 canonicalize_sdpa] Failed: %s", e)
     return gm
 
 
-# ---------------------------------------------------------------------------
-# OPT-1 — BF16 dtype promotion (matmul operands). ir_level=aten. high.
-#
-# Runs inside _aten_inner_compile after AOTAutograd decomposition. Casts both
-# operands of every aten.mm.default AND aten.addmm.default node to bfloat16 and
-# casts the GEMM output back to float32. The addmm branch covers GPT-2's fused QKV
-# projection (HuggingFace Conv1D packs Q/K/V into one 768->2304 addmm); the mm
-# branch covers FFN up/down and the attention output projection. Routes cuBLAS from
-# the SIMT FP32 cutlass_80_simt_sgemm path (tensor_core_active_pct=0.0) to the
-# Blackwell BF16 Tensor Core path (sm100). LayerNorm/softmax stay FP32.
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
+# LEVEL 2 (aten) pass — OPT-1: bf16 dtype promotion for mm / addmm operands
+# ===========================================================================
 def _apass_bf16_promotion(gm: fx.GraphModule) -> fx.GraphModule:
-    """OPT-1: Cast aten.mm/aten.addmm matmul operands to BF16; restore FP32 output.
+    """OPT-1 (aten, high): promote aten.mm / aten.addmm GEMM operands to bf16 and
+    cast the result back to the original dtype.
 
-    Aten IR level. For addmm(bias, a, b) the matmul operands are a (arg1) and b (arg2)
-    and the bias is arg0; all three are promoted to BF16 so the fused GEMM+bias runs on
-    Tensor Cores, then the result is down-cast to FP32.
+    aten.mm.default(act, weight)              -> both operands bf16
+    aten.addmm.default(bias, act, weight)     -> bias, act, weight all bf16
+
+    Routes the four projection families off the cutlass_80_simt_sgemm SIMT path
+    (tensor_core_active_pct=0.0) onto the Blackwell bf16 tensor-core HGEMM path.
+    This is an op-target pass (keys on mm/addmm targets, not weight values), so it
+    needs no ph_to_tensor lookup. The output is cast back to the original dtype so
+    downstream fp32 consumers are unaffected; OPT-4 then cancels the redundant
+    round-trips between consecutive GEMMs.
     """
     try:
         g = gm.graph
         promoted = 0
 
         for node in list(g.nodes):
-            if node.op != "call_function":
+            if not (node.op == "call_function" and node.target in (_MM, _ADDMM)):
+                continue
+            if node.target is _MM and len(node.args) < 2:
+                continue
+            if node.target is _ADDMM and len(node.args) < 3:
+                continue
+
+            orig_dtype = _node_dtype(node) or _FP32
+            if orig_dtype is _BF16:
+                # GEMM already operates in bf16 — nothing to promote.
                 continue
 
             if node.target is _MM:
-                if len(node.args) < 2:
+                act, w = node.args[0], node.args[1]
+                if not (isinstance(act, fx.Node) and isinstance(w, fx.Node)):
                     continue
-                a, b = node.args[0], node.args[1]
-                if not (isinstance(a, fx.Node) and isinstance(b, fx.Node)):
+                cast_act = _insert_cast(g, act, _BF16, node)
+                cast_w = _insert_cast(g, w, _BF16, node)
+                if cast_act is act and cast_w is w:
                     continue
-                a16 = _insert_bf16_cast(g, a, node)
-                b16 = _insert_bf16_cast(g, b, node)
-                if a16 is a and b16 is b:
-                    continue  # already BF16
-                node.args = (a16, b16) + tuple(node.args[2:])
+                node.args = (cast_act, cast_w) + tuple(node.args[2:])
+            else:  # _ADDMM(bias, act, weight)
+                bias, act, w = node.args[0], node.args[1], node.args[2]
+                if not all(isinstance(x, fx.Node) for x in (bias, act, w)):
+                    continue
+                cast_bias = _insert_cast(g, bias, _BF16, node)
+                cast_act = _insert_cast(g, act, _BF16, node)
+                cast_w = _insert_cast(g, w, _BF16, node)
+                if cast_bias is bias and cast_act is act and cast_w is w:
+                    continue
+                node.args = (cast_bias, cast_act, cast_w) + tuple(node.args[3:])
 
-            elif node.target is _ADDMM:
-                if len(node.args) < 3:
-                    continue
-                bias, a, b = node.args[0], node.args[1], node.args[2]
-                if not all(isinstance(x, fx.Node) for x in (bias, a, b)):
-                    continue
-                bias16 = _insert_bf16_cast(g, bias, node)
-                a16 = _insert_bf16_cast(g, a, node)
-                b16 = _insert_bf16_cast(g, b, node)
-                if bias16 is bias and a16 is a and b16 is b:
-                    continue  # already BF16
-                node.args = (bias16, a16, b16) + tuple(node.args[3:])
-
-            else:
-                continue
-
-            # Restore FP32 on the output so all downstream users keep float32.
+            # Restore the original dtype on the GEMM output for downstream consumers.
             with g.inserting_after(node):
-                back_fp32 = g.call_function(_CONVERT, (node, _FP32))
-            node.replace_all_uses_with(
-                back_fp32, delete_user_cb=lambda u: u is not back_fp32
-            )
+                back = g.call_function(_CONVERT, (node, orig_dtype))
+            node.replace_all_uses_with(back, delete_user_cb=lambda u: u is not back)
             promoted += 1
 
         if promoted == 0:
             logger.warning(
-                "[OPT-1 bf16_promotion] No aten.mm/aten.addmm nodes found — pass not applied"
+                "[OPT-1 bf16_promotion] No fp32 aten.mm / aten.addmm nodes found "
+                "— pass not applied"
             )
             return gm
 
         g.lint()
         gm.recompile()
         logger.info(
-            "[OPT-1 bf16_promotion] Promoted %d aten.mm/addmm node(s) to BF16 operands "
-            "(FP32 output restored) [aten IR]",
+            "[OPT-1 bf16_promotion] Promoted %d aten.mm/addmm node(s) to bf16 "
+            "operands (original dtype restored on output) [aten IR]",
             promoted,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — high confidence: exception = real error
         logger.warning("[OPT-1 bf16_promotion] Failed: %s", e)
     return gm
 
 
-# ---------------------------------------------------------------------------
-# OPT-4 — Causal-mask CSE/hoist. ir_level=aten. Confidence: low (STUB).
-#
-# Detect-only, never transforms. The redundant per-block additive-mask
-# reconstruction this pass would target is entirely subsumed by OPT-2: with
-# FlashAttention(is_causal=True) the explicit attn_bias tensor is never built, so
-# no aten._scaled_dot_product_efficient_attention node with an attn_bias arg should
-# remain. This stub logs whether any such nodes survive (which would indicate the
-# mem-efficient backend was retained) and returns the graph unchanged.
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# LEVEL 2 (aten) pass — OPT-4: cast cancellation (cleanup for OPT-1)
+# ===========================================================================
+def _apass_cancel_casts(gm: fx.GraphModule) -> fx.GraphModule:
+    """OPT-4 (aten, medium): cancel adjacent inverse prims.convert_element_type
+    pairs introduced by OPT-1.
 
-def _apass_mask_hoist_stub(gm: fx.GraphModule) -> fx.GraphModule:
-    """OPT-4 (stub): Report residual mem-efficient-attention mask producers; no mutation."""
+    OPT-1 inserts a cast(bf16) before each GEMM and a cast(orig) after it. Where
+    two GEMMs are connected through a pointwise/LayerNorm epilogue this produces a
+    fp32 -> bf16 -> ... -> fp32 -> bf16 round-trip whose only effect is extra DRAM
+    traffic. This pass detects convert(x, D) whose single input is convert(y, E)
+    where the inner conversion's source already has dtype D, and rewires the outer
+    node's users straight to that source, dropping both casts.
+
+    Registered AFTER OPT-1 in the aten level so the inverse pairs exist when it
+    runs (a genuine within-level ordering edge). Defensive: if OPT-1 inserted no
+    casts (e.g. an autocast-region variant), this is a logged no-op.
+    """
     try:
         g = gm.graph
-        residual = 0
-        for node in g.nodes:
-            if node.op == "call_function" and node.target is _EFF_ATTN:
-                attn_bias = node.args[3] if len(node.args) > 3 else None
-                if isinstance(attn_bias, fx.Node):
-                    residual += 1
-        if residual:
-            logger.info(
-                "[OPT-4 mask_hoist] STUB: %d efficient_attention node(s) with explicit "
-                "attn_bias remain — OPT-2 Flash selection may not have taken; CSE not "
-                "applied (low-confidence, sub-threshold) [aten IR]",
-                residual,
+        cancelled = 0
+
+        for node in list(g.nodes):
+            if not (node.op == "call_function" and node.target is _CONVERT):
+                continue
+            if len(node.args) < 2:
+                continue
+            inner = node.args[0]
+            outer_dtype = node.args[1]
+            if not (isinstance(inner, fx.Node)
+                    and inner.op == "call_function"
+                    and inner.target is _CONVERT):
+                continue
+            if len(inner.args) < 2:
+                continue
+            inner_src = inner.args[0]
+            if not isinstance(inner_src, fx.Node):
+                continue
+
+            # Cancel only true round-trips: convert(convert(src, E), D) where the
+            # original src dtype is exactly D, so the pair is an identity.
+            src_dtype = _node_dtype(inner_src)
+            if src_dtype is None or src_dtype is not outer_dtype:
+                continue
+
+            node.replace_all_uses_with(inner_src)
+            g.erase_node(node)
+            # Drop the now-dead inner cast if it has no remaining users.
+            if not inner.users:
+                g.erase_node(inner)
+            cancelled += 1
+
+        if cancelled == 0:
+            logger.warning(
+                "[OPT-4 cancel_casts] No redundant convert_element_type round-trips "
+                "found — nothing to cancel (OPT-1 may not have inserted per-node casts)"
             )
-        else:
-            logger.info(
-                "[OPT-4 mask_hoist] STUB: no explicit attn_bias mask producers found "
-                "(subsumed by OPT-2 FlashAttention is_causal=True) — no-op [aten IR]"
-            )
-    except Exception as e:
-        logger.warning("[OPT-4 mask_hoist] Stub detection failed: %s", e)
+            return gm
+
+        g.eliminate_dead_code()
+        g.lint()
+        gm.recompile()
+        logger.info(
+            "[OPT-4 cancel_casts] Cancelled %d redundant fp32<->bf16 round-trip(s) "
+            "[aten IR]",
+            cancelled,
+        )
+    except Exception as e:  # noqa: BLE001 — medium confidence: degrade gracefully
+        logger.warning("[OPT-4 cancel_casts] Failed: %s", e)
     return gm
 
 
-# ---------------------------------------------------------------------------
-# OPT-3 — Weight freezing + autotune config. ir_level=inductor_config. medium.
-#
-# Returns a dict merged into compile_fx's config_patches (scoped to this compilation
-# unit — no process-global mutation). Inductor treats requires_grad=False parameters
-# (eval mode) as compile-time constants: constant-folds, pre-packs the 48 frozen GEMM
-# weights into the BF16 Tensor Core layout, drops per-call guards, and autotunes GEMM
-# tiling. Requires model.eval() (set in get_model_and_input()).
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
+# LEVEL 3 (inductor_config) pass — OPT-3: Inductor freezing
+# ===========================================================================
 def _cfg_freezing() -> dict:
-    """OPT-3: Return Inductor config patches for weight freezing and max_autotune."""
-    try:
-        patches = {
-            "freezing": True,
-            "max_autotune": True,
-            "max_autotune_gemm_backends": "ATEN,TRITON",
-        }
-        logger.info(
-            "[OPT-3 freezing] Inductor config_patches: freezing=True, max_autotune=True, "
-            "max_autotune_gemm_backends=ATEN,TRITON [inductor_config level]"
-        )
-        return patches
-    except Exception as e:
-        logger.warning("[OPT-3 freezing] Config patch failed: %s", e)
-        return {}
+    """OPT-3 (inductor_config, medium): enable Inductor freezing.
+
+    For this eval / no_grad inference graph, freezing treats the projection
+    weights, biases and LayerNorm affine parameters as compile-time constants,
+    constant-folds them, and pre-transposes / pre-packs the weight constants into
+    the tensor-core-friendly layout so cuBLASLt/CUTLASS can select a fused-epilogue
+    HGEMM — removing standalone memory-bound bias/GELU Triton kernels (the addmm_0
+    family). Returned as scoped config_patches merged into THIS compile_fx call only
+    (no global torch._inductor.config mutation). Satisfied-by-level after OPT-1, so
+    the frozen weight constant is packed along the bf16 path.
+    """
+    logger.info(
+        "[OPT-3 freezing] Inductor config_patches: freezing=True "
+        "(weight pre-pack + epilogue fusion) [inductor_config level]"
+    )
+    return {"freezing": True}
 
 
-# ---------------------------------------------------------------------------
-# Pass registry — routed by ir_level
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
+# Pass registry — routed by ir_level. Within a level, registry order is
+# application order: at the aten level OPT-1 precedes OPT-4 (a within-level edge).
+# ===========================================================================
 PASS_REGISTRY = [
-    # Functional-level passes (run before compile_fx, on the Dynamo graph)
-    {"id": "OPT-2", "level": "functional", "fn": _fpass_enable_flash_sdpa},
-    # Aten-level passes (run inside _aten_inner_compile, post-AOTAutograd)
-    {"id": "OPT-1", "level": "aten",       "fn": _apass_bf16_promotion},
-    {"id": "OPT-4", "level": "aten",       "fn": _apass_mask_hoist_stub},
-    # Inductor config patches (merged into compile_fx config_patches)
+    # LEVEL 1 — functional (run before compile_fx, on the Dynamo graph)
+    {"id": "OPT-2", "level": "functional",      "fn": _fpass_canonicalize_sdpa, "reads_weights": False},
+    # LEVEL 2 — aten (run inside _aten_inner_compile, post-AOTAutograd)
+    {"id": "OPT-1", "level": "aten",            "fn": _apass_bf16_promotion,    "reads_weights": False},
+    {"id": "OPT-4", "level": "aten",            "fn": _apass_cancel_casts,      "reads_weights": False},
+    # LEVEL 3 — inductor_config (merged into compile_fx config_patches)
     {"id": "OPT-3", "level": "inductor_config", "fn": _cfg_freezing},
 ]
 
-_FUNCTIONAL_PASSES = [p for p in PASS_REGISTRY if p["level"] == "functional"]
-_ATEN_PASSES = [p for p in PASS_REGISTRY if p["level"] == "aten"]
-_CONFIG_PASSES = [p for p in PASS_REGISTRY if p["level"] == "inductor_config"]
+
+def _passes(level: str) -> list:
+    return [p for p in PASS_REGISTRY if p["level"] == level]
 
 
-# ---------------------------------------------------------------------------
-# LEVEL 1 — Functional passes (Dynamo graph, pre-AOTAutograd)
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
+# Funnel stage 1 — functional passes (Dynamo graph, pre-AOTAutograd)
+# ===========================================================================
 def _run_functional_passes(gm: fx.GraphModule) -> fx.GraphModule:
-    """Run all functional-level passes on the Dynamo graph before compile_fx.
-
-    At this level F.scaled_dot_product_attention is a single high-level node and weight
-    parameters are clean placeholder nodes. AOTAutograd recomputes meta when it traces
-    the rewritten graph; no FakeTensorProp needed at this level."""
-    for p in _FUNCTIONAL_PASSES:
+    """LEVEL 1 — rewrite the Dynamo (functional) graph BEFORE compile_fx owns it.
+    Here F.scaled_dot_product_attention is a single high-level node and weight
+    parameters are clean placeholder nodes. AOTAutograd recomputes meta when it
+    traces this graph, so no FakeTensorProp is needed at this level."""
+    for p in _passes("functional"):
         try:
             gm = p["fn"](gm)
-        except Exception as e:
-            logger.warning("[%s] functional pass error: %s", p["id"], e)
+        except Exception as e:  # noqa: BLE001 — degrade gracefully
+            logger.warning("[%s] functional pass no-op: %s", p["id"], e)
     return gm
 
 
-# ---------------------------------------------------------------------------
-# LEVEL 3 — Inductor config patches
-# ---------------------------------------------------------------------------
-
-def _build_config_patches() -> dict:
-    """Collect and merge all inductor_config-level patches. Scoped to this compile_fx
-    call only — no global Inductor config mutation."""
-    patches: dict = {}
-    for p in _CONFIG_PASSES:
-        try:
-            result = p["fn"]()
-            if result:
-                patches.update(result)
-        except Exception as e:
-            logger.warning("[%s] config pass error: %s", p["id"], e)
-    return patches
-
-
-# ---------------------------------------------------------------------------
-# LEVEL 2 — Aten-level passes (inside compile_fx inner_compile hook)
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
+# Funnel stage 2 — aten inner-compile hook (post-AOTAutograd, Aten IR)
+# ===========================================================================
 def _repropagate_meta(gm: fx.GraphModule, example_inputs) -> None:
-    """Re-run FakeTensorProp after a structural graph rewrite so inserted nodes
-    (e.g. new convert_element_type) get meta['val'] before compile_fx_inner runs."""
+    """Re-run FakeTensorProp so nodes inserted by an aten pass get meta['val']
+    before compile_fx_inner runs. Best-effort: a failure here must never break
+    compilation (the down-stream lowering can re-derive meta in most cases)."""
     try:
+        from torch._subclasses.fake_tensor import FakeTensorMode
         from torch.fx.passes.fake_tensor_prop import FakeTensorProp
-        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-        fake_inputs = []
+
         fake_mode = None
-        for ph, ex in zip(placeholders, example_inputs):
-            val = ph.meta.get("val", ex)
-            fake_inputs.append(val)
-            fm = getattr(val, "fake_mode", None)
+        for inp in example_inputs:
+            fm = getattr(inp, "fake_mode", None)
             if fm is not None:
                 fake_mode = fm
-        if fake_mode is not None:
-            with fake_mode:
-                FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(
-                    *fake_inputs
-                )
-        else:
-            FakeTensorProp(gm).propagate_dont_convert_inputs(*fake_inputs)
-    except Exception as e:
-        logger.warning("[gpt2_opt] meta re-propagation skipped: %s", e)
+                break
+        if fake_mode is None:
+            fake_mode = FakeTensorMode(allow_non_fake_inputs=True)
+        with fake_mode:
+            FakeTensorProp(gm, mode=fake_mode).propagate(*example_inputs)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[_repropagate_meta] skipped: %s", e)
 
 
 def _aten_inner_compile(
-    gm: fx.GraphModule, example_inputs, *, real_inputs=None, **kwargs
+    gm: fx.GraphModule,
+    example_inputs,
+    *,
+    real_inputs=None,
+    **kwargs,
 ) -> Callable:
-    """LEVEL 2 — Inductor inner_compile hook.
+    """LEVEL 2 — Inductor's inner_compile hook. compile_fx calls this with the
+    fully decomposed Aten IR graph (after AOTAutograd). Run aten-level passes
+    (OPT-1 bf16 promotion, then OPT-4 cast cancellation), re-propagating meta after
+    each structural rewrite, then delegate to compile_fx_inner (Aten -> Triton).
 
-    compile_fx calls this with the fully decomposed Aten IR graph (post-AOTAutograd).
-    Run aten-level passes (OPT-1 BF16 promotion, OPT-4 mask-hoist stub), repropagating
-    meta after each structural rewrite, then delegate to compile_fx_inner (Aten -> Triton).
+    example_inputs may be FakeTensors (Inductor traces under FakeTensorMode), so
+    weight-VALUE-reading passes would use the threaded real_inputs. Both aten passes
+    here are op-target passes and do not read weight values, but the ph_to_tensor
+    lookup is built for interface parity. **kwargs is forwarded verbatim to
+    compile_fx_inner for forward-compatibility.
+    """
+    weight_source = real_inputs if real_inputs is not None else example_inputs
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    ph_to_tensor = {ph: t for ph, t in zip(placeholders, weight_source)}  # noqa: F841
 
-    ``example_inputs`` may be FakeTensors under FakeTensorMode. ``real_inputs`` is threaded
-    from the backend for any pass that needs actual weight values (none here — OPT-1 is an
-    op-target pass). ``**kwargs`` is forwarded verbatim for forward-compatibility."""
-    for p in _ATEN_PASSES:
+    for p in _passes("aten"):
         try:
-            gm = p["fn"](gm)
+            if p.get("reads_weights"):
+                gm = p["fn"](gm, ph_to_tensor)
+            else:
+                gm = p["fn"](gm)
             _repropagate_meta(gm, example_inputs)
-        except Exception as e:
-            logger.warning("[%s] aten pass error: %s", p["id"], e)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] aten pass no-op: %s", p["id"], e)
+
     return compile_fx_inner(gm, example_inputs, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Three-stage funnel: functional -> (AOTAutograd decomposition) -> aten -> config
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Funnel stage 3 — inductor config patches (scoped, no global mutation)
+# ===========================================================================
+def _config_patches() -> dict:
+    """LEVEL 3 — scoped Inductor config_patches merged into THIS compile_fx call
+    only. Each inductor_config pass returns a dict to merge; no global mutation."""
+    patches: dict = {}
+    for p in _passes("inductor_config"):
+        try:
+            patches.update(p["fn"]() or {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] config pass skipped: %s", p["id"], e)
+    return patches
+
 
 def _compile_unit(gm: fx.GraphModule, example_inputs) -> Callable:
-    """Fixed three-stage funnel for one (sub)graph.
-
-    Stage 1: functional passes on the Dynamo graph (OPT-2 Flash SDPA flag).
-    Stage 2: compile_fx owns AOTAutograd + decomp; _aten_inner_compile runs OPT-1 BF16
-             promotion and OPT-4 mask-hoist stub on the decomposed Aten IR.
-    Stage 3: OPT-3 freezing/autotune config_patches scoped to this compile_fx call."""
+    """The fixed three-stage funnel. compile_fx owns AOTAutograd, the decomp table,
+    the boxed calling convention and the partitioner — we only run functional passes
+    ahead of it, swap the leaf compiler, and pass scoped config_patches. No second
+    AOTAutograd (which raises on torch 2.11)."""
     gm = _run_functional_passes(gm)
     inner = functools.partial(_aten_inner_compile, real_inputs=list(example_inputs))
-    config_patches = _build_config_patches()
     return compile_fx(
-        gm, example_inputs, inner_compile=inner, config_patches=config_patches
+        gm,
+        example_inputs,
+        inner_compile=inner,
+        config_patches=_config_patches(),
     )
 
 
-# ---------------------------------------------------------------------------
-# Partition input capture (dedup path)
-# ---------------------------------------------------------------------------
-
-def _capture_partition_inputs(
-    split_gm: fx.GraphModule, example_inputs: list
-) -> dict:
-    """Run split_gm once under no_grad to capture per-partition input tensors."""
+# ===========================================================================
+# Dedup-input capture utility
+# ===========================================================================
+def _capture_partition_inputs(split_gm: fx.GraphModule, example_inputs: list) -> dict:
+    """Run split_gm once under no_grad to capture per-partition input tensors, so
+    compile_fx can lower each unique representative with correct example inputs."""
     partition_inputs: dict = {}
     hooks = []
     for name, submod in split_gm.named_children():
@@ -452,26 +540,22 @@ def _capture_partition_inputs(
     return partition_inputs
 
 
-# ---------------------------------------------------------------------------
-# Backend: gpt2_opt
-# ---------------------------------------------------------------------------
-
+# ===========================================================================
+# The backend
+# ===========================================================================
 @register_backend
 def gpt2_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     """Custom torch.compile() backend for GPT-2 small.
 
-    Implements the optimizations from optimizations.json via the three-stage funnel
-    (functional -> aten -> inductor_config):
+    Three-stage funnel (functional -> aten -> inductor_config):
+      OPT-2 (functional):        canonicalize SDPA to is_causal=True
+      OPT-1 (aten):              bf16 promotion of mm/addmm operands
+      OPT-4 (aten, after OPT-1): cancel redundant fp32<->bf16 round-trips
+      OPT-3 (inductor_config):   freezing=True (weight pre-pack + epilogue fusion)
 
-      OPT-2 (functional): Flash SDPA flags — enable_flash_sdp(True), disable Sm80 path
-      OPT-1 (aten):       BF16 promotion   — aten.mm + aten.addmm operands BF16, output FP32
-      OPT-4 (aten stub):  Causal-mask CSE  — detect-only; subsumed by OPT-2
-      OPT-3 (config):     Freezing         — freezing=True, max_autotune=True
-
-    Dedup-aware: GPT-2 has 12 structurally identical transformer blocks.
-    UniqueSubgraphRegistry detects the repeated partitions, compiles one representative
-    per equivalence class through the funnel, and shares the compiled callable with the
-    duplicates (~12x compile/ncu reuse). If no repeats are found, the flat path is taken.
+    Dedup-aware: GPT-2's 12 transformer blocks are structurally identical, so
+    UniqueSubgraphRegistry returns a non-empty equivalence map and the dedup path
+    compiles one representative block, sharing the compiled callable across all 12.
     """
     logger.info(
         "gpt2_opt backend: starting "
@@ -482,12 +566,13 @@ def gpt2_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     equiv_map = registry.build_partition_equivalence_map()
 
     if not equiv_map:
-        # No repeated layers — flat compile preserves cross-layer Inductor fusion.
+        # No repeated layers detected — flat compile preserves cross-layer fusion.
         logger.info("gpt2_opt: no repeated layers, flat compile path")
         return _compile_unit(gm, example_inputs)
 
     logger.info(
-        "gpt2_opt: %d duplicate partition(s), dedup compile path", len(equiv_map)
+        "gpt2_opt: %d duplicate partition(s), dedup compile path",
+        len(equiv_map),
     )
 
     # Compile each unique representative through the same funnel; share the compiled
@@ -506,19 +591,15 @@ def gpt2_opt(gm: fx.GraphModule, example_inputs) -> Callable:
     return lambda *args: registry.split(*args)
 
 
-# ---------------------------------------------------------------------------
-# Workload interface — unchanged from gpt2.py so the capture pipeline can re-profile.
-# ---------------------------------------------------------------------------
-DEVICE = "cuda"
-BATCH = 4
-SEQ_LEN = 128
-MODEL_ID = "gpt2"
+# ===========================================================================
+# Workload definition + interface (mirrors gpt2.py so the capture pipeline can
+# re-profile the optimized variant)
+# ===========================================================================
+class GPT2Wrapper(nn.Module):
+    """Thin wrapper so model(input_ids) returns the last hidden state tensor.
+    Unchanged from the baseline gpt2.py interface."""
 
-
-class GPT2Wrapper(torch.nn.Module):
-    """Thin wrapper so model(input_ids) returns the last hidden state tensor."""
-
-    def __init__(self, hf_model: torch.nn.Module):
+    def __init__(self, hf_model: nn.Module):
         super().__init__()
         self.model = hf_model
 
@@ -527,18 +608,18 @@ class GPT2Wrapper(torch.nn.Module):
 
 
 def get_model_and_input() -> tuple:
-    """Return (uncompiled model on CUDA, input_ids tensor on CUDA).
+    """Workload interface — return (raw uncompiled model, input_ids) on CUDA, eval.
 
-    Model dtype: FP32 (matches optimizations.json analysis.dtype = "float32").
-    OPT-1 BF16 promotion is applied selectively inside the graph (GEMM operands only),
-    not by casting the whole module, so LayerNorm/softmax stay FP32. OPT-2/3/4 are graph
-    or config level passes. No non-graph eager-side optimizations are needed: GPT-2 has
-    no conv layers requiring channels_last, and the GEMM M/N/K dims (M=512, K/N in
-    {768,2304,3072}) are multiples of 16 so no batch padding is required.
+    Mirrors the baseline gpt2.py exactly: the model stays fp32 (matches
+    optimizations.json analysis.dtype). All four optimizations are graph- or
+    config-level and applied inside the gpt2_opt backend, NOT here — there are no
+    non-graph (whole-module dtype / memory_format / batch-shape) optimizations for
+    this workload: the 512x768 problem (512 = 4*128) already tiles cleanly so
+    batch-padding offers no benefit, and 2D activations make channels_last
+    irrelevant. eval() is set because OPT-3 freezing is sound only under inference.
 
-    The model is returned with .eval() set; OPT-3 freezing requires eval mode.
-    Input_ids stays int64 (embedding indices); the embedding output is what feeds the
-    BF16-promoted GEMMs.
+    Downloads GPT-2 weights from HuggingFace on first call (~500 MB); subsequent
+    calls use the local cache.
     """
     assert torch.cuda.is_available(), "CUDA required"
 
@@ -558,4 +639,4 @@ if __name__ == "__main__":
     compiled = torch.compile(model, backend="gpt2_opt")
     with torch.no_grad():
         y = compiled(input_ids)
-    print(f"Output shape: {y.shape} dtype: {y.dtype}")  # expect (4, 128, 768) float32
+    print("output shape:", tuple(y.shape), "dtype:", y.dtype)  # expect (4, 128, 768)

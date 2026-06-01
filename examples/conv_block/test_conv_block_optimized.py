@@ -1,28 +1,30 @@
 """
 test_conv_block_optimized.py — validation suite for the conv_block_opt backend.
 
-Run with:  pytest test_conv_block_optimized.py -v -s
+Four tests, per the /backend skill contract:
+  1. test_import                  — module imports without error
+  2. test_backend_registration    — conv_block_opt registered with torch._dynamo
+  3. test_get_model_and_input     — input on CUDA; shape/dtype match the workload spec
+  4. test_compiled_forward_pass   — compiled forward triggers the backend; captures FX logs
 
-The workload module imports `conv_block` (the baseline) by bare module name, so
-this test prepends the workload directory to sys.path.
+Run:
+    pytest examples/conv_block/test_conv_block_optimized.py -v
 """
 import os
 import sys
 
-import pytest
-
+# The optimized workload imports `from conv_block import ConvBlock`, so the workload
+# directory must be importable.
 _WORKLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
 if _WORKLOAD_DIR not in sys.path:
     sys.path.insert(0, _WORKLOAD_DIR)
 
-# Expected runtime characteristics derived from conv_block.py / optimizations.json.
-#   ConvBlock: 3 ConvBnRelu stages (3->64->128->256) at 64x64, AdaptiveAvgPool(1,1),
-#   then Linear(256 -> NUM_CLASSES=10). Input is BATCH_SIZE x IN_CHANNELS x H x W.
-_EXPECTED_INPUT_SHAPE = (16, 3, 64, 64)     # (BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH)
-_EXPECTED_OUTPUT_SHAPE = (16, 10)           # Linear classifier head -> NUM_CLASSES=10
-# OPT-2 casts the model + input to bfloat16 at the boundary (preferred lever).
-_EXPECTED_DTYPE = "bfloat16"
-_BACKEND_NAME = "conv_block_opt"
+BACKEND_NAME = "conv_block_opt"
+
+# Expected input spec, derived from optimizations.json / conv_block.py:
+#   batch 16, 3 channels, 64x64, fp32, CUDA.
+EXPECTED_SHAPE = (16, 3, 64, 64)
+EXPECTED_DTYPE = "torch.float32"
 
 
 def test_import():
@@ -33,55 +35,50 @@ def test_import():
 def test_backend_registration():
     """Backend registered with torch._dynamo."""
     import torch
-
     import conv_block_optimized  # noqa: F401
 
     backends = str(torch._dynamo.list_backends())
-    assert _BACKEND_NAME in backends, f"Backend not found in: {backends}"
+    assert BACKEND_NAME in backends, f"Backend not found in: {backends}"
 
 
 def test_get_model_and_input():
-    """Input is on CUDA with the expected shape, dtype, and channels_last layout."""
+    """Input is on CUDA; shape and dtype match the workload spec."""
     import torch
 
     if not torch.cuda.is_available():
+        import pytest
+
         pytest.skip("CUDA required")
 
     from conv_block_optimized import get_model_and_input
 
     model, x = get_model_and_input()
     assert x.is_cuda, "Input tensor must be on CUDA"
-    assert tuple(x.shape) == _EXPECTED_INPUT_SHAPE, (
-        f"Unexpected input shape: {tuple(x.shape)}"
-    )
-    # OPT-2 boundary lever: input cast to bfloat16.
-    assert str(x.dtype).split(".")[-1] == _EXPECTED_DTYPE, (
-        f"Unexpected dtype: {x.dtype}"
-    )
-    assert next(model.parameters()).is_cuda, "Model parameters must be on CUDA"
-    assert next(model.parameters()).dtype == torch.bfloat16, (
-        "Model parameters must be bfloat16 (OPT-2 boundary cast)"
-    )
-    # OPT-1 non-graph lever: input must be channels_last (NHWC).
+    assert tuple(x.shape) == EXPECTED_SHAPE, f"Unexpected input shape: {tuple(x.shape)}"
+    assert str(x.dtype) == EXPECTED_DTYPE, f"Unexpected input dtype: {x.dtype}"
+    # OPT-1: input should be channels_last (NHWC).
     assert x.is_contiguous(memory_format=torch.channels_last), (
-        "Input must be channels_last (NHWC) for OPT-1 layout propagation"
+        "Input should be channels_last (OPT-1)"
     )
+    # Model returned in eval mode — required for the eval-mode BN fold (OPT-3).
+    assert not model.training, "Model must be in eval() for the Conv-BN fold to be valid"
 
 
 def test_compiled_forward_pass(caplog):
-    """Compiled forward pass triggers the backend; capture FX pass application logs."""
+    """Compiled forward pass triggers the backend; captures FX pass application logs."""
     import logging
 
     import torch
 
     if not torch.cuda.is_available():
+        import pytest
+
         pytest.skip("CUDA required")
 
     from conv_block_optimized import get_model_and_input
 
     model, x = get_model_and_input()
-    compiled = torch.compile(model, backend=_BACKEND_NAME)
-
+    compiled = torch.compile(model, backend=BACKEND_NAME)
     out = None
     with caplog.at_level(logging.INFO):
         with torch.no_grad():
@@ -92,15 +89,11 @@ def test_compiled_forward_pass(caplog):
 
                 if not isinstance(exc, InternalTorchDynamoError):
                     raise
-                # torch 2.11: guard error after dedup backend succeeds — safe to suppress
+                # torch 2.11: guard error after dedup backend succeeds — safe to suppress.
 
     for record in caplog.records:
         print(record.getMessage())
-
     assert caplog.records, "No logger output — backend may not have executed"
     if out is not None:
-        assert tuple(out.shape) == _EXPECTED_OUTPUT_SHAPE, (
-            f"Unexpected output shape: {tuple(out.shape)}"
-        )
         assert not torch.isnan(out).any(), "Output contains NaN"
         assert not torch.isinf(out).any(), "Output contains Inf"

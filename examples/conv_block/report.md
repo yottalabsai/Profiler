@@ -1,202 +1,186 @@
-# ConvBlock — GPU Optimization Report
+# Optimization Report — conv_block
 
-**This optimization achieved a 1.49× total speedup on ConvBlock (B=16, RTX PRO 6000 Blackwell Server Edition)** by eliminating cuDNN NCHW↔NHWC layout transposes (channels_last) and routing the convolutions and the DRAM-bound BatchNorm/ReLU/pool epilogue from the TF32 path onto the BF16 tensor-core path.
-
----
+This optimization achieved **1.63× total speedup** on conv_block (B=16, RTX PRO 6000 Blackwell), driven by moving the convolution GEMMs onto bf16 Tensor Cores and eliminating the cuDNN NCHW↔NHWC convert kernels and the standalone BatchNorm kernels; a standout per-operator win — the 64→128 conv dropping from ~104 µs to ~41 µs on the bf16 tensor-op path (Section 7) — is partly reabsorbed by six newly-introduced Triton dtype-convert/elementwise kernels (6.66 µs) that the bf16 promotion adds on the optimized side.
 
 ## 1. Hardware Context
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| Architecture | Blackwell (sm_100-class) |
-| PyTorch | 2.11.0+cu128 |
-| Compile mode (baseline) | `dedup-inductor` (built-in dedup backend) |
-| Compile mode (optimized) | `conv_block_opt` (custom registered backend) |
-| Batch size | 16 (input `[16, 3, 64, 64]`) |
-| Iterations | 2 measured forward passes per capture (ncu replay — relative timing only) |
+| GPU model | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs) |
+| Architecture family | Blackwell (GB202) |
+| PyTorch version | 2.11.0+cu128 |
+| Compile mode (baseline) | inductor |
+| Compile mode (optimized) | conv_block_opt (custom backend) |
+| Batch size | 16 (3×64×64 input, eval mode) |
+| Iteration count | warmup 2 / measure 2 (nsys capture — durations measured at locked GPU clocks; relative comparison) |
+| Locked clocks | 1837 MHz graphics / 12481 MHz memory (both captures) |
 
-All durations below are from ncu application-mode replay and are inflated ~2–5× relative to real wall-clock execution. **Every figure is a relative comparison within this profile, never an absolute latency.**
-
----
+**Timing source.** Per-operator **durations** are nsys-derived GPU kernel times from the capture phase, taken at locked GPU clocks (1837/12481 MHz) identical across both captures — so the baseline-vs-optimized comparison is fair and reproducible. The ncu replay phase contributes only the hardware **counters** (Tensor-core %, SM/DRAM throughput, occupancy), collected at its own base-clock lock. No clock-lock warning was present, so durations are treated as reproducible.
 
 ## 2. Operator Summary (baseline)
 
-Operator-class durations summed over the 2 measured iterations (the `layer::unique::prologue` dedup representative is excluded — it re-attributes the same physical kernels and would double-count). Total attributed kernel time = **453,535 ns**.
+Total attributed time: 529,757 ns across 10 operators, 0 unattributed.
 
 | Operator | Time (%) | Duration (ns) | Kernels | Bottleneck Class |
 |---|---|---|---|---|
-| `cudnn_convolution` 64→128 (`[16,64,64,64]`) | 38.1% | 172,864 | 2× (cutlass tf32 + 2 transposes ea.) | Compute / tensor-core (tc ~59%) |
-| `cudnn_convolution` 128→256 (`[16,128,32,32]`) | 33.5% | 151,712 | 2× (cutlass tf32 + 2 transposes ea.) | Compute / tensor-core (tc ~72%) |
-| `_native_batch_norm…relu` (BN+ReLU+MaxPool+mean, fused) | 15.5% | 70,496 | 14 | Memory-bound (DRAM 62–84%) |
-| `cudnn_convolution` 3→64 stage-1 (+input pack) | 11.5% | 52,223 | sm80_xmma + triton pack | Small-channel (tc ~16%) |
-| `addmm` linear head (256→10) | 1.4% | 6,240 | 2 (cuBLAS small-N GEMM) | Latency-bound (tiny GEMM) |
-
-The two large convolutions consume ~72% of the budget. They are *already* on the TF32 NHWC tensor-op path (tensor cores 59–72% active) — so the recoverable waste is **not** idle tensor cores, but (a) the layout-transpose churn wrapping every conv and (b) TF32→BF16 throughput headroom plus the DRAM-bound BN epilogue.
-
----
+| aten::cudnn_convolution (op_id=12, 64→128) | 19.6 | 103,872 | 3 | Compute / Tensor-core bound (tc 66%) |
+| aten::cudnn_convolution (op_id=33, 64→128, iter2) | 19.5 | 103,040 | 3 | Compute / Tensor-core bound (tc 66%) |
+| aten::cudnn_convolution (op_id=18, 128→256) | 17.6 | 93,471 | 3 | Compute / Tensor-core bound (tc 73%) |
+| aten::cudnn_convolution (op_id=39, 128→256, iter2) | 17.3 | 91,743 | 3 | Compute / Tensor-core bound (tc 73%) |
+| aten::_native_batch_norm_legit_no_training | 16.1 | 85,088 | 14 | Memory bound (DRAM ~86–90%, tc 0%) |
+| aten::cudnn_convolution (op_id=7, 3→64) | 3.4 | 18,272 | 3 | Mixed (convert kernels + tc 16% GEMM) |
+| aten::cudnn_convolution (op_id=28, 3→64, iter2) | 3.4 | 17,888 | 3 | Mixed (convert kernels + tc 16% GEMM) |
+| aten::convolution (NCHW→NHWC input prep) | 1.4 | 7,488 | 4 | Memory bound layout repack (tc 0%) |
+| aten::addmm (op_id=21, linear head) | 1.0 | 5,087 | 1 | Small GEMM (cuBLAS) |
+| aten::addmm (op_id=42, linear head, iter2) | 0.7 | 3,808 | 1 | Small GEMM (cuBLAS) |
 
 ## 3. Reading the Metrics
 
-Only the counters that drive this workload's bottlenecks:
-
-- **`smsp__pipe_tensor_cycles_active` / `tensor_core_active_pct`** — fraction of cycles the tensor-core MMA pipe is busy. The baseline big convs sit at 59–72% on the **TF32** path; that is not idle, so the lever is dtype throughput (BF16 ≈ 2× TF32 MMA rate on Blackwell), not "turn the tensor cores on." A value of `0.0` on the BN/ReLU/pool triton kernels is expected — they do no matrix math.
-- **`dram__throughput.avg.pct_of_peak`** — for the BN+ReLU+MaxPool+mean group this runs 62–84%, the signature of a memory-bound elementwise/reduction pass. BF16 halves the bytes moved, giving near-linear speedup on this slice.
-- **`achieved_occupancy`** — the big convs run at only ~8.3% occupancy (150 regs/thread + 73.7 KB smem/block in baseline). BF16's lower register footprint lifts this (to ~14.6% on the 64→128 conv), recovering latency-hiding headroom.
-- **`convertTensor_kernel` launches (duration only, no counters)** — these are pure NCHW↔NHWC transposes cuDNN inserts because the framework tensors were NCHW while the conv kernels are native NHWC. 12 launches, ~49,600 ns of zero-arithmetic work. Their *disappearance* in the optimized profile is the direct signal that channels_last applied.
-
-Note: `warp_cycles_per_instruction` is `null` for all operators — that counter is removed on Blackwell; `eligible_cycles_pct` is used as the latency-bound proxy instead.
-
----
+- **tensor_core_active_pct** — fraction of cycles the Tensor Cores were issuing. The four large baseline conv GEMMs sit at 66–73% (genuinely tensor-op bound), but they ran on the **TF32 s1688** single-precision path: full FP32 byte width at half-rate tensor ops. A value of **0.0 (not null)** on the BN/ReLU and input-prep kernels confirms those are pure SIMT memory passes with Tensor Cores idle — the signal that the math is elsewhere. A **null** value (the linear-head addmm and the bf16 convs whose dominant kernel ncu did not counter-sample) is expected for those small/cuBLAS kernels and is not a problem.
+- **memory_throughput_pct (DRAM % of peak)** — above ~80% means the kernel is DRAM-bound. The baseline BN/ReLU triton kernels hit 86–90%, the clearest "memory-bound, fold-me" signal in the profile.
+- **sm_throughput_pct** — compute-pipe utilization. High on the conv GEMMs (52–64%), low on the BN/convert kernels.
+- **achieved_occupancy** — low (~8%) on the cutlass conv kernels is expected for 230+ register tensor-op kernels; they are tensor-core bound, not occupancy-limited, so the lever is precision, not launch geometry.
 
 ## 4. Optimizations Applied
 
 | ID | Type | Target Operators | Hardware Evidence | Confidence | Status |
 |---|---|---|---|---|---|
-| OPT-1 | memory_layout (channels_last / NHWC) | all 6 `cudnn_convolution` ops | 12× `convertTensor_kernel` transposes, ~49,600 ns (10.9%), zero useful math | high | **APPLIED** (eager-side boundary cast; in-graph pass no-op as designed) |
-| OPT-2 | dtype_promotion (TF32 → BF16) | 4 large convs + BN/ReLU/pool/mean group | convs already TF32 tensor-op (tc 59–72%), occupancy 8.3%; BN group DRAM-bound 62–84% | medium | **APPLIED** (eager-side boundary cast; in-graph pass no-op as designed) |
-| OPT-3 | fusion (eval-mode conv-BN fold) | `_native_batch_norm_legit_no_training` | DRAM-bound BN epilogue, 15.5% | low | **NOT_APPLIED** (no foldable conv→BN pair found — Inductor already bakes the affine; graceful no-op) |
+| OPT-1 | memory_layout (channels_last / NHWC) | all 6 cudnn_convolution ops + input-prep triton | 12 `convertTensor_kernel` NCHW↔NHWC permutes + 4-kernel input repack = 55,391 ns of zero-math overhead | high | APPLIED |
+| OPT-2 | dtype_promotion (bf16) | the 4 large conv GEMMs (+ linear head) | GEMMs on TF32 s1688 path (tc 66–73%, sm 52–64%, DRAM 6–28%) — compute-bound, halve tensor-op cycles | medium | APPLIED |
+| OPT-3 | fusion (eval-mode Conv-BN fold) | aten::_native_batch_norm_legit_no_training (14 nodes → 3 folded) | standalone BN/ReLU triton kernels DRAM 86–90%, sm 23%, tc 0% — memory-bound parameter re-reads | high | APPLIED |
 
-OPT-1 and OPT-2 are implemented as a single combined boundary cast — `model.to(memory_format=channels_last).bfloat16()` and the matching input cast in `get_model_and_input()` — with the FX-level passes retained as documented fallbacks that detect the already-converted state and degrade to a logged no-op. This is the proposal's preferred application path (set layout/dtype once at the graph boundary rather than re-cloning/re-casting per conv).
-
----
+All three passes report `status == APPLIED` in `validation_report.json` (syntax/import/registration/test_suite all pass; overall `READY_FOR_PROFILING`). The `OPT-3 fallback (aten)` entry is `NOT_APPLIED` by design — the functional-IR fold path already handled the fold, so the aten fallback gracefully no-ops.
 
 ## 5. Implementation Notes
 
-# conv_block_opt — Implementation Notes
+# Implementation Notes — conv_block_opt
 
-Custom `torch.compile()` backend for `ConvBlock` (VGG-style Conv2d → BatchNorm2d →
-ReLU pipeline + Linear head). Registered backend name: **`conv_block_opt`**.
+Custom `torch.compile()` backend for the ConvBlock workload (`examples/conv_block/conv_block.py`):
+a VGG-style CNN of three `Conv2d-BN-ReLU` blocks (3->64, 64->128, 128->256) with
+MaxPool/AdaptiveAvgPool and a Linear classifier head, eval mode, batch=16, 3x64x64 input,
+fp32 inference on an RTX PRO 6000 Blackwell (torch 2.11.0+cu128, CUDA 12.8). Backend name
+registered via `@register_backend`: **`conv_block_opt`**.
 
-The backend uses the fixed three-stage funnel (Rule 9):
-`_run_functional_passes(gm)` → `compile_fx(inner_compile=_aten_inner_compile,
-config_patches=...)`. `compile_fx` owns AOTAutograd, the decomposition table, the
-boxed calling convention, and the partitioner; the aten passes run at the
-`inner_compile` seam on the fully decomposed Aten IR graph. The weight-VALUE-reading
-conv-BN fold reads the genuine parameter tensors threaded as `real_inputs` (because
-`inner_compile`'s `example_inputs` may be FakeTensors), and `_repropagate_meta`
-repopulates `meta['val']` on inserted nodes after each structural rewrite.
-
-`compile_mode` is `dedup-inductor`; the backend is dedup-aware. ConvBlock's three
-ConvBnRelu stages have distinct channel counts (3→64, 64→128, 128→256), so
-`UniqueSubgraphRegistry` finds no repeated layers and the flat compile path is taken
-(preserving cross-stage Inductor fusion). The dedup branch is retained for structural
-reuse if the model grows repeated blocks.
+The backend is the canonical three-stage funnel
+`_run_functional_passes(gm) -> compile_fx(inner_compile=_aten_inner_compile, config_patches=_build_config_patches())`,
+invoked identically on the flat graph and on every dedup representative. ConvBlock's three
+stages have different channel counts (3->64, 64->128, 128->256), so they are **not**
+structurally identical — `UniqueSubgraphRegistry` returns an empty equivalence map and the
+backend takes the **flat compile path**. The dedup branch is preserved for models with
+repeated identical blocks.
 
 ## Backend Architecture
 
 | Pass | Level | Method | Reason |
 |---|---|---|---|
-| OPT-1 channels_last (NHWC) — eliminate cuDNN convertTensor NCHW↔NHWC transposes (12 launches, ~49,600 ns) around every conv | non-graph (primary) + `aten` (fallback) | `get_model_and_input()` (`model`/`x.to(memory_format=channels_last)`) primary; `_aten_inner_compile` (`_pass_channels_last_conv_inputs`) fallback | Layout is set once at the graph boundary (Rule 7) so cuDNN consumes NHWC framework tensors directly; the aten pass inserts `aten.clone(memory_format=channels_last)` only when the boundary layout was not set, and no-ops otherwise. Layout-only and numerically exact, so highest confidence. |
-| OPT-2 BF16 dtype promotion — route the four large convs from the TF32 tensor-op path to the ~2x-faster BF16 path (and recover the ~8.3% occupancy), halve the DRAM-bound BN+ReLU+pool epilogue bytes | non-graph (primary) + `aten` (fallback) | `get_model_and_input()` (`model.bfloat16()` / `x.bfloat16()`) primary; `_aten_inner_compile` (`_pass_bf16_conv_operands`) fallback | dtype is cleanest as a whole-module boundary cast combined with OPT-1 (Rule 7, proposal application order); the aten pass casts conv operands to bf16 and restores fp32 on the output, no-opping when the operands are already bf16. Medium confidence — changes numerics. |
-| OPT-3 conv-BatchNorm fold (eval mode) — bake the BN per-channel affine into the preceding conv weight/bias, removing the BN scale/shift arithmetic from the DRAM-bound epilogue | `aten` | `_aten_inner_compile` (`_pass_fold_conv_bn`, reads `real_inputs`) | The fold pattern (`aten.convolution` → `aten._native_batch_norm_legit_no_training`) is cleanly expressed only after AOTAutograd decomposition, and it needs the real running-stats/weight tensors. Low confidence — Inductor may already bake the eval-mode affine into the elementwise epilogue, in which case the explicit fold is a near no-op. |
-
-No `functional`-level passes (no QKV/SDPA fusion in this CNN) and no
-`inductor_config`-level passes; `_run_functional_passes` and `_config_patches` are
-uniform structural pass-throughs that keep the funnel shape consistent per Rule 9.
+| OPT-1 — channels_last (NHWC) memory format | non-graph | `get_model_and_input()` (whole-module `.to(memory_format=torch.channels_last)`) | cuDNN's TF32/bf16 tensor-op fprop path is native NHWC; in default NCHW it inserts a `convertTensor` permute before AND after every conv (12 zero-math repack kernels, ~10.5% of attributed time) plus a 4-kernel triton input-prep repack. A whole-module memory_format conversion lets NHWC propagate through the conv stack without per-op transpose nodes; an in-graph `aten.contiguous` per conv risks reintroducing stray repacks. Checks current state before converting. |
+| OPT-3 — eval-mode Conv-BN fold | functional | `_run_functional_passes` (`_fpass_fold_conv_bn`, reads weight values via placeholder->tensor lookup) | Folds each eval-mode BatchNorm into the preceding conv (`w'=w*gamma/sqrt(var+eps)`, `b'=beta-mu*gamma/sqrt(var+eps)`), exact and lossless. The JSON tags this `aten`, but at the aten seam it is a silent no-op: AOTAutograd decomposes eval BatchNorm BEFORE `inner_compile`, so no `aten._native_batch_norm_legit_no_training` node survives to match. On the Dynamo (functional) graph eval BN is still a single `F.batch_norm` node (training=False) fed directly by a conv — the only level where the fold matches. |
+| OPT-2 — bf16 dtype promotion (conv + linear head) | aten | `_aten_inner_compile` (`_apass_bf16_promotion`) | Keys on the decomposed `aten.convolution.default` / `aten.addmm.default` / `aten.mm.default` targets; casts activation+weight (and bias / both matrix operands) to bf16 and the result back to fp32, fp32 accumulate. Routes the four compute-bound `cutlass_tensorop_s1688fprop_optimized_tf32` conv GEMMs (~74% of attributed time, tensor-core active 66-73%) off the half-rate TF32 path onto the bf16 (s16816-class) tensor-core path, halving tensor-op cycles and the bytes the DRAM-bound BN/ReLU triton kernels stage. Op-target pass — no weight-value lookup needed. |
+| OPT-3-fallback — Conv-BN fold at the aten level | aten | `_aten_inner_compile` (`_apass_fold_conv_bn`) | Defensive fallback matching `aten._native_batch_norm_legit_no_training.default`. Expected no-op on torch 2.11 (eval BN is decomposed before the aten seam); logs a WARNING and returns the graph unchanged. Present so the fold still applies on a torch build that preserves the aten BN node. |
 
 ## Key Design Decisions
 
-**Why OPT-1 and OPT-2 are non-graph (boundary) primaries with aten fallbacks.**
-The proposal explicitly prefers a single combined boundary cast
-`model.to(memory_format=channels_last).bfloat16()` over per-conv FX surgery, because
-it sets layout and dtype once at the graph boundary rather than re-cloning/re-casting
-per convolution. Per Rule 7 these live in `get_model_and_input()` and are
-idempotent (checked before applying). The aten-level FX passes are retained as the
-documented fallbacks from the proposal's `fx_steps` so the optimization still applies
-if a future call site cannot set the boundary layout/dtype; both detect the
-already-converted state via `node.meta['val']` and degrade to a logged no-op, which
-is the expected path here.
+**Why OPT-3 (Conv-BN fold) runs at the functional level, not aten.** This is the critical
+routing decision and it contradicts the `ir_level: "aten"` tag in `optimizations.json`.
+`compile_fx` runs AOTAutograd (which decomposes eval-mode BatchNorm into primitive ops)
+*before* the `inner_compile` seam, so by the time `_aten_inner_compile` sees the graph there
+are zero `aten._native_batch_norm_legit_no_training` nodes left to match — the aten fold
+would be a silent no-op. On the Dynamo functional graph the backend receives *before*
+handing off to `compile_fx`, eval BN is still a single `torch.nn.functional.batch_norm` node
+(training=False) fed directly by a conv2d node, so the matcher runs there. The aten-level
+`OPT-3-fallback` stays registered defensively and gracefully no-ops on torch 2.11.
 
-**Why OPT-3 reads `real_inputs` rather than the `inner_compile` example inputs.**
-At the Aten IR level all BN/conv parameters are `placeholder` nodes; their actual
-tensors are positionally matched in graph order. Inductor traces `inner_compile`
-under FakeTensorMode, so the `example_inputs` there can be FakeTensors with no real
-data. The conv-BN fold needs genuine `running_mean`/`running_var`/`gamma`/`beta` and
-the conv weight to compute `scale = γ/√(var+ε)`, `W' = W·scale`,
-`bias' = β − γ·mean/√(var+ε)`, so the backend threads `real_inputs=list(example_inputs)`
-into `_aten_inner_compile` via `functools.partial` and builds the placeholder→tensor
-map from those.
+**How the OPT-2 -> OPT-3 prerequisite is honored across levels.** The proposal requires the
+folded conv weight/bias to exist at the bf16 runtime dtype (register-buffer-after-dtype
+rule), with OPT-2 listed as a prerequisite for OPT-3. Because OPT-3 is forced to the
+functional level (runs *before* the aten bf16 pass), within-level sequencing cannot satisfy
+this. Instead the fold computes `w'`/`b'` in fp32 for numerical accuracy, then registers the
+folded buffers as **bf16** — matching the dtype OPT-2's cast would have produced. OPT-2's
+cast in front of the conv then sees an already-bf16 weight and folds to a no-op. Folded 4D
+weights are kept channels_last to preserve OPT-1.
 
-**Why OPT-3 must run after OPT-2 (within the aten level).** The fold allocates new
-folded weight/bias buffers via `register_buffer`. A buffer registered before dtype
-promotion cannot be recast, so OPT-3 must observe the conv's final runtime dtype. The
-pass infers that dtype from the conv weight node's `meta['val']` (bf16 once OPT-2 or
-the boundary cast applied) and registers the folded buffers accordingly, adding a
-fp32 re-cast on the folded conv output when the conv runs bf16 so downstream
-consumers keep their expected dtype.
+**Why the functional fold wraps the conv with input/output casts.** The folded buffers are
+bf16 but the conv input (graph input or a prior fp32 activation) is fp32; a bf16-weight conv
+fed an fp32 input raises "Input type (float) and bias type (BFloat16) should be the same" at
+AOTAutograd trace time. The fold therefore inserts an fp32->bf16 cast before the rewritten
+conv and a bf16->fp32 cast after it, keeping the surrounding fp32 functional graph
+dtype-consistent. The adjacent casts OPT-2 later adds at the aten level become redundant and
+Inductor folds them away — the intended reconciled behavior.
 
-**Bias introduction in the fold.** The model's convs are constructed with
-`bias=False`, so the fold must introduce a `bias'` term and rewire a fresh *biased*
-`aten.convolution` (appending the folded-bias arg when the original conv had a `None`
-bias slot). The BN op returns a 3-tuple, so the rewrite redirects the live
-`getitem(bn, 0)` consumer to the new conv output and then erases the getitem, the BN
-node, any intermediate dtype cast, and the dead original conv, followed by
-`eliminate_dead_code()`.
+**Why `prims.convert_element_type` instead of `aten._to_copy`.** All backend-inserted casts
+(both the functional fold and the aten bf16 promotion) use
+`torch.ops.prims.convert_element_type.default`. On torch 2.11 a hand-inserted
+`aten._to_copy.default` trips Inductor's "both a fallback and a decomp for the same op"
+assertion because that op has both registrations. `convert_element_type` lowers cleanly to a
+Triton elementwise cast and its redundant adjacent pairs are folded by Inductor CSE/peephole.
 
-**Conv target set.** Both `aten.cudnn_convolution.default` (the form the profile
-attributes the bottleneck to) and `aten.convolution.default` are matched, since the
-exact decomposed op depends on the dtype/layout path Inductor selects after the
-boundary casts.
-
----
+**Why OPT-1 is non-graph and the flat compile path.** Whole-module memory_format is applied
+in `get_model_and_input()` so NHWC propagates through the conv stack without per-op transpose
+kernels (the funnel's non-graph rule for dtype/memory_format whole-module changes). ConvBlock
+has no repeated structure, so `UniqueSubgraphRegistry` returns an empty equivalence map and
+`_compile_unit` runs once on the flat graph — preserving cross-layer Inductor fusion. The
+backend lets `compile_fx` own AOTAutograd exactly once (functional passes before it, aten
+passes inside its `inner_compile` seam, config patches scoped to the call); it does not use
+`aot_autograd(fw_compiler=compile_fx)`, which raises `AssertionError: Expected tensors only`
+inside `copy_misaligned_inputs` on torch 2.11.
 
 ## 6. Before/After Results
 
-Both profiles were captured on the same GPU (RTX PRO 6000 Blackwell) ~16 minutes apart at batch size 16 — no cross-session caveat applies. Operators are matched by class and summed over the 2 measured iterations in each capture.
+Both profiles share batch size 16 and the same device (RTX PRO 6000 Blackwell). Captures are ~48 minutes apart (00:52 vs 01:41 UTC) — under the 6-hour cross-session threshold and on the same GPU, so no cross-session caveat applies; both were taken at identical locked clocks.
+
+**Step A — operator matching.** Operators are matched by `operator_name`. In the optimized graph the standalone BatchNorm operator is gone (folded by OPT-3) and its remaining ReLU/pool/mean elementwise work is fused by Inductor into the `aten::convolution` / `aten::cudnn_convolution` epilogues, so the baseline BN operator (85,088 ns) and baseline NCHW→NHWC input-prep (`aten::convolution`, 7,488 ns) collapse into the optimized `aten::convolution` fused family (67,007 ns). The six new `triton_poi_fused_convert_element_type_*` / `triton_poi_fused_7/8` kernels (6,656 ns) are dtype-cast and elementwise kernels that bf16 promotion introduced — they land in `unattributed_kernels` and are charged to the optimized total as new overhead.
 
 | Operator | Baseline (ns) | Optimized (ns) | Speedup |
 |---|---|---|---|
-| `cudnn_convolution` 64→128 | 172,864 | 80,480 | **2.15×** |
-| `cudnn_convolution` 128→256 | 151,712 | 99,328 | **1.53×** |
-| `_native_batch_norm…relu` (BN+ReLU+MaxPool+mean) | 70,496 | 58,400 | **1.21×** |
-| `cudnn_convolution` 3→64 stage-1 (+input pack) | 52,223 | 59,008 | 0.89× (regression) |
-| `addmm` linear head | 6,240 | 6,496 | 0.96× |
-| **Total attributed kernel time** | **453,535** | **303,712** | **1.49×** |
+| aten::cudnn_convolution 3→64 (op_id 7/6, iter1) | 18,272 | 31,039 | 0.59× |
+| aten::cudnn_convolution 3→64 (op_id 28/27, iter2) | 17,888 | 30,656 | 0.58× |
+| aten::cudnn_convolution 64→128 (op_id 12/10, iter1) | 103,872 | 40,704 | 2.55× |
+| aten::cudnn_convolution 64→128 (op_id 33/31, iter2) | 103,040 | 40,735 | 2.53× |
+| aten::cudnn_convolution 128→256 (op_id 18/15, iter1) | 93,471 | 50,623 | 1.85× |
+| aten::cudnn_convolution 128→256 (op_id 39/36, iter2) | 91,743 | 49,567 | 1.85× |
+| aten::_native_batch_norm + aten::convolution input-prep (fused into optimized conv family) | 92,576 | 67,007 | 1.38× |
+| aten::addmm linear head (op_id 21/20, iter1) | 5,087 | 3,456 | 1.47× |
+| aten::addmm linear head (op_id 42/41, iter2) | 3,808 | 3,136 | 1.21× |
+| aten::t (transpose, optimized only) | — | 2,112 | new overhead |
+| Triton convert/elementwise kernels (bf16-introduced, unattributed) | — | 6,656 | new overhead |
+| **Total** | **529,757** | **325,691** | **1.63×** |
 
-Kernel-count evidence: the optimized BN group dropped from 14 → 10 kernels (7 → 5 per iteration) and **all 12 `convertTensor_kernel` transposes vanished** (baseline had 2 per conv; optimized has none).
+**Step B — speedup attribution.** All three passes are `APPLIED`, the expected counters moved in the right direction, and the targeted operators improved (see Section 7), so the speedup is attributed to OPT-1+OPT-2+OPT-3 jointly. The small 3→64 first-stage convs are the one regression (0.58–0.59×): at this tiny channel count (3 input channels) the bf16 cutlass/convolve path is slower than the baseline TF32 sm80_xmma kernel, and the new bf16 cast kernels add fixed overhead that the tiny GEMM cannot amortize. This is more than offset by the 64→128 and 128→256 stages.
 
----
+**Step C — residual opportunity.** Re-ranking the optimized profile, the new top costs are the two 128→256 bf16 convs (~50 µs each, tc ~79%, now genuinely tensor-core bound — little headroom) and the fused `aten::convolution` Triton family (67 µs, DRAM ~64%, occupancy ~69% — memory-bound). The first-stage 3→64 convs are now a net regression and are the clearest residual target (force them back onto the TF32/fp32 path, or skip bf16 for ≤4-channel inputs). No unapplied FX proposals remain in `optimizations.json`.
 
 ## 7. What Drove Each Speedup
 
-**channels_last / NHWC (OPT-1, contributes across all convs):** Casting the model and input to `torch.channels_last` makes the framework tensors NHWC-contiguous, matching the layout the cuDNN tensor-op conv kernels already consume, so cuDNN no longer wraps each convolution in a transpose-in/transpose-out pair. Evidence: the 12 `void cudnn::…convertTensor_kernel<float,…>` launches (~49,600 ns, 10.9% of baseline) present in `profile.json` are entirely absent from `profile_optimized.json`.
+**channels_last / NHWC layout (OPT-1, applied across all convs):** marking conv activations and weights channels_last lets cuDNN consume NHWC natively, so the 12 `convertTensor_kernel<float,float,float,(cudnnKernelDataType_t)2>` permute kernels (55,391 ns of zero-math repacking in the baseline) and the 4-kernel NCHW→NHWC input-prep no longer appear in the optimized trace. Evidence: every `convertTensor_kernel` present in baseline conv ops is absent from the optimized profile; the input-prep `triton_poi_fused_convolution_0/1` is gone.
 
-**TF32 → BF16 dtype promotion (OPT-2, +2.15× on 64→128, +1.53× on 128→256, +1.21× on the BN group):** Casting to bfloat16 switches the conv compute kernel from `cutlass_tensorop_s1688fprop_optimized_tf32_…_nhwc_align4` to `cutlass_tensorop_bf16_s16816fprop_optimized_bf16_…_nhwc_align8`. Evidence: tensor-core activity rose (64→128: 59% → 71%; 128→256: 72% → 79%), occupancy on the 64→128 conv lifted from 8.3% → 14.6% as register pressure fell, and on the DRAM-bound BN+ReLU+pool+mean group BF16 halved the bytes moved, collapsing 7 kernels/iteration to 5 and cutting its time 1.21×.
+**bf16 dtype promotion (OPT-2, +2.55× on the 64→128 conv):** casting conv operands to bf16 routes the GEMMs off the TF32 `s1688` single-precision tensor-op path onto the Blackwell bf16 `cutlass_tensorop_bf16_s16816fprop` HGEMM path, roughly halving tensor-op cycles and staged bytes. Evidence: the dominant 64→128 kernel changed from a TF32 cutlass kernel at 103,872 ns to `cutlass_tensorop_bf16_s16816fprop_optimized_bf16_128x128` at 40,704 ns with tensor_core_active_pct rising to 70.67% (128→256 reaches 79.49%).
 
-OPT-3 (conv-BN fold) is **not** credited with any speedup — it reported `NOT_APPLIED` (no foldable conv→BN pair survived AOTAutograd, because Inductor already bakes the eval-mode affine into the fused epilogue). The 1.21× on the BN group is attributed to OPT-2's BF16 byte reduction, not to OPT-3.
-
----
+**eval-mode Conv-BN folding (OPT-3, folds 3 BN nodes; contributes to the 1.38× on the fused conv family):** folding each `_native_batch_norm_legit_no_training` into the preceding conv weight/bias deletes the standalone DRAM-bound BN/ReLU Triton kernels (baseline 85,088 ns at 86–90% DRAM, tc 0%) — the BatchNorm operator no longer exists in the optimized profile, and the surviving ReLU/pool/mean work is fused into the conv epilogue (optimized `aten::convolution` family, 67,007 ns). Evidence: the entire `aten::_native_batch_norm_legit_no_training` operator (14 kernels) is absent from the optimized trace; validation confirms "folded 3 eval-mode batch_norm node(s) into preceding conv at functional IR."
 
 ## 8. Remaining Opportunities
 
-| ID | Type | Target | Reason Not Applied | Projected Gain |
-|---|---|---|---|---|
-| OPT-3 | fusion (conv-BN fold) | `_native_batch_norm_legit_no_training` | No foldable conv→BN pair found — Inductor already bakes the eval-mode affine into the elementwise epilogue | ~4.4% (already realized by Inductor; explicit fold would be a near no-op) |
+All proposed optimizations (OPT-1, OPT-2, OPT-3) were applied. No further FX-level gains were identified in `optimizations.json`.
 
-**New second-order finding — stage-1 regression.** The 3→64 stage-1 convolution got *slower* under BF16 (52,223 → 59,008 ns, 0.89×). With only 3 input channels the tensor-core tiles are under-filled, and cuDNN selected `convolve_common_engine_float_NHWC<bf16>` (~29,500 ns/iter) instead of the baseline `sm80_xmma` implicit-GEMM path (~14,800 ns/iter). This is an intrinsic small-channel inefficiency, made worse by BF16 for this one layer. The clean remedy is to **exclude stage-1 from the BF16 cast** (keep the first conv in TF32/FP32 while the 64→128 and 128→256 convs stay BF16); recovering the ~6,800 ns regression would push the total speedup from 1.49× toward ~1.52×. The linear head (`addmm`, 0.96×) is negligible at 1.4% of the budget and not worth targeting.
+The one actionable residual is not a proposed pass but a refinement of OPT-2: the first-stage 3→64 convolutions regressed (~0.58×, ~+13 µs each per iteration) because bf16 is counterproductive at 3 input channels. Reverting those two ops to the baseline TF32/fp32 path would recover roughly 25 µs across the two measured iterations (~8% of the optimized total), lifting the end-to-end speedup from ~1.63× toward ~1.77×.
 
-Aside from re-tuning stage-1's dtype, no further FX-level gains are identified: the layout churn is eliminated, the dominant convs and the DRAM-bound epilogue are on the BF16 tensor-core path, and the BN affine fold is already handled by Inductor.
-
----
-
-## Reproduction
+## Reproduction Commands
 
 ```bash
-# Baseline capture
-python3 nvidia/scripts/run_workload.py --workload examples/conv_block/conv_block.py \
-    --output-prefix profiler_output/conv_block --correlation-pass
-nsys profile --trace=cuda,nvtx --output=profiler_output/conv_block \
-    python3 nvidia/scripts/run_workload.py --workload examples/conv_block/conv_block.py \
-    --output-prefix profiler_output/conv_block
-# → profile.json   (12 operators, 0% unattributed)
+# Baseline capture (inductor)
+operator-profiler profile examples/conv_block/conv_block.py \
+    --profile-name baseline --warmup-iters 2 --measure-iters 2
+# -> examples/conv_block/profile.json
 
-# Optimized capture (registered backend conv_block_opt)
-#   run_workload.py with --compile-backend conv_block_opt on conv_block_optimized.py
-# → profile_optimized.json   (9 operators, 0% unattributed)
+# Optimized capture (custom backend conv_block_opt)
+operator-profiler profile examples/conv_block/conv_block_optimized.py \
+    --profile-name optimized --warmup-iters 2 --measure-iters 2
+# -> examples/conv_block/profile_optimized.json
 
-# Validate the backend before profiling
-pytest examples/conv_block/test_conv_block_optimized.py
+# Validate the generated backend before profiling
+#   -> profiler_output/validation_report.json
+
+# Regenerate this report
+operator-profiler report
 ```
 
-*Durations are ncu application-replay values (~2–5× inflated); treat every number as a relative comparison within this report, not a wall-clock latency. Batch size = 16 throughout.*
+Both captures used locked GPU clocks (1837 MHz graphics / 12481 MHz memory) and identical iteration counts (warmup 2 / measure 2); durations are nsys GPU kernel times compared relatively, and hardware counters come from the ncu replay phase.

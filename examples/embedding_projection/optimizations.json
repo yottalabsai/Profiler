@@ -1,199 +1,206 @@
 {
   "analysis": {
-    "model": "EmbeddingProjection",
+    "model": "embedding_projection",
     "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "compile_mode": "inductor",
     "dtype": "float32",
-    "total_profiled_wall_time_ms": 10.228,
+    "total_profiled_wall_time_ms": 12.532871,
     "edge_case_flags": ["fused_kernel_double_count"],
     "time_budget": {
-      "layer::unique::prologue (op_id=prologue_0, fused: embedding+LN+proj1+gelu+proj2+logit, 3 dedup iters)": {
-        "pct": 60.01,
-        "duration_ns": 15304211,
-        "kernel_count": 15
-      },
-      "aten::mm op_id=7 (logit proj [8192,512]x[512,32000])": {
-        "pct": 17.09,
-        "duration_ns": 4359133,
-        "kernel_count": 1
-      },
-      "aten::mm op_id=14 (logit proj [8192,512]x[512,32000])": {
-        "pct": 17.04,
-        "duration_ns": 4344541,
-        "kernel_count": 1
-      },
-      "aten::addmm op_id=6 (proj2 [8192,2048]x[2048,512]+bias)": {
-        "pct": 1.56,
-        "duration_ns": 396959,
-        "kernel_count": 1
-      },
-      "aten::addmm op_id=13 (proj2 [8192,2048]x[2048,512]+bias)": {
-        "pct": 1.55,
-        "duration_ns": 395903,
-        "kernel_count": 1
-      },
-      "aten::mm op_id=4 (proj1 [8192,512]x[512,2048])": {
-        "pct": 1.24,
-        "duration_ns": 317312,
-        "kernel_count": 1
-      },
-      "aten::mm op_id=11 (proj1 [8192,512]x[512,2048])": {
-        "pct": 1.24,
-        "duration_ns": 316128,
-        "kernel_count": 1
-      }
+      "aten::mm op_id=7 [8192,512]x[512,32000] (logit head, block 1)": { "pct": 42.71, "duration_ns": 5352277, "kernel_count": 1 },
+      "aten::mm op_id=14 [8192,512]x[512,32000] (logit head, block 2)": { "pct": 42.67, "duration_ns": 5347413, "kernel_count": 1 },
+      "aten::addmm op_id=13 [8192,2048]x[2048,512] (down-proj, block 2)": { "pct": 3.91, "duration_ns": 490527, "kernel_count": 1 },
+      "aten::addmm op_id=6 [8192,2048]x[2048,512] (down-proj, block 1)": { "pct": 3.89, "duration_ns": 487776, "kernel_count": 1 },
+      "aten::mm op_id=11 [8192,512]x[512,2048] (up-proj, block 2)": { "pct": 3.09, "duration_ns": 387711, "kernel_count": 1 },
+      "aten::mm op_id=4 [8192,512]x[512,2048] (up-proj, block 1)": { "pct": 3.07, "duration_ns": 384640, "kernel_count": 1 }
     }
   },
   "optimizations": [
     {
       "id": "OPT-1",
       "priority": 1,
-      "ir_level": "aten",
-      "match_target": "torch.ops.aten.mm.default / torch.ops.aten.addmm.default",
+      "ir_level": "inductor_config",
+      "match_target": "torch.backends.cuda.matmul.allow_tf32 / torch._inductor.config (allow_tf32)",
       "operators": [
-        "layer::unique::prologue (1 fused node; contains 3 logit SGEMM + 3 proj1 SGEMM + 3 proj2 SGEMM launches across 3 dedup iterations)",
-        "aten::mm op_id=7 (logit, 1 node)",
-        "aten::mm op_id=14 (logit, 1 node)",
-        "aten::addmm op_id=6 (proj2, 1 node)",
-        "aten::addmm op_id=13 (proj2, 1 node)",
-        "aten::mm op_id=4 (proj1, 1 node)",
-        "aten::mm op_id=11 (proj1, 1 node)"
+        "aten::mm op_id=7 (1 node)",
+        "aten::mm op_id=14 (1 node)",
+        "aten::addmm op_id=6 (1 node)",
+        "aten::addmm op_id=13 (1 node)",
+        "aten::mm op_id=11 (1 node)",
+        "aten::mm op_id=4 (1 node)"
       ],
       "bottleneck": {
-        "description": "Every matrix multiply in this workload dispatches to the SIMT FP32 scalar path. The kernel name encodes it directly: cutlass_80_simt_sgemm_256x128_8x4_tn_align1 (and the 128x256 variant for proj1) - the _simt_sgemm_ substring means cuBLAS/CUTLASS selected the scalar multiply-accumulate SIMT pipeline rather than Tensor Cores. smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active is 0.0 on every GEMM launch, and aggregated tensor_core_active_pct is 0.0 across all 7 GEMM-bearing operators, confirming every Blackwell Tensor Core is idle for the entirety of the ~94%-of-trace dominated by GEMMs. This is exactly the condition Inductor's set_float32_matmul_precision('high') warning describes: FP32 inputs at default ('highest') precision force the SIMT FP32 path and forbid TF32 Tensor Core accumulation. The cost is concentrated in the two wide logit GEMMs ([8192,512]x[512,32000]): each takes ~4.35M ns (grid [512,16,1]=8192 CTAs, registers_per_thread=212, smsp__inst_executed.sum=4.75e9), and three more of them live inside the prologue range (dominant_kernel_id=k_00011, 4.36M ns). A secondary symptom: 212 registers/thread x 256 threads/block = 54,272 registers/block, capping the SM at ~1 resident block and yielding achieved_occupancy ~16.66%. eligible_cycles_pct is ~64.5% (not <20%), so these are compute-throughput-bound on SIMT FP32 arithmetic, not latency-bound - the fix is to move the arithmetic onto Tensor Cores. Promoting GEMM operands to bf16 routes cuBLAS to a tensorop kernel and, for the logit GEMM, also halves the dominant 1.05 GB FP32 output write (dram__bytes_op_write ~991 per launch) to ~512 MB in bf16.",
+        "description": "Every GEMM in the graph runs on the FP32 SIMT path with the Tensor Cores completely idle. The two logit projections [8192,512]x[512,32000] alone consume 85.4% of all attributed GPU time (10.70 ms of 12.53 ms). The dispatched kernel is 'cutlass_80_simt_sgemm_256x128_8x4_tn_align1' -- the literal SIMT single-precision GEMM, not a Tensor-Core (HMMA/IMMA) kernel. The capture also reports that Inductor warned TF32 was disabled, so cuBLAS/CUTLASS had no FP32-via-TF32 Tensor-Core path available and fell back to FP32 ALU MACs.",
         "evidence": {
           "kernel": "void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_8x4_tn_align1>(T1::Params)",
-          "total_launches": 7,
-          "total_duration_ns": 24433187,
-          "fraction_of_op_time_pct": 95.8,
+          "total_launches": 2,
+          "total_duration_ns": 10699690,
+          "fraction_of_op_time_pct": 85.38,
           "counters": {
-            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
             "tensor_core_active_pct": 0.0,
+            "smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active": 0.0,
+            "sm_throughput_pct": 63.75,
+            "eligible_cycles_pct": 64.56,
             "achieved_occupancy": 16.66,
-            "eligible_cycles_pct": 64.53,
-            "sm_throughput_pct": 63.74,
-            "dram_throughput_pct": 12.7,
-            "l2_hit_rate": 95.63,
             "registers_per_thread": 212.0,
-            "dram__bytes_op_write_logit_MB": 991.0,
-            "smsp__average_thread_inst_executed_per_inst_executed.ratio": 32.0
+            "dram_throughput_pct": 12.72
+          }
+        }
+      },
+      "transformation": {
+        "type": "matmul_precision_policy",
+        "description": "Enable the TF32 Tensor-Core math mode for FP32 GEMMs. This keeps FP32 storage/semantics for activations and weights (no graph dtype change, no accuracy cliff for an inference logit head) but lets CUTLASS/cuBLAS select the TF32 Tensor-Core kernel instead of the SIMT sgemm path. The 10-bit-mantissa TF32 multiply runs on the Tensor Cores at multiples of SIMT FP32 throughput, directly attacking the tensor_core_active_pct=0.0 / sm_throughput=63.7% compute bottleneck on the two dominant logit GEMMs. This is a lowering-policy decision Inductor owns, so it is applied as an inductor_config / backend flag rather than a graph-node rewrite.",
+        "location": "Backend entry point, before compile_fx is invoked (global math-mode flag honored by the GEMM lowering).",
+        "fx_steps": [
+          "# Applied as a backend config flag, not FX node surgery.",
+          "import torch",
+          "torch.backends.cuda.matmul.allow_tf32 = True",
+          "torch.backends.cudnn.allow_tf32 = True",
+          "# Inside the custom backend, before compile_fx(gm, example_inputs):",
+          "from torch._inductor.compile_fx import compile_fx",
+          "compiled = compile_fx(gm, example_inputs)"
+        ],
+        "code_hint": "torch.backends.cuda.matmul.allow_tf32 = True  (set once at backend init; routes cutlass_80_simt_sgemm_* -> TF32 Tensor-Core kernel)"
+      },
+      "estimated_impact": {
+        "relative_duration_reduction_ns": 5800000,
+        "duration_reduction_pct_of_total": 46.3,
+        "kernel_launches_eliminated": 0,
+        "memory_traffic_reduction": "None (storage stays FP32; gain is purely arithmetic throughput from engaging Tensor Cores)"
+      },
+      "confidence": "high",
+      "prerequisite_for": [],
+      "notes": "Lowest-risk highest-leverage change: it touches all six GEMMs (100% of attributed compute) with no graph mutation and no register_buffer, and directly resolves Inductor's own TF32-disabled warning. Impact estimate is conservative (~2x on the SIMT-bound GEMMs); duration_ns is ncu-inflated so this is a relative figure only. If bf16 (OPT-2) is adopted, OPT-1 becomes redundant for those nodes but remains the safe fallback if bf16 accuracy is rejected."
+    },
+    {
+      "id": "OPT-2",
+      "priority": 2,
+      "ir_level": "aten",
+      "match_target": "torch.ops.aten.mm.default, torch.ops.aten.addmm.default",
+      "operators": [
+        "aten::mm op_id=7 (1 node)",
+        "aten::mm op_id=14 (1 node)",
+        "aten::addmm op_id=6 (1 node)",
+        "aten::addmm op_id=13 (1 node)",
+        "aten::mm op_id=11 (1 node)",
+        "aten::mm op_id=4 (1 node)"
+      ],
+      "bottleneck": {
+        "description": "The two logit GEMMs are simultaneously compute-bound on the SIMT FP32 path (Tensor Cores idle) AND carry a very large FP32 output write. Each [8192,512]x[512,32000] produces an [8192,32000] FP32 logit tensor = ~1.05 GB written to DRAM (dram write bytes ~991 MB per kernel in the profile). bf16 promotion attacks both axes at once: it routes the GEMM to the full bf16 Tensor-Core (HMMA) path (higher peak than TF32) and halves the 1 GB logit write to ~0.5 GB.",
+        "evidence": {
+          "kernel": "void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_8x4_tn_align1>(T1::Params)",
+          "total_launches": 2,
+          "total_duration_ns": 10699690,
+          "fraction_of_op_time_pct": 85.38,
+          "counters": {
+            "tensor_core_active_pct": 0.0,
+            "total_dram_bytes_written": 991,
+            "dram_throughput_pct": 12.72,
+            "sm_throughput_pct": 63.75,
+            "achieved_occupancy": 16.66
           }
         }
       },
       "transformation": {
         "type": "dtype_promotion",
-        "description": "Insert aten._to_copy casts to bfloat16 on the two matrix operands of every aten.mm.default and aten.addmm.default node, leaving (or also casting) the addmm bias operand, then cast the GEMM result back to float32 to preserve downstream dtype contracts. At execution time this switches the dispatched kernel from cutlass_80_simt_sgemm_* (SIMT FP32) to a cutlass tensorop bf16 GEMM, engaging the Blackwell Tensor Cores that are currently 0% utilized. For the two wide logit GEMMs this is the single largest lever (combined 34.1% of attributed time plus three more copies inside the prologue) and additionally halves their 1.05 GB FP32 logit output write. The preferred inference path is model.bfloat16() (no FX surgery, no round-trip casts); the aten-level pass is the graph-expressible equivalent. The lower-risk numerically-conservative alternative is TF32 (see code_hint), which keeps FP32 storage and only changes Tensor Core accumulation precision - directly resolving the set_float32_matmul_precision('high') warning Inductor emitted.",
-        "location": "Aten-level FX graph (AOTAutograd-decomposed): every aten.mm.default and aten.addmm.default node whose matrix operands are float32.",
+        "description": "Insert bf16 casts around the decomposed GEMM primitives so activation and weight operands enter aten.mm/aten.addmm as bf16, with FP32 accumulation. The matcher walks the post-AOTAutograd graph for aten.mm.default / aten.addmm.default nodes, inserts an aten._to_copy (dtype=bf16) before each matmul input and an aten._to_copy back to fp32 on the result feeding downstream fp32 consumers (or leaves the logit output bf16 if the consumer is argmax/loss). This is an aten-level rewrite because it operates on the decomposed primitives and their dtypes, not the high-level module.",
+        "location": "Post-AOTAutograd aten graph; rewrite each aten.mm.default and aten.addmm.default node and its operand edges.",
         "fx_steps": [
           "import torch",
-          "MM_TARGETS = (torch.ops.aten.mm.default, torch.ops.aten.addmm.default)",
-          "for node in list(graph.nodes):",
-          "    if node.op != 'call_function' or node.target not in MM_TARGETS:",
-          "        continue",
-          "    if node.target is torch.ops.aten.addmm.default:",
-          "        mat_idx = (1, 2)   # addmm(bias, mat1, mat2): cast mat1, mat2; leave bias",
-          "    else:",
-          "        mat_idx = (0, 1)   # mm(mat1, mat2)",
-          "    with graph.inserting_before(node):",
-          "        for i in mat_idx:",
-          "            src = node.args[i]",
-          "            cast = graph.call_function(",
-          "                torch.ops.aten._to_copy.default,",
-          "                args=(src,), kwargs={'dtype': torch.bfloat16}",
-          "            )",
-          "            node.update_arg(i, cast)",
-          "    with graph.inserting_after(node):",
-          "        out_f32 = graph.call_function(",
-          "            torch.ops.aten._to_copy.default,",
-          "            args=(node,), kwargs={'dtype': torch.float32}",
-          "        )",
-          "    node.replace_all_uses_with(out_f32)",
-          "    out_f32.update_arg(0, node)  # re-anchor after replace_all_uses_with",
-          "graph.lint()",
-          "gm.recompile()"
+          "from torch.fx import GraphModule",
+          "MM_TARGETS = {torch.ops.aten.mm.default, torch.ops.aten.addmm.default}",
+          "def promote_mm_to_bf16(gm: GraphModule) -> GraphModule:",
+          "    g = gm.graph",
+          "    for node in list(g.nodes):",
+          "        if node.op == 'call_function' and node.target in MM_TARGETS:",
+          "            mat_args = node.args[-2:]  # the two matrix operands (addmm: bias is args[0])",
+          "            new_args = list(node.args)",
+          "            for i, a in enumerate(node.args):",
+          "                if a in mat_args and isinstance(a, torch.fx.Node):",
+          "                    with g.inserting_before(node):",
+          "                        cast = g.call_function(torch.ops.aten._to_copy.default, (a,), {'dtype': torch.bfloat16})",
+          "                    new_args[i] = cast",
+          "            node.args = tuple(new_args)",
+          "            with g.inserting_after(node):",
+          "                back = g.call_function(torch.ops.aten._to_copy.default, (node,), {'dtype': torch.float32})",
+          "            node.replace_all_uses_with(back)",
+          "            back.args = (node,)  # restore self-edge severed by replace_all_uses_with",
+          "    g.lint(); gm.recompile()",
+          "    return gm"
         ],
-        "code_hint": "# Lowest-risk lever, exactly addresses the Inductor warning (no FX surgery, keeps FP32 storage):\n#   torch.set_float32_matmul_precision('high')   # before torch.compile\n#   # equivalently: torch.backends.cuda.matmul.allow_tf32 = True\n# -> FP32 inputs kept, cuBLAS routes to cutlass_*_tensorop_tf32_* Tensor Core path,\n#    ~3-4x over SIMT FP32 with FP32-range accumulation. Best first experiment.\n#\n# Maximum throughput (also halves the 1 GB logit write) for inference-only:\n#   model = model.bfloat16()\n#   model_c = torch.compile(model, backend='inductor')\n# cuBLAS then selects the bf16 tensorop GEMM automatically; the FX pass above is the\n# graph-expressible fallback when only GEMM precision (not module dtype) may change."
+        "code_hint": "Wrap aten.mm/aten.addmm operands in aten._to_copy(dtype=bfloat16); keep FP32 accumulate; optionally leave the [8192,32000] logit output in bf16 to bank the 0.5 GB write saving."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 13000000,
-        "duration_reduction_pct_of_total": 51.0,
+        "relative_duration_reduction_ns": 7500000,
+        "duration_reduction_pct_of_total": 59.8,
         "kernel_launches_eliminated": 0,
-        "memory_traffic_reduction": "Logit GEMM output write halved: ~1.05 GB FP32 -> ~512 MB bf16 per launch (5 logit-GEMM launches in trace: prologue x3 + op_id=7 + op_id=14). Primary gain is compute: bf16 tensorop replaces SIMT FP32 across all GEMMs. Lower-register tensorop kernels also raise occupancy above the current ~16.66%, improving latency hiding. TF32 alternative yields a smaller (~3-4x GEMM) gain with no DRAM-write reduction but FP32-range accumulation."
+        "memory_traffic_reduction": "~0.5 GB per logit GEMM saved on output write (FP32 1.05 GB -> bf16 0.52 GB), ~1 GB total across the two logit heads; plus halved weight-read traffic on every GEMM."
       },
-      "confidence": "high",
-      "prerequisite_for": ["OPT-2"],
-      "notes": "Assumes inference-only (no autograd) so casting GEMM inputs is numerically acceptable. eligible_cycles_pct ~64.5% (>20%) confirms compute-bound, not latency-bound, so Tensor Core engagement is the correct mechanism rather than occupancy tuning alone. The addmm bias is left fp32; if cuBLAS requires a matching epilogue dtype, also cast args[0] (bias) to bf16. Inductor CSE collapses duplicate casts of the same weight node. proj1 (op_id=4,11), proj2 (op_id=6,13), and logit (op_id=7,14) form a sequential dependent chain, so no shared-activation GEMM fusion is available - dtype promotion is the dominant structural lever."
+      "confidence": "medium",
+      "prerequisite_for": ["OPT-3"],
+      "notes": "Supersedes OPT-1 on the nodes it touches (bf16 HMMA peak exceeds TF32). Confidence is medium rather than high because bf16 changes numerics on a 32000-way logit head; validate top-k / argmax agreement against the FP32 baseline before adopting. Per the standing buffer rule, any pass that calls register_buffer (OPT-3 pre-transpose) must run after this dtype promotion so the frozen weight is materialized at bf16 -- that ordering is automatically satisfied because OPT-3 is inductor_config (a later funnel level than this aten pass)."
     },
     {
-      "id": "OPT-2",
-      "priority": 2,
+      "id": "OPT-3",
+      "priority": 3,
       "ir_level": "inductor_config",
       "match_target": "freezing",
       "operators": [
-        "All weight parameter nodes feeding aten::mm / aten::addmm: proj1 [512,2048], proj2 [2048,512], logit [512,32000] (across the prologue and the standalone op sites)"
+        "aten::mm op_id=7 (1 node)",
+        "aten::mm op_id=14 (1 node)",
+        "aten::addmm op_id=6 (1 node)",
+        "aten::addmm op_id=13 (1 node)",
+        "aten::mm op_id=11 (1 node)",
+        "aten::mm op_id=4 (1 node)"
       ],
       "bottleneck": {
-        "description": "Weight parameters are not marked compile-time constants, so Inductor cannot pre-pack them or autotune GEMM tiles against a fixed layout. The _tn_ suffix in cutlass_80_simt_sgemm_256x128_8x4_tn_align1 shows the left matrix is transposed at dispatch time; freezing hoists that transpose to compile time. More importantly the wide logit GEMM has an unusual N=32000 inner dimension: the heuristic SGEMM tile (256x128) yields only achieved_occupancy ~16.66% and sm_throughput ~63.7% with a [512,16,1]=8192-CTA grid. After OPT-1 moves these to bf16 tensorop kernels, max_autotune can benchmark cuBLAS vs Triton GEMM tile/split-K configurations against the frozen bf16 weight layout and pick a variant better matched to the 32000-wide output than the default heuristic, recovering tile-efficiency the SIMT default leaves on the table. This is incremental on top of OPT-1 and zero-risk for eval-mode inference.",
+        "description": "The selected GEMM kernel is the 'align1' variant ('cutlass_80_simt_sgemm_256x128_8x4_tn_align1'). align1 means CUTLASS could prove only 1-element alignment on the operands and therefore disabled vectorized (128-bit) global loads and the wider, aligned Tensor-Core tiles. Combined with FP32 (OPT-1) or bf16 (OPT-2), giving the constant weight a frozen, properly-aligned/pre-transposed layout lets the GEMM dispatcher pick an align8 Tensor-Core kernel with coalesced vector loads instead of the scalar align1 fallback. Achieved occupancy is only 16.66% and registers_per_thread is 212 on this kernel; the aligned Tensor-Core templates use a different (lower) register footprint.",
         "evidence": {
           "kernel": "void cutlass::Kernel2<cutlass_80_simt_sgemm_256x128_8x4_tn_align1>(T1::Params)",
-          "total_launches": 5,
-          "total_duration_ns": 21762268,
-          "fraction_of_op_time_pct": 85.3,
+          "total_launches": 2,
+          "total_duration_ns": 10699690,
+          "fraction_of_op_time_pct": 85.38,
           "counters": {
-            "achieved_occupancy": 16.66,
-            "sm_throughput_pct": 63.74,
-            "dram_throughput_pct": 12.7,
-            "dynamic_smem_per_block": 49.15,
             "registers_per_thread": 212.0,
-            "grid_dim_logit": "[512,16,1]"
+            "achieved_occupancy": 16.66,
+            "l1tex__throughput_pct": 54.39,
+            "tensor_core_active_pct": 0.0
           }
         }
       },
       "transformation": {
-        "type": "inductor_config",
-        "description": "Enable freezing=True so Inductor treats requires_grad=False parameters as constants, folds the _tn_ transpose to compile time, and removes per-call weight guards. Enable max_autotune so Inductor benchmarks GEMM backends/tiles for the unusual [8192,512]x[512,32000] logit shape against the frozen (bf16, after OPT-1) layout and selects the fastest variant instead of the heuristic default.",
-        "location": "torch.compile options dict / torch._inductor.config, applied during Inductor lowering (runs after OPT-1's aten-level pass by pipeline level ordering).",
+        "type": "memory_layout",
+        "description": "Enable Inductor weight freezing so the constant projection weights are constant-folded and re-laid-out (pre-transposed to the 'tn'-preferred contiguous layout and padded to a Tensor-Core-friendly alignment). With frozen, aligned constant weights the GEMM autotuner/dispatcher can select an align8 Tensor-Core kernel rather than the align1 SIMT fallback, improving global-load vectorization and tile efficiency. This is a constant-weight layout/lowering decision Inductor already owns, hence ir_level=inductor_config keyed on the 'freezing' config switch.",
+        "location": "Backend entry point: set Inductor config before compile_fx; eval/inference graph only (freezing requires no-grad).",
         "fx_steps": [
-          "model.eval()  # freezing requires eval mode",
-          "model_compiled = torch.compile(",
-          "    model,",
-          "    backend='inductor',",
-          "    options={",
-          "        'freezing': True,",
-          "        'max_autotune': True,",
-          "        'max_autotune_gemm_backends': 'ATEN,TRITON'",
-          "    }",
-          ")",
-          "# Or via global config before compile:",
-          "import torch._inductor.config as ind_cfg",
-          "ind_cfg.freezing = True",
-          "ind_cfg.max_autotune = True"
+          "from torch._inductor import config as inductor_config",
+          "from torch._inductor.compile_fx import compile_fx",
+          "# freezing constant-folds and re-lays-out constant weights; requires inference (no autograd) graph",
+          "with inductor_config.patch({'freezing': True, 'max_autotune_gemm': True, 'max_autotune': True}):",
+          "    compiled = compile_fx(gm, example_inputs)",
+          "# max_autotune_gemm lets Inductor benchmark aligned Tensor-Core GEMM templates",
+          "# against the align1 fallback and pick the faster aligned kernel."
         ],
-        "code_hint": "# First compiled call triggers autotune benchmarking (slow); cache persists in-process.\n# Persist across runs: torch._inductor.config.autotune_local_cache = True\n# The N=32000 logit GEMM is the prime autotune beneficiary: split-K or wider-N tiles\n# can outperform the default 256x128 tile once weights are frozen in bf16 tensorop layout."
+        "code_hint": "inductor_config.freezing = True + max_autotune_gemm = True; lets the dispatcher replace cutlass_80_simt_sgemm_*_align1 with an aligned Tensor-Core template."
       },
       "estimated_impact": {
-        "relative_duration_reduction_ns": 900000,
-        "duration_reduction_pct_of_total": 3.5,
+        "relative_duration_reduction_ns": 1200000,
+        "duration_reduction_pct_of_total": 9.6,
         "kernel_launches_eliminated": 0,
-        "memory_traffic_reduction": "Eliminates runtime aten.t()/view() transpose and per-call weight guards. After OPT-1, enables Inductor to emit a pre-packed bf16 weight layout and a logit-shape-tuned tile, improving the ~16.66% occupancy / ~63.7% sm_throughput of the dominant GEMM."
+        "memory_traffic_reduction": "Improved global-load vectorization (align1 -> align8) raises effective L1/L2 bandwidth utilization on weight reads; no net byte reduction."
       },
       "confidence": "medium",
       "prerequisite_for": [],
-      "notes": "Listed downstream of OPT-1: freezing/autotune is most impactful after bf16 promotion because tensorop kernels expose more layout- and tile-sensitive tuning knobs than SIMT SGEMM. Impact estimate is conservative and shape-dependent. Incompatible with torch.compile(dynamic=True) when weight shapes vary, and with training (requires eval). Cross-level ordering (aten before inductor_config) is enforced by the backend pipeline; the prerequisite is encoded for explicitness only."
+      "notes": "Incremental on top of OPT-1/OPT-2 (it improves the kernel selection that those passes enable). Must run after OPT-2 because freezing materializes the constant weight buffer at the runtime dtype -- satisfied automatically by level ordering (inductor_config is the last funnel stage, after the aten dtype-promotion pass). Requires a true inference/eval graph (no grad); freezing is a no-op or errors under training. Impact estimate is the most uncertain of the three (depends on whether the autotuner finds a strictly-better aligned template), hence medium confidence and lowest priority."
     }
   ],
   "global_notes": [
-    "Schema version 1.0 confirmed.",
-    "2 operators below 1% threshold omitted (combined 0.26% of attributed time): the fused addmm+gelu+view operator (0.18%, 46112 ns, 2 kernels) and aten::embedding (0.08%, 20480 ns, 2 kernels). Both are bandwidth-bound Triton tails (gelu epilogue dram_throughput 85-88%, embedding/LN dram_throughput ~52%) already fused by Inductor; not actionable at this scale.",
-    "hardware-limits.md not found on disk and MCP tools (context7, exa-search, memory, sequential-thinking) unavailable in this environment. Per the documented fallback, FX API patterns and Blackwell device properties are inferred from published architecture rather than the knowledge file; novel-transform confidence is capped at medium (OPT-2). RTX PRO 6000 Blackwell Server Edition (GB202, Sm100-class): SM count taken as ~170-188 for wave reasoning; the GEMMs here are compute-bound regardless of exact SM count, so wave arithmetic does not change the ranking.",
-    "warp_cycles_per_instruction is null for every operator - this counter was removed on Blackwell (Sm100). Latency-bound proxy applied: eligible_cycles_pct < 20% indicates latency-bound. All GEMM operators report eligible_cycles_pct ~62.9-64.5%, placing them firmly in the compute-throughput-bound regime (SIMT FP32 arithmetic saturating at ~16.66% occupancy), which is why dtype promotion to Tensor Cores (OPT-1) is the correct lever rather than occupancy/launch tuning.",
-    "fused_kernel_double_count flag active: layer::unique::prologue_0 (is_fused=true), aten::embedding_0 (is_fused=true, fused with native_layer_norm), and the addmm+gelu+view operator (is_fused=true) are each listed as single line-items. The prologue NVTX range is the dedup 'unique' partition that replays the SAME forward 3 times under one label: its 15 kernels = 3 iterations x {embedding/LN Triton, proj1 SGEMM, gelu Triton, proj2 SGEMM, logit SGEMM}, and its dominant_kernel_id k_00011 (4.36M ns) IS a wide logit GEMM. The separately-listed aten::mm op_id=7 and op_id=14 are two FURTHER logit-GEMM iterations profiled in their own NVTX ranges, NOT double-counts of the prologue kernels. The wide logit GEMM is therefore the single most expensive kernel in the workload, appearing 5 times (3 in prologue + op_id=7 + op_id=14).",
-    "measure_iters is absent from capture_metadata, so warm_up_inflation could not be asserted; kernel counts (prologue=15=3x5, standalone ops=1-2) are consistent with a 3-iteration dedup replay plus separate single-iteration NVTX ranges and show no evidence of inflation. The 7 pre-NVTX warm-up kernels (k_00000-k_00006) are correctly listed in warnings[] as initialization kernels and excluded from attribution.",
-    "No multi_stream_overlap (all kernels stream_id=7), no cuda_graph_replay (compile_mode='inductor'), no dynamic_shapes (logit GEMM durations 4.34-4.36M ns, CV<1%), no high_unattributed (unattributed_kernels=[]), no clock_domain anomaly.",
-    "total_attributed_ns = 25,500,779 ns (sum of all 9 operator aggregated.total_duration_ns); all pct figures are computed against this denominator. total_profiled_wall_time_ms ~10.228 ms is a span estimate; the kernel-summed attributed time is the basis for the budget table.",
-    "GEMMs dominate ~94-96% of attributed time and are uniformly SIMT FP32 with 0% Tensor Core utilization - the headline finding. The two standalone wide logit GEMMs alone are 34.1%; with the three prologue copies the logit projection is the dominant cost center. Embedding gather and the bias-add/GELU tails are bandwidth-bound but sub-1% and not actionable.",
-    "No QKV-style projection fusion is available: proj1 (512->2048), proj2 (2048->512), and the logit projection (512->32000) form a sequential dependent chain (embedding->LN->proj1->GELU->proj2->logit), not independent branches sharing one activation. Dtype promotion (OPT-1) and Inductor freezing/autotune (OPT-2) are the structural levers.",
-    "Application order by pipeline level: (1) OPT-1 bf16 dtype promotion at the aten level during AOTAutograd lowering; (2) OPT-2 freezing+max_autotune at inductor_config during Inductor lowering. The functional->aten->inductor_config ordering is enforced by the backend funnel, so OPT-1 (aten) automatically precedes OPT-2 (inductor_config). No register_buffer-style passes are present, so the dtype-before-buffer rule is moot here. DAG is acyclic: OPT-1 -> OPT-2.",
-    "duration_ns values are 2-5x inflated by ncu application-replay counter-collection overhead. All estimated_impact.relative_duration_reduction_ns figures are relative comparisons within this profile only and must not be read as absolute wall-clock latency predictions."
+    "2 operators below 1% threshold omitted (combined 0.66% of attributed time): aten::addmm fused gelu (0.43%) and aten::embedding fused native_layer_norm (0.23%).",
+    "hardware-limits.md was not present in the repository; architecture context derived from the device string 'NVIDIA RTX PRO 6000 Blackwell Server Edition' (Blackwell / GB202-class, ~188 SMs). Per Blackwell guidance, warp_cycles_per_instruction is unavailable (confirmed null for every operator) and latency-bound diagnosis uses eligible_cycles_pct < 20; the dominant GEMMs show eligible_cycles_pct ~64.5%, so they are NOT latency-bound -- they are compute-bound on the SIMT FP32 path.",
+    "MCP tools (context7, exa-search, memory, sequential-thinking) were unavailable; per the fallback policy, FX API patterns were drawn from built-in knowledge and novel/uncertain transforms are capped at medium confidence. knowledge/fx-patterns.md was also absent.",
+    "fused_kernel_double_count flag set: aten::embedding (fused_with native_layer_norm) and aten::addmm (fused_with view+gelu) are is_fused=true Inductor Triton kernels; their aten-level fused_with members are not separately timed, so do not double-count them. Both fall below the 1% threshold and are not targeted.",
+    "duration_ns values are 2-5x inflated by ncu counter-collection overhead and are used here only for RELATIVE comparison within this profile, never as absolute latency.",
+    "capture_metadata contains no measure_iters field, so warm_up_inflation could not be evaluated; note that the operator graph is a 2-block stack (op11 consumes op7's output via input_op_ids=(7,0)), i.e. two sequential MLP+logit blocks, not two profiling iterations. The two logit heads are therefore data-dependent and cannot be naively batched into a single GEMM.",
+    "Root cause across the whole graph is identical: FP32 storage with TF32 disabled forces every matmul onto the cutlass_80_simt_sgemm SIMT path with tensor_core_active_pct=0.0. The three proposals are an escalating ladder addressing this single mechanism: OPT-1 (TF32, safe) < OPT-2 (bf16, faster + memory win, needs accuracy check) < OPT-3 (frozen aligned weights, kernel-selection polish). Adopt OPT-1 unconditionally; prefer OPT-2 if bf16 accuracy is acceptable; layer OPT-3 on whichever is chosen."
   ]
 }
