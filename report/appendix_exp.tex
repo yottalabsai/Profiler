@@ -1,12 +1,26 @@
-﻿\section{Reproduction and Additional Details}
+\section{Reproduction and Additional Details}
 \label{sec:appendix:exp}
+
+\subsection{Hardware Specification}
+\label{sec:appendix:hwspec}
+
+All experiments run on a single GPU:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{NVIDIA RTX PRO 6000 Blackwell Server Edition}: ${\sim}$188 SMs (GB202),
+    96\,GB GDDR7 (${\sim}$1.8\,TB/s memory bandwidth),
+    5th-generation Tensor Cores (HMMA BF16/FP8), Blackwell architecture (sm\_120).
+    Note: the \texttt{warp\_cycles\_per\_instruction} counter is absent from the
+    Blackwell counter set; \texttt{eligible\_cycles\_pct} serves as the
+    latency-bound indicator instead.
+\end{itemize}
 
 \subsection{Workload Reproduction}
 \label{sec:appendix:repro}
 
-All seven workloads are reproduced using the commands below.
+All three case study workloads are reproduced using the commands below.
 Each workload requires an NVIDIA GPU (Ampere architecture minimum; all experiments in this paper
-use an A100-SXM4-80GB), \nsys $\ge$ 2025.1, \ncu $\ge$ 2025.4.1, PyTorch 2.5+, and CUDA 12.x.
+use an NVIDIA RTX PRO 6000 Blackwell Server Edition), \nsys $\ge$ 2024.6,
+\ncu $\ge$ 2025.4.1, PyTorch 2.11+, and CUDA 12.8.
 
 \begin{lstlisting}[style=pystyle]
 # Install
@@ -82,6 +96,17 @@ non-null value.
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{Prototype Automation via Claude Code Plugin}
+\label{sec:appendix:plugin}
+
+As a prototype implementation, \sys ships a Claude Code plugin that automates the closed-loop
+protocol via a single \texttt{/optimize workload.py} command.  The plugin orchestrates five
+specialized LLM agents---\textbf{capture-agent}, \textbf{optimization-strategist},
+\textbf{backend-engineer}, \textbf{validation-agent}, and \textbf{/report}---covering all
+pipeline stages from baseline capture through cross-profile comparison.  Evaluating whether
+agent-generated optimization backends reproduce the manually-derived speedups reported in
+\secref{sec:experiments} is left for future work.
 
 \subsection{Additional Limitations}
 \label{sec:appendix:limitations}

@@ -42,54 +42,41 @@ constituent operator names from the mangled kernel identifier.  \figref{fig:over
 complete end-to-end pipeline.
 
 \paragraph{Contributions.}
-We present \textbf{\sys}, a hardware-attributed GPU profiling and profile-guided optimization
-system for PyTorch. Our contributions are:
+We present \textbf{\sys}, a hardware attribution pipeline for PyTorch. Our contributions are:
 
 \begin{enumerate}
 
 \item \textbf{Attribution pipeline (\secref{sec:attribution}).}  A
-  \texttt{StreamIntervalTree} keyed on \texttt{(stream\_id, device\_id)} pairs attributes each
-  CUDA kernel to an \texttt{aten::} operator via NVTX temporal enclosure (MEDIUM confidence). A
-  torch.profiler invocation-order join provides HIGH-confidence attribution for registered operators.
-  An Inductor debug-artifact enrichment pass recovers ground-truth fused operator identity from
-  \texttt{output\_code.py} comments, upgrading previously unattributed Inductor-compiled kernels to
-  MEDIUM confidence. Kernels matching neither method are stored in \texttt{unattributed\_kernels[]}
-  and never silently dropped. Invocation-order matching between \nsys and \ncu avoids clock-domain
-  joins. Eight edge cases---multi-stream execution, CUDA Graph replay, JIT warm-up kernels, async
-  launches, dynamic shapes, and fused kernels---are handled explicitly.
+  \texttt{StreamIntervalTree} per \texttt{(stream\_id, device\_id)} pair attributes CUDA kernels
+  to \texttt{aten::} operators via NVTX temporal enclosure (MEDIUM confidence); a torch.profiler
+  invocation-order join provides HIGH-confidence coverage.  Clock-domain joins are avoided
+  entirely.  Unattributed kernels are surfaced explicitly, never dropped.
 
-\item \textbf{20-counter curated metric set (\secref{sec:metrics}).}  Twenty hardware counters
-  spanning all bottleneck axes are collected with architecture-specific name fallbacks for Ampere,
-  Hopper, and Blackwell. Duration-weighted aggregation ensures that long-running kernels dominate
-  operator-level summaries when multiple kernels are attributed to one operator.
+\item \textbf{20-counter curated metric set (\secref{sec:metrics}).}  Counters span all
+  bottleneck axes with architecture-specific fallbacks for Ampere, Hopper, and Blackwell;
+  duration-weighted aggregation gives long-running kernels proportional influence on
+  operator-level summaries.
 
-\item \textbf{FX pass infrastructure and demonstrated optimization patterns (\secref{sec:pgo}).}
-  \texttt{FxPassRunner} and \texttt{UniqueSubgraphRegistry} compose to apply pattern-based FX
-  graph rewrites to unique layer representatives only.  Hardware-evidence-motivated optimization
-  patterns demonstrated across the example workloads include: BF16 dtype promotion (triggered by
-  \texttt{tensor\_core\_active\_pct}~$\approx$~0), \texttt{channels\_last} memory layout
-  (triggered by \texttt{convertTensor\_kernel} presence), BatchNorm folding into Conv weights,
-  weight pre-transposition, and max-autotune compiler settings.  A custom backend is registered
-  per workload via \texttt{@register\_backend}; each pattern is applied only when the profiler
-  diagnoses the specific counter symptom that motivates it.
-
-\item \textbf{Closed-loop validation (\secref{sec:experiments}).}  A four-step protocol---profile
-  $\to$ diagnose $\to$ transform $\to$ re-profile---verifies that hardware bottlenecks are
-  eliminated, not merely shifted.  Per-operator hardware counter deltas confirm systematic
-  improvement across all evaluated workloads.
+\item \textbf{Profile-guided optimization case studies (\secref{sec:pgo}, \secref{sec:experiments}).}
+  To demonstrate that attributed profiles are actionable, we implement a profile-driven FX pass
+  framework and apply it to three workloads.  Each optimization decision is grounded in a specific
+  counter symptom from the attribution output; re-profiling at locked clocks verifies that the
+  diagnosed bottleneck was actually eliminated.
 
 \end{enumerate}
 
 \paragraph{Results.}
-On GPT-2 small (hidden=768, 12 heads, 12 layers, B=4, seq=128) on an NVIDIA A100-SXM4-80GB,
-\sys achieves ${\sim}$\textbf{2.5--3.0$\times$} speedup over the FP32 baseline.  Tensor Core
-utilization on GEMM operators rises from 0\% to 55.9\%; register spills in the FMHA kernel
-drop from 24.5\,MB to zero; the FFN up-projection alone achieves 9.4$\times$ per-kernel speedup.
-On a VGG-style ConvBlock (B=16, A100), \sys achieves \textbf{2.93$\times$} speedup by
-eliminating BatchNorm runtime overhead (−985,505\,ns), switching to \texttt{channels\_last}
-memory format, and activating BF16 Tensor Core paths.  Layer deduplication reduces \ncu replay
-time from 30--45\,min to 3--5\,min for GPT-2's 12 identical transformer blocks.  Each
-optimization is verified by hardware counter before-and-after comparison.
+On an NVIDIA RTX PRO 6000 Blackwell Server Edition, \sys attributes 95--100\% of kernel runtime
+on GPT-2 and SDPA Attention; LSTM's $>$85\% unattributed fraction is correctly diagnosed as
+cuDNN RNN opacity rather than silently dropped.  Layer deduplication reduces \ncu replay time
+from 30--45\,min to 3--5\,min for GPT-2's 12 identical transformer blocks.  Applying attributed
+profiles to profile-guided optimization across three case studies: GPT-2 achieves
+\textbf{1.76$\times$} with Tensor Core utilization rising from 0\% to 40.5\% after BF16 GEMM
+promotion (counter-verified); SDPA Attention achieves \textbf{2.24$\times$} via QKV fusion
+raising occupancy from 16.6\% to 73.9\%; LSTM Sequence Encoder achieves \textbf{3.63$\times$}
+by routing away from Inductor's harmful decomposition (1,280 scalar SIMT GEMMs) to cuDNN's
+fused Tensor-Core RNN---a structural issue that is invisible to timing-only profilers but
+apparent from attribution data.
 
 \begin{figure}[t]
 \centering
@@ -157,8 +144,8 @@ optimization is verified by hardware counter before-and-after comparison.
 \caption{\textbf{\sys system overview.}  Two profiling stages produce \texttt{profile.json}: \nsys
   captures the kernel timeline (Stage~A) and \ncu replays each kernel for hardware counters
   (Stage~B).  The attribution engine bridges the two tools via invocation-order matching and
-  per-stream NVTX interval trees.  The PGO backend applies six hardware-evidence-motivated FX graph
-  passes before Inductor compilation.  A dashed feedback loop denotes closed-loop validation via
-  re-profiling.}
+  per-stream NVTX interval trees---this is the core contribution of \sys.  The lower
+  ``Optimization'' row shows a downstream application of the attributed profile: hardware-evidence-motivated
+  FX graph passes validated via re-profiling; it is not part of the attribution pipeline itself.}
 \label{fig:overview}
 \end{figure}

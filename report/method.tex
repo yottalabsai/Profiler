@@ -58,6 +58,51 @@ The optional \texttt{--kernel-name} flag filters to a specific kernel for target
 re-profiling.  The resulting \texttt{.ncu-rep} is exported to CSV
 (\texttt{ncu --import --csv}), producing one row per kernel invocation per metric.
 
+\subsection{GPU Clock Locking for Reproducible Duration Comparisons}
+\label{sec:clocklocking}
+
+Per-operator durations in \texttt{profile.json} are derived from \nsys CUPTI GPU-domain
+timestamps.  These durations are subject to a subtle confound: a GPU's boost clock floats
+with die temperature and power draw, typically varying 5--15\% across captures separated
+by minutes or hours.  An optimized workload dissipates less power than the baseline (fewer
+FLOPs on the SIMT path), so its capture may run at a \emph{higher} sustained clock,
+inflating the apparent speedup.  Conversely, thermal throttling during a long baseline
+capture deflates the baseline.  Both effects corrupt the $\text{baseline}/\text{optimized}$
+duration ratio even when no hardware change was made.
+
+\textbf{Probe-and-lock.}
+\sys pins the SM and memory clocks for the duration of the \nsys capture.  The default
+target is \emph{probe-and-lock}: a synthetic matrix-multiply load runs for ${\sim}1.5\,\text{s}$
+(with a $1\,\text{s}$ warmup to reach thermal steady state), and the median clock observed
+during the probe is selected as the lock target.  Locking to the \emph{sustained} frequency
+(rather than the peak boost clock, which the GPU cannot maintain under load) guarantees the
+lock is genuinely held throughout the capture.
+
+\textbf{Cache and reuse.}
+The probed clock is written to \texttt{profiler\_output/.gpu\_clock\_lock.json} with a
+6-hour TTL per GPU index.  The baseline capture probes once; the optimized capture reuses
+the cached clock.  Both captures therefore execute at exactly the same frequency, making
+their duration ratio clock-immune by construction---the same guarantee that invocation-order
+matching provides for the hardware counter join.
+
+\textbf{Implementation.}
+Clocks are set via \texttt{nvidia-smi -lgc/-lmc} and released through a context manager
+that registers a \texttt{SIGTERM} handler, guaranteeing a reset even on exception, timeout,
+or Ctrl-C:
+\begin{lstlisting}[style=pystyle]
+with gpu_clocks_locked(target="probe", gpu_index=0,
+                       use_sudo=True, cache_dir=cache_dir):
+    # nsys profile ... run_workload.py runs here
+    ...
+\end{lstlisting}
+Clock setting uses \texttt{sudo -n} (non-interactive); if permission is unavailable, \sys
+logs a \texttt{WARNING} and proceeds at dynamic clocks rather than aborting.
+
+\textbf{Scope.}
+Clock locking applies to the \nsys capture phase only.  The \ncu replay phase is
+unaffected: \ncu already self-locks to its own base clock before each replay pass, and
+the hardware counter values it reports are independent of the GPU's runtime SM frequency.
+
 \subsection{The Clock Domain Problem and Invocation-Order Matching}
 \label{sec:clockdomain}
 
@@ -87,15 +132,25 @@ comparison:
   \Comment{per kernel name}
 \For{$k \in \texttt{nsys\_kernels}$}
   \State $i \gets \textit{counter}[k.\textit{name}]$
+  \If{$i \ge |\texttt{ncu\_rows}[k.\textit{name}]|$}
+    \State \textbf{raise} \texttt{InvocationCountMismatchError}($k.\textit{name}$, $i$)
+    \Comment{iteration count mismatch between captures}
+  \EndIf
   \State $k.\textit{metrics} \gets \texttt{ncu\_rows}[k.\textit{name}][i]$
   \State $\textit{counter}[k.\textit{name}] \mathrel{+}= 1$
 \EndFor
 \end{algorithmic}
 \end{algorithm}
 
-This matching is correct when the workload is deterministic and input shapes are identical between
-the \nsys capture and the \ncu replay.  Shape validation before the replay step enforces this
-invariant (\secref{sec:edgecases}).  \figref{fig:iom} illustrates why timestamp joins fail and how
+This matching is correct when the workload is \emph{deterministic}: the same kernel names must
+appear in the same counts and the same execution order in both the \nsys capture and the \ncu
+replay.  Concretely, models with conditional control flow, dynamic dispatch, or
+\texttt{cudaMallocAsync} workspace kernels can violate this invariant without producing a shape
+error.  \sys validates that per-kernel invocation counts match between the two runs before
+issuing counter assignments; a count mismatch on any kernel name raises
+\texttt{InvocationCountMismatchError} and aborts attribution for that workload.  Shape validation
+before the replay step enforces the shape portion of this invariant
+(\secref{sec:edgecases}).  \figref{fig:iom} illustrates why timestamp joins fail and how
 invocation-order matching avoids the problem.
 
 \begin{figure}[t]
@@ -197,7 +252,7 @@ $O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = number of enclo
          \textit{confidence} $\gets$ MEDIUM
 \Else
   \State $k.\textit{operator} \gets \arg\max_r r.\textit{nesting\_level}$
-         \Comment{innermost (most specific) enclosing range}
+         \Comment{innermost enclosing range; ties broken by latest \texttt{start\_ns}}
   \State $k.\textit{is\_fused} \gets \top$;
          $k.\textit{all\_enclosing} \gets \textit{ranges}$
          \Comment{fused kernel spans multiple operators}
@@ -333,7 +388,10 @@ correlate perfectly).
 \begin{table}[t]
 \centering
 \caption{The 20 hardware counters collected by \sys.  ``Agg.'' denotes the aggregation method
-  applied when multiple kernels are attributed to one operator (see \secref{sec:aggregation}).}
+  applied when multiple kernels are attributed to one operator (see \secref{sec:aggregation}).
+  $\dagger$~\texttt{warp\_cycles\_per\_instr} is absent from the Blackwell counter set (sm\_120);
+  \texttt{eligible\_cycles\_pct} (counter~14) serves as the latency-bound indicator on the
+  RTX PRO 6000 used for all experiments reported here.}
 \label{tab:counters}
 \scriptsize
 \setlength{\tabcolsep}{4pt}
@@ -353,7 +411,7 @@ correlate perfectly).
 10 & \texttt{tensor\_core\_active\_pct}   & Tensor Cores     & TC pipeline active (\%)      & DW-mean \\
 11 & \texttt{sm\_active\_cycles}          & Compute          & Total SM active cycles       & SUM \\
 12 & \texttt{achieved\_occupancy}         & Occupancy        & Warps active \% of peak      & DW-mean \\
-13 & \texttt{warp\_cycles\_per\_instr}    & Latency          & Cycles per issued instruction & DW-mean \\
+13$\dagger$ & \texttt{warp\_cycles\_per\_instr}    & Latency          & Cycles per issued instruction & DW-mean \\
 14 & \texttt{eligible\_cycles\_pct}       & Latency          & Eligible warp issue rate (\%) & DW-mean \\
 15 & \texttt{executed\_instructions}      & Throughput       & Total executed instructions  & SUM \\
 16 & \texttt{ipc\_active}                 & Throughput       & IPC when SM active           & DW-mean \\
@@ -389,8 +447,17 @@ spills), \sys uses plain summation.  For per-kernel constants (register count, s
 \sys takes the maximum across all kernels, since the highest-pressure kernel limits occupancy.
 
 % -------------------------------------------------------
-\section{Profile-Guided Optimization Backend}
+\section{Applying the Profile: Optimization Case Study}
 \label{sec:pgo}
+
+To demonstrate that the attributed hardware profiles produced in \secref{sec:attribution}
+are actionable, we implement a profile-guided optimization workflow in which per-operator
+counter values from \texttt{profile.json} drive the selection of FX graph transformations.
+This section describes the optimization infrastructure and patterns; their empirical results
+are in \secref{sec:experiments}.  The optimization layer is one possible downstream
+application of the attribution pipeline---others include hardware-aware neural architecture
+search, performance regression detection in CI, and kernel-level profiling of serving stacks
+such as vLLM or SGLang.
 
 \subsection{FX Pass Infrastructure}
 
@@ -412,18 +479,58 @@ for pattern_fn, replacement_fn in get_passes():
 \end{lstlisting}
 
 Custom backends are registered via Torch Dynamo's backend hook and receive
-the Aten IR \texttt{GraphModule} before Inductor lowering:
+the Aten IR \texttt{GraphModule} before Inductor lowering.
 
+\subsection{Three-Level FX Pass Architecture}
+\label{sec:threelevel}
+
+Profile-guided optimizations are routed across three IR levels depending on the
+graph representation at which each transformation is expressible.
+
+\textbf{Level 1 --- Functional (pre-AOTAutograd).}
+Fusion and operator substitution passes run here.  The key invariant is that the
+Dynamo graph preserves the single shared-activation node for operations like a QKV
+projection: at this level, three linear layers reading from one \texttt{LayerNorm}
+output form a three-GEMM pattern that can be fused into one wide GEMM.
+AOTAutograd decomposition shatters that shared node into per-consumer
+\texttt{aten.view} copies, making the pattern undetectable at the Aten level.
+SDPA canonicalization similarly requires the high-level \texttt{F.scaled\_dot\_product\_attention}
+call node, which is replaced by Inductor-specific primitives after decomposition.
+
+\textbf{Level 2 --- Aten IR (\texttt{\_aten\_inner\_compile}).}
+Dtype casts, BatchNorm folding, and channels-last annotation run against the fully
+decomposed \texttt{torch.ops.aten.*} node set.  An important subtlety: the
+\texttt{example\_inputs} argument of \texttt{inner\_compile} may be \texttt{FakeTensor}
+objects (symbolic values without storage), making it impossible to read weight values
+directly.  Weight-reading passes (BN fold, pre-transposition) receive \texttt{real\_inputs}
+threaded through \texttt{functools.partial} at the outer backend call site, before any
+compilation begins.
+
+\textbf{Level 3 --- Inductor config (\texttt{config\_patches}).}
+Non-graph directives---\texttt{freezing}, \texttt{max\_autotune}, \texttt{max\_autotune\_gemm}---
+are passed as a scoped configuration dictionary to \texttt{compile\_fx} rather than
+mutating the global \texttt{torch.\_inductor.config}.  This ensures the policy applies
+only to the specific compilation and cannot leak across compilation units.
+
+The three levels compose as a fixed funnel:
 \begin{lstlisting}[style=pystyle]
-@torch._dynamo.register_backend("my_workload_opt")
-def my_backend(
-    gm: torch.fx.GraphModule,
-    example_inputs: list[torch.Tensor],
-) -> Callable:
-    # apply profile-guided modifications, then delegate to Inductor
-    return compile_fx(gm, example_inputs,
-                      config_patches={"max_autotune": True})
+@register_backend
+def my_backend(gm, example_inputs):
+    gm = _run_functional_passes(gm)               # Level 1
+    inner = functools.partial(_aten_inner_compile,
+                              real_inputs=list(example_inputs))
+    return compile_fx(gm, example_inputs,          # Level 2 + 3
+                      inner_compile=inner,
+                      config_patches={"freezing": True})
 \end{lstlisting}
+
+Each pass degrades gracefully: a \texttt{try}/\texttt{except} wrapper logs
+\texttt{WARNING} and returns the graph unchanged if the target pattern is absent,
+so partial optimization is always preferred over a compilation failure.
+\texttt{gm.graph.lint()} is called after each mutation to validate graph invariants.
+When \texttt{UniqueSubgraphRegistry} detects repeated layer structure, the funnel
+runs once per unique representative and shares the compiled callable across all
+structural duplicates---each FX pass is therefore authored once for the full model.
 
 \subsection{Optimization Patterns}
 \label{sec:passes}
@@ -474,22 +581,6 @@ max-autotune
 \end{tabular}
 \end{table}
 
-\textbf{BF16 promotion} is the highest-leverage pattern.  On Ampere and newer
-architectures, BF16 operands route all GEMM calls through Tensor Core HMMA tiles,
-delivering up to $16\times$ raw FLOP throughput over FP32 scalar SIMT on A100
-(312\,TFLOPS vs.\ 19.5\,TFLOPS).  It is applied only when the profiler diagnoses
-\texttt{tensor\_core\_active\_pct} $\approx 0$, ruling out models that already use
-mixed precision.
-
-\textbf{Weight pre-transposition} uses \texttt{torch.fx.subgraph\_rewriter.replace\_pattern}
-to detect the pattern \texttt{mm(x, aten.t(W))} where $W.\textit{shape}[0] \ge 512$.
-It pre-computes $W^\top.\texttt{contiguous()}$ at graph compile time, registers it
-as a model buffer, and replaces the runtime transpose node with a direct
-\texttt{get\_attr}.  This switches cuBLAS from the \texttt{gemmSN\_TN} path
-(sub-optimal L2 tiling for tall-$K$ TN matrices) to the \texttt{gemmSN\_NN} path.
-In \texttt{gpt2\_optimized.py}, this pass ran but did not apply because the
-\texttt{aten.t(get\_attr)} pattern is absent from the pre-Inductor graph; the pass
-degrades gracefully with a diagnostic warning.
 
 \subsection{Layer Deduplication}
 \label{sec:dedup}
@@ -515,19 +606,27 @@ ${\sim}$3--5\,min---a 12$\times$ improvement.  Layer deduplication is activated
 automatically by \texttt{run\_workload.py} when structurally repeated partitions
 are detected.
 
+\textbf{Warmup-gating fix.}  An important correctness invariant: the
+\texttt{layer::unique::} and \texttt{layer::duplicate::} NVTX ranges must only be
+emitted during the \emph{measured} capture window, not during warmup iterations.
+\texttt{run\_workload.py} gates all layer-partition NVTX emission behind an
+\texttt{\_NVTX\_STATE[`active']} flag that is set only after warmup completes.
+Without this guard, warmup-phase kernels appear in the nsys trace inside
+layer-partition ranges, causing \texttt{ManifestBuilder} to misattribute them to
+operators rather than classifying them as pre-NVTX initialization---inflating
+attributed kernel counts and biasing operator durations.
+
 \subsection{Closed-Loop Validation Protocol}
 \label{sec:validation}
 
 The full optimization cycle consists of four steps:
 \begin{enumerate}
-  \item \textbf{Profile}: capture baseline \texttt{profile.json} via \nsys + \ncu pipeline.
-  \item \textbf{Diagnose}: \texttt{profile.json} is examined per-operator; the Claude Code
-    plugin's \textbf{optimization-strategist} agent derives a time budget and edge case flags
-    directly from \texttt{profile.json}, then reasons open-endedly from raw hardware counters
-    to produce \texttt{optimizations.json} with ranked proposals and recommended patterns.
-  \item \textbf{Transform}: implement a workload-specific optimized backend (or use the
-    plugin's \textbf{backend-engineer} agent to generate one); run
-    \texttt{torch.compile(model, backend="<workload>\_opt")} to apply the patterns and compile.
+  \item \textbf{Profile}: capture baseline \texttt{profile.json} via \nsys + \ncu pipeline. The \nsys capture runs with GPU clocks locked to the probe-and-cache frequency (\secref{sec:clocklocking}); the same cached clock is reused for the optimized re-capture in step~4, ensuring duration ratios reflect architectural changes rather than thermal variation.
+  \item \textbf{Diagnose}: \texttt{profile.json} is examined per-operator; per-operator hardware
+    counter values are used to produce ranked optimization proposals (\texttt{optimizations.json})
+    with evidence citations and dependency ordering.
+  \item \textbf{Transform}: implement a workload-specific optimized backend;
+    run \texttt{torch.compile(model, backend="<workload>\_opt")} to apply the patterns and compile.
   \item \textbf{Validate}: capture optimized \texttt{profile\_optimized.json}; generate a delta
     report comparing per-operator counter values, flagging any regression.
 \end{enumerate}
@@ -536,39 +635,42 @@ This protocol makes every optimization auditable: the delta report shows not jus
 \emph{which counter improved}, providing evidence that the diagnosed bottleneck was actually
 eliminated rather than merely shifted to a different operator.
 
-\subsection{Automated Optimization via Claude Code Plugin}
-\label{sec:plugin}
+% -------------------------------------------------------
+\section{Design Challenges}
+\label{sec:challenges}
 
-The closed-loop protocol above requires coordinating five distinct tools: \nsys, \ncu, the
-attribution engine, the Torch Dynamo backend, and a second profiling pass.  \sys ships a
-Claude Code plugin that automates all seven stages---baseline capture, FX
-optimization proposals, backend code generation, 5-step validation, re-profiling,
-cross-profile comparison, and human-readable reporting---in a single command:
+Implementing \sys required resolving several non-obvious engineering obstacles.
+We document them here as they motivate the design decisions in \secref{sec:attribution}
+and \secref{sec:pgo}, and because the failure modes are not documented elsewhere.
 
-\begin{lstlisting}[style=pystyle]
-/optimize workload.py
-\end{lstlisting}
+\subsection*{CUPTI Exclusivity: Two-Phase Capture}
 
-The plugin orchestrates five specialized LLM agents.  \textbf{capture-agent} handles the \nsys
-+ \ncu pipeline including executable auto-detection and \texttt{sudo} permission propagation;
-\textbf{optimization-strategist} reads \texttt{profile.json} directly, derives a time budget
-and edge case flags, and produces \texttt{optimizations.json}
-with ranked FX proposals, exact metric-evidence citations, and dependency ordering;
-\textbf{backend-engineer} generates \texttt{workload\_optimized.py} with workload-specific
-optimization patterns (pre-compile modifications and/or FX graph rewrites) and a pytest suite; \textbf{validation-agent} runs the 5-step pass/fail validation sequence
-and classifies which FX passes applied vs.\ fell through gracefully; and
-\textbf{/report} normalizes for batch-size differences, attributes measured counter
-deltas to specific transformations, and writes \texttt{report.md}.
+\nsys and \texttt{torch.profiler} both consume CUPTI for kernel timing and cannot run simultaneously within the same process.  An early design ran the torch.profiler correlation pass \emph{inside} an \texttt{nsys profile} invocation, expecting both to collect independently.  In practice, CUPTI preempts the \texttt{torch.profiler} callback with no error; the correlation pass produces a \texttt{.corr.json} with zero entries, and the silence makes the failure invisible.  The pipeline was redesigned as two sequential invocations: Phase~1 is a plain Python run (no nsys) that captures torch.profiler output and writes \texttt{.corr.json}; Phase~2 runs under \texttt{nsys profile} and reuses the Inductor cache from Phase~1.
 
-Four Claude Code hooks maintain workflow continuity: write of \texttt{profile.json} prompts
-\texttt{/propose}; write of \texttt{optimizations.json} prompts \texttt{/backend}; write of
-\texttt{*\_optimized.py} prompts \texttt{/validate}; and a pre-Bash hook enforces
-\texttt{--script-args} ordering in all \texttt{operator-profiler map} invocations.  A bundled
-knowledge base provides GPU roofline reference data for 12 GPU architectures, canonical FX
-pass implementations, and attribution edge-case guidance.  The plugin is installable without
-cloning the repository:
+\subsection*{NVTX v3 Static Linking: ncu Range Mode Abandoned}
 
-\begin{lstlisting}[style=pystyle]
-/plugin marketplace add yottalabsai/Profiler
-/plugin install nvidia-profiler@profiler-plugins
-\end{lstlisting}
+An appealing approach was to use \ncu's \texttt{--filter-by-nvtx-range} to replay only the kernels within each \texttt{aten::} NVTX range, collecting per-operator hardware counters without a full-workload replay.  PyTorch~2.x statically links NVTX~v3 inside \texttt{libtorch\_cuda.so}, whereas \ncu's injection hooks target the dynamically-loaded NVTX library.  As a result, \ncu's injection mechanism never observes any NVTX events; range filters silently capture nothing regardless of \texttt{emit\_nvtx} activity.  Application-mode replay (\texttt{--replay-mode application}) is the only path that reliably collects counters for Inductor-compiled workloads.
+
+\subsection*{Functional vs.\ Aten IR Level Mismatch}
+
+The initial backend implementation applied all FX passes at a single IR level.  Profiling the GPT-2 workload revealed that QKV fusion patterns were not found at runtime: after AOTAutograd decomposition, the shared \texttt{q/k/v} activation node had been replicated into per-consumer \texttt{aten.view} copies, destroying the three-GEMM pattern the fusion matcher expected.  This motivated the three-level architecture (\secref{sec:threelevel}).  The fix was non-trivial because the Dynamo functional level and the post-AOTAutograd Aten level look superficially similar; the difference only surfaces at profiling time when a supposedly-applied pass produces no measurable counter change.
+
+\subsection*{FakeTensor Opacity in \texttt{\_aten\_inner\_compile}}
+
+The \texttt{example\_inputs} argument of Inductor's \texttt{inner\_compile} hook may be \texttt{FakeTensor} objects---symbolic values that carry shape and dtype metadata but have no allocated storage.  An initial implementation of BatchNorm folding attempted to read \texttt{.data} from these tensors and crashed with storage-access errors.  The fix threads \texttt{real\_inputs = list(example\_inputs)} from the outer backend entry point before any \texttt{compile\_fx} call, so weight-reading passes operate on concrete tensors while Inductor's trace receives the \texttt{FakeTensor} inputs it expects.
+
+\subsection*{GPU Clock Drift}
+
+Initial example profiles were captured without clock management.  Baseline and optimized captures made at different times---with the optimized workload running cooler due to fewer scalar SIMT FLOPs---showed spurious duration differences on operators that were architecturally unchanged.  In one case the apparent speedup on an unmodified kernel exceeded 1.2$\times$, solely from clock drift.  The probe-and-lock mechanism (\secref{sec:clocklocking}) was added after this was identified as a systematic bias in the before/after comparison.
+
+\subsection*{NVTX Warmup Attribution Contamination}
+
+The layer deduplication NVTX wrapping initially emitted \texttt{layer::unique::} and \texttt{layer::duplicate::} ranges for every forward pass, including warmup iterations.  \texttt{ManifestBuilder}'s \texttt{\_tag\_layer\_partitions} attributed kernels launched during warmup to their enclosing layer-partition ranges, introducing warmup-only compilation artifacts into operator profiles and inflating attribution coverage.  The fix gates range emission behind an \texttt{\_NVTX\_STATE[`active']} flag set only after warmup completes.  Both bugs (clock drift and warmup contamination) were discovered concurrently and corrected in the same pipeline revision.
+
+\subsection*{Kernel Invocation Count Invariant}
+
+Invocation-order matching (\algref{alg:iom}) is correct only when the \texttt{--warmup-iters} and \texttt{--measure-iters} counts are identical between the \nsys capture and the \ncu replay.  A mismatch shifts kernel invocation indices, causing hardware counters to be assigned to the wrong operator call without any runtime error.  This invariant was violated during early development when a second \nsys capture used different iteration counts without regenerating the manifest; the resulting \texttt{profile.json} contained plausible-looking but incorrect counter values.  The pipeline now validates iteration counts before initiating replay.
+
+\subsection*{sudo Environment Stripping Under \texttt{env\_reset}}
+
+\ncu requires elevated privileges to access GPU performance counters.  Running \texttt{sudo ncu} on a system with the default \texttt{sudoers env\_reset} rule strips \texttt{PYTHONPATH} from the subprocess environment; the workload script imports from \texttt{nvidia.operator\_profiler}, so the subprocess exits with \texttt{ModuleNotFoundError} with no counter output and no obvious connection to the import path.  The fix uses \texttt{sudo env KEY=VAL \ldots\ ncu} to forward environment variables explicitly, bypassing the \texttt{env\_keep} list entirely.
