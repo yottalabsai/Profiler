@@ -70,7 +70,8 @@ On an NVIDIA RTX PRO 6000 Blackwell Server Edition, \sys attributes 95--100\% of
 on GPT-2 and SDPA Attention; LSTM's $>$85\% unattributed fraction is correctly diagnosed as
 cuDNN RNN opacity rather than silently dropped.  Layer deduplication reduces \ncu replay time
 from 30--45\,min to 3--5\,min for GPT-2's 12 identical transformer blocks.  Applying attributed
-profiles to profile-guided optimization across three case studies: GPT-2 achieves
+profiles to profile-guided optimization across three case studies (all speedups are attributed
+kernel wall time at locked GPU clocks): GPT-2 achieves
 \textbf{1.76$\times$} with Tensor Core utilization rising from 0\% to 40.5\% after BF16 GEMM
 promotion (counter-verified); SDPA Attention achieves \textbf{2.24$\times$} via QKV fusion
 raising occupancy from 16.6\% to 73.9\%; LSTM Sequence Encoder achieves \textbf{3.63$\times$}

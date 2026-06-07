@@ -15,8 +15,30 @@ data (LSTM, \secref{sec:cs:lstm}).
 
 \textbf{Hardware.}  All experiments run on a single NVIDIA RTX PRO 6000 Blackwell Server Edition GPU; full hardware specifications are in \secref{sec:appendix:hwspec}.
 
-\textbf{Software.}  PyTorch 2.11.0+cu128; CUDA 12.8; Nsight Systems 2024.6;
-Nsight Compute 2025.4.1; Python 3.11.
+\textbf{Software.}  PyTorch 2.11.0+cu128, CUDA 12.8, Nsight Systems 2024.6,
+Nsight Compute 2025.4.1, Python 3.11.
+
+\textbf{Workloads.}  \tabref{tab:workloads} describes the three workloads evaluated.  Each
+isolates a distinct operator category and hardware challenge; all have complete profiling and
+optimization results on the RTX PRO 6000 Blackwell Server Edition.
+
+\begin{table}[h]
+\centering
+\caption{Case study workloads.  Each is chosen to demonstrate a distinct profile-to-decision
+  pattern; all run on NVIDIA RTX PRO 6000 Blackwell Server Edition using the
+  \texttt{get\_model\_and\_input()} interface.}
+\label{tab:workloads}
+\small
+\begin{tabular}{@{}lcp{3.0cm}p{5.2cm}@{}}
+\toprule
+\textbf{Workload} & \textbf{Batch} & \textbf{Dimensions} & \textbf{Profile Pattern} \\
+\midrule
+GPT-2 (12-layer)   & 4  & hidden=768, FFN=3072, 12 heads, seq=128 & TC idle (\texttt{tensor\_core\_active\_pct}$\approx$0\%) on all GEMM families \\
+SDPA Attention     & 8  & seq=512, dim=512, 8 heads & Low occupancy (16.6\%) + TC idle GEMMs + FP32 attention kernel \\
+LSTM Seq.\ Encoder & 32 & seq=128, hidden=512, 2 layers & Structural: Inductor LSTM decomposition into 1,280 scalar SIMT GEMMs \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \textbf{Measurement protocol.}  Per-operator durations are \nsys CUPTI GPU-domain kernel times.
 Each workload runs 2 warm-up iterations followed by 2 measured iterations; reported times are
@@ -46,30 +68,6 @@ reflects the attributed portion only and may differ from end-to-end wall-clock i
 \end{enumerate*}
 Speedups are reported as \emph{Inductor FP32 baseline} $\div$ \emph{Optimized} in attributed
 kernel wall time at locked clocks.
-
-\subsection{Workloads}
-
-\tabref{tab:workloads} describes the three workloads.  Each workload isolates a distinct operator
-category and hardware challenge.  All three workloads have complete profiling and optimization
-results on the RTX PRO 6000 Blackwell Server Edition.
-
-\begin{table}[h]
-\centering
-\caption{Case study workloads.  Each is chosen to demonstrate a distinct profile-to-decision
-  pattern; all run on NVIDIA RTX PRO 6000 Blackwell Server Edition using the
-  \texttt{get\_model\_and\_input()} interface.}
-\label{tab:workloads}
-\small
-\begin{tabular}{@{}lcp{3.0cm}p{5.2cm}@{}}
-\toprule
-\textbf{Workload} & \textbf{Batch} & \textbf{Dimensions} & \textbf{Profile Pattern} \\
-\midrule
-GPT-2 (12-layer)   & 4  & hidden=768, FFN=3072, 12 heads, seq=128 & TC idle (\texttt{tensor\_core\_active\_pct}$\approx$0\%) on all GEMM families \\
-SDPA Attention     & 8  & seq=512, dim=512, 8 heads & Low occupancy (16.6\%) + TC idle GEMMs + FP32 attention kernel \\
-LSTM Seq.\ Encoder & 32 & seq=128, hidden=512, 2 layers & Structural: Inductor LSTM decomposition into 1,280 scalar SIMT GEMMs \\
-\bottomrule
-\end{tabular}
-\end{table}
 
 \subsection{Attribution Coverage}
 \label{sec:coverage}
@@ -260,7 +258,7 @@ promotion pass (\texttt{OPT-1}) inserts fp32$\leftrightarrow$bf16 casts around e
 and the cleanup pass (\texttt{OPT-4}) was unable to cancel them because OPT-1 restores output
 dtype directly rather than emitting per-node inverse cast pairs.  This grew the Triton
 elementwise family from 72 to 288 kernels ($+$0.66\,ms), reducing what would have been a
-${\sim}$2.1$\times$ end-to-end gain to 1.76$\times$.
+${\sim}$2.1$\times$ total attributed-kernel gain to 1.76$\times$.
 
 \begin{figure}[t]
 \centering
@@ -328,7 +326,7 @@ ${\sim}$2.1$\times$ end-to-end gain to 1.76$\times$.
 \label{fig:speedup_bars}
 \end{figure}
 
-\subsection{Hardware Counter Validation}
+\subsubsection{Hardware Counter Validation}
 
 \tabref{tab:hwcounters} shows hardware counter values before and after optimization for GPT-2
 on the RTX PRO 6000 Blackwell, demonstrating systematic bottleneck elimination.
@@ -378,9 +376,10 @@ improved.
 \textbf{BF16 dtype promotion (OPT-1, +2.37$\times$ on the GEMM family):}
 Casting \texttt{mm}/\texttt{addmm} operands to bf16 reroutes all four projection GEMM families off
 the FP32 SIMT path and onto the Blackwell BF16 Tensor Core path.
-\texttt{tensor\_core\_active\_pct} rose 0.0\%$\to$40.49\% on the FFN representative;
-registers/thread fell 210$\to$96; every \texttt{cutlass\_80\_simt\_sgemm} kernel
-was replaced by \texttt{cutlass\_80\_tensorop\_bf16}.
+\texttt{tensor\_core\_active\_pct} rose 0.0\%$\to$40.49\% on the FFN representative
+and registers/thread fell from 210 to 96.
+Every \texttt{cutlass\_80\_simt\_sgemm} kernel was replaced by
+\texttt{cutlass\_80\_tensorop\_bf16}.
 
 \textbf{SDPA canonicalization (OPT-2, +1.19$\times$ on attention):}
 Switching \texttt{F.scaled\_dot\_product\_attention} to \texttt{is\_causal=True} removes the
@@ -398,7 +397,7 @@ launches, 0.17\,ms) is folded into the GEMM epilogue path in the optimized profi
 The cleanup pass found no per-node inverse cast pairs to cancel because OPT-1 restores output
 dtype directly.  The surviving fp32$\leftrightarrow$bf16 cast traffic ($+$0.66\,ms,
 288 new Triton kernels) is the dominant residual opportunity---reworking OPT-1 to keep activations
-in bf16 across consecutive GEMMs would recover most of this overhead and push end-to-end from
+in bf16 across consecutive GEMMs would recover most of this overhead and push the total attributed-kernel speedup from
 1.76$\times$ toward ${\sim}$2.1$\times$.
 
 \subsection{Case Study 2 --- SDPA Attention: Low Occupancy and QKV Fusion}
@@ -419,7 +418,7 @@ the three Q/K/V projections that shared one \texttt{LayerNorm} activation into a
 128-block launches $\to$ one 384-block launch).  \textbf{Inductor freezing} (OPT-3) pre-laid-out
 the projection weights so the bf16 GEMM autotuner selected aligned templates.
 
-The end-to-end figure (2.24$\times$) is limited by newly-introduced glue kernels---bf16-cast
+The total attributed-kernel speedup (2.24$\times$) is limited by newly-introduced glue kernels---bf16-cast
 boundaries, the QKV split/concat, and a frozen-weight pre-transpose---that total 9.1\% of
 the optimized profile.
 

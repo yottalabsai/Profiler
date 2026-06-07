@@ -10,19 +10,21 @@ The result is \texttt{profile.json}: a hardware-attributed operator profile mapp
 \texttt{aten::} operator to its constituent kernels and their full hardware counter state,
 produced automatically without manual kernel-to-operator correlation.  A curated 20-counter
 metric set with duration-weighted aggregation and architecture-specific fallbacks covers all
-hardware bottleneck axes; GPU clock locking ensures reproducible per-operator duration
-measurements; and layer deduplication reduces \ncu replay time by
+hardware bottleneck axes.
+GPU clock locking ensures reproducible per-operator duration measurements,
+and layer deduplication reduces \ncu replay time by
 $O(\text{num\_duplicate\_layers})$ for models with repeated structure.
 
 To demonstrate that attributed profiles are actionable, we implemented a profile-guided
 FX pass framework (\secref{sec:pgo}) and applied it across three case studies on an NVIDIA
 RTX PRO 6000 Blackwell Server Edition.  Each optimization decision was grounded in a
 specific counter reading from the attributed profile, and each claimed improvement was
-verified by re-profiling at identical locked clocks:
+verified by re-profiling at identical locked clocks (all figures are attributed kernel wall
+time speedups):
 \textbf{1.76$\times$} on GPT-2 (BF16 GEMM promotion, \texttt{tensor\_core\_active\_pct}:
 0\%$\to$40.5\%);
 \textbf{2.24$\times$} on SDPA Attention (QKV fusion raises occupancy 16.6\%$\to$73.9\%;
-SDPA kernel 3.0$\times$); and
+attention kernel $3.0\times$); and
 \textbf{3.63$\times$} on LSTM Sequence Encoder (structural re-routing from Inductor's
 decomposed SIMT path to cuDNN's fused Tensor-Core RNN, diagnosable only via the attribution
 data).  The LSTM case is the clearest illustration of the pipeline's value: the bottleneck

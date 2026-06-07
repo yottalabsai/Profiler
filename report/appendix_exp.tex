@@ -18,7 +18,7 @@ All experiments run on a single GPU:
 \label{sec:appendix:repro}
 
 All three case study workloads are reproduced using the commands below.
-Each workload requires an NVIDIA GPU (Ampere architecture minimum; all experiments in this paper
+Each workload requires an NVIDIA GPU (Ampere architecture minimum---all experiments in this paper
 use an NVIDIA RTX PRO 6000 Blackwell Server Edition), \nsys $\ge$ 2024.6,
 \ncu $\ge$ 2025.4.1, PyTorch 2.11+, and CUDA 12.8.
 
@@ -63,10 +63,49 @@ kernel replays.
 \subsection{Hardware Counter Reference}
 \label{sec:appendix:counters}
 
-\tabref{tab:counters_full} lists the architecture-specific \ncu counter name
-variants for the five counters that differ across Ampere, Hopper, and
-Blackwell.  \sys queries all variants and uses the first that returns a
+\tabref{tab:counters} lists all 20 counters collected by \sys, their bottleneck axis,
+what they measure, and their aggregation method.  \tabref{tab:counters_full} lists the
+architecture-specific \ncu counter name variants for the five counters that differ across
+Ampere, Hopper, and Blackwell.  \sys queries all variants and uses the first that returns a
 non-null value.
+
+\begin{table}[h]
+\centering
+\caption{The 20 hardware counters collected by \sys.  ``Agg.'' denotes the aggregation method
+  applied when multiple kernels are attributed to one operator (see \secref{sec:aggregation}).
+  $\dagger$~\texttt{warp\_cycles\_per\_instr} is absent from the Blackwell counter set (sm\_120);
+  \texttt{eligible\_cycles\_pct} (counter~14) serves as the latency-bound indicator on the
+  RTX PRO 6000 used for all experiments reported here.}
+\label{tab:counters}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{clllc}
+\toprule
+\textbf{\#} & \textbf{Profile Field} & \textbf{Bottleneck Axis} & \textbf{Measures} & \textbf{Agg.}\\
+\midrule
+1  & \texttt{gpu\_time\_duration\_ns}      & Latency          & GPU wall time                & SUM \\
+2  & \texttt{dram\_bytes\_read}            & Memory BW        & DRAM read bytes              & SUM \\
+3  & \texttt{dram\_bytes\_written}         & Memory BW        & DRAM write bytes             & SUM \\
+4  & \texttt{memory\_throughput\_pct}      & Memory BW        & Memory subsystem \% peak     & DW-mean \\
+5  & \texttt{dram\_throughput\_pct}        & Memory BW        & DRAM \% of peak BW           & DW-mean \\
+6  & \texttt{mem\_busy\_pct}              & L1 pipeline      & L1 pipeline \% peak active   & DW-mean \\
+7  & \texttt{l1\_hit\_rate}               & Cache            & L1 cache hit rate (\%)       & DW-mean \\
+8  & \texttt{l2\_hit\_rate}               & Cache            & L2 cache hit rate (\%)       & DW-mean \\
+9  & \texttt{sm\_throughput\_pct}         & Compute          & SM \% of peak throughput     & DW-mean \\
+10 & \texttt{tensor\_core\_active\_pct}   & Tensor Cores     & TC pipeline active (\%)      & DW-mean \\
+11 & \texttt{sm\_active\_cycles}          & Compute          & Total SM active cycles       & SUM \\
+12 & \texttt{achieved\_occupancy}         & Occupancy        & Warps active \% of peak      & DW-mean \\
+13$\dagger$ & \texttt{warp\_cycles\_per\_instr}    & Latency          & Cycles per issued instruction & DW-mean \\
+14 & \texttt{eligible\_cycles\_pct}       & Latency          & Eligible warp issue rate (\%) & DW-mean \\
+15 & \texttt{executed\_instructions}      & Throughput       & Total executed instructions  & SUM \\
+16 & \texttt{ipc\_active}                 & Throughput       & IPC when SM active           & DW-mean \\
+17 & \texttt{avg\_threads\_per\_warp}     & Divergence       & Avg threads active per warp  & DW-mean \\
+18 & \texttt{registers\_per\_thread}      & Reg.\ pressure   & Registers allocated / thread & MAX \\
+19 & \texttt{local\_memory\_spills}       & Reg.\ spills     & Spill events to L1 local mem & SUM \\
+20 & \texttt{dynamic\_smem\_per\_block}   & SMEM pressure    & Dynamic shared mem / block   & MAX \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{table}[h]
 \centering

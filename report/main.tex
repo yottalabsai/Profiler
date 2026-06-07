@@ -46,8 +46,8 @@ links NVIDIA Nsight Compute hardware metrics to PyTorch \texttt{aten::} operator
 temporal enclosure with per-stream interval trees and invocation-order matching---avoiding
 timestamp joins across incompatible clock domains. A curated 20-counter metric set with
 duration-weighted aggregation covers all hardware bottleneck axes; layer deduplication reduces
-\ncu replay time by $O(\text{num\_duplicate\_layers})$ for models with repeated structure;
-and GPU clock locking ensures reproducible per-operator duration measurements.
+\ncu replay time by $O(\text{num\_duplicate\_layers})$ for models with repeated structure.
+GPU clock locking ensures reproducible per-operator duration measurements.
 On an NVIDIA RTX PRO 6000 Blackwell Server Edition, \sys attributes 95--100\% of kernel
 runtime across most evaluated workloads; structurally opaque backends (e.g., cuDNN's RNN
 path) are correctly surfaced as unattributed rather than silently dropped.
@@ -57,6 +57,7 @@ decision grounded in a specific counter symptom: Tensor Core idle on GEMM operat
 (\textbf{1.76$\times$} on GPT-2), low occupancy driving QKV fusion (\textbf{2.24$\times$}
 on SDPA Attention), and structural miscompilation only diagnosable through attribution data
 (\textbf{3.63$\times$} on LSTM Sequence Encoder).
+All speedups are attributed kernel wall time at locked GPU clocks.
 \end{abstract}
 
 \input{intro}

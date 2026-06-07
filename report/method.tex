@@ -370,6 +370,40 @@ UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN conv.); eager Triton w
 
 \end{enumerate}
 
+\subsection{Layer Deduplication}
+\label{sec:dedup}
+
+For models with repeated structure (\eg transformer decoder blocks), profiling and
+compiling every layer independently costs $O(N)$ ncu replay time.
+\texttt{UniqueSubgraphRegistry} detects structurally identical FX subgraphs by
+computing a canonical hash of each partition's node types and connectivity.  Only
+one representative per equivalence class is compiled and profiled; metrics and
+compiled callables are propagated to all structural duplicates by positional index
+within each partition group.
+
+The deduplication is transparent to the outer profiling loop: each duplicate
+partition's forward pass is wrapped with an NVTX range tagged
+\texttt{layer::duplicate::<label>}, and the partition equivalence map (written to
+\texttt{<prefix>.part.json} during the correlation pass) is passed to
+\texttt{KernelProfileConfig} so the \ncu orchestrator skips duplicate-partition
+kernels during replay and propagates metrics from the unique representative.
+
+\textbf{Impact.}  For GPT-2 (12 identical transformer blocks),
+deduplication reduces \ncu replay time from ${\sim}$30--45\,min to
+${\sim}$3--5\,min---a 12$\times$ improvement.  Layer deduplication is activated
+automatically by \texttt{run\_workload.py} when structurally repeated partitions
+are detected.
+
+\textbf{Warmup-gating fix.}  An important correctness invariant: the
+\texttt{layer::unique::} and \texttt{layer::duplicate::} NVTX ranges must only be
+emitted during the \emph{measured} capture window, not during warmup iterations.
+\texttt{run\_workload.py} gates all layer-partition NVTX emission behind an
+\texttt{\_NVTX\_STATE[`active']} flag that is set only after warmup completes.
+Without this guard, warmup-phase kernels appear in the nsys trace inside
+layer-partition ranges, causing \texttt{ManifestBuilder} to misattribute them to
+operators rather than classifying them as pre-NVTX initialization---inflating
+attributed kernel counts and biasing operator durations.
+
 % -------------------------------------------------------
 \section{Metric Set and Aggregation}
 \label{sec:metrics}
@@ -385,49 +419,12 @@ correlate perfectly).
 
 \subsection{The 20-Counter Set}
 
-\begin{table}[t]
-\centering
-\caption{The 20 hardware counters collected by \sys.  ``Agg.'' denotes the aggregation method
-  applied when multiple kernels are attributed to one operator (see \secref{sec:aggregation}).
-  $\dagger$~\texttt{warp\_cycles\_per\_instr} is absent from the Blackwell counter set (sm\_120);
-  \texttt{eligible\_cycles\_pct} (counter~14) serves as the latency-bound indicator on the
-  RTX PRO 6000 used for all experiments reported here.}
-\label{tab:counters}
-\scriptsize
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{clllc}
-\toprule
-\textbf{\#} & \textbf{Profile Field} & \textbf{Bottleneck Axis} & \textbf{Measures} & \textbf{Agg.}\\
-\midrule
-1  & \texttt{gpu\_time\_duration\_ns}      & Latency          & GPU wall time                & SUM \\
-2  & \texttt{dram\_bytes\_read}            & Memory BW        & DRAM read bytes              & SUM \\
-3  & \texttt{dram\_bytes\_written}         & Memory BW        & DRAM write bytes             & SUM \\
-4  & \texttt{memory\_throughput\_pct}      & Memory BW        & Memory subsystem \% peak     & DW-mean \\
-5  & \texttt{dram\_throughput\_pct}        & Memory BW        & DRAM \% of peak BW           & DW-mean \\
-6  & \texttt{mem\_busy\_pct}              & L1 pipeline      & L1 pipeline \% peak active   & DW-mean \\
-7  & \texttt{l1\_hit\_rate}               & Cache            & L1 cache hit rate (\%)       & DW-mean \\
-8  & \texttt{l2\_hit\_rate}               & Cache            & L2 cache hit rate (\%)       & DW-mean \\
-9  & \texttt{sm\_throughput\_pct}         & Compute          & SM \% of peak throughput     & DW-mean \\
-10 & \texttt{tensor\_core\_active\_pct}   & Tensor Cores     & TC pipeline active (\%)      & DW-mean \\
-11 & \texttt{sm\_active\_cycles}          & Compute          & Total SM active cycles       & SUM \\
-12 & \texttt{achieved\_occupancy}         & Occupancy        & Warps active \% of peak      & DW-mean \\
-13$\dagger$ & \texttt{warp\_cycles\_per\_instr}    & Latency          & Cycles per issued instruction & DW-mean \\
-14 & \texttt{eligible\_cycles\_pct}       & Latency          & Eligible warp issue rate (\%) & DW-mean \\
-15 & \texttt{executed\_instructions}      & Throughput       & Total executed instructions  & SUM \\
-16 & \texttt{ipc\_active}                 & Throughput       & IPC when SM active           & DW-mean \\
-17 & \texttt{avg\_threads\_per\_warp}     & Divergence       & Avg threads active per warp  & DW-mean \\
-18 & \texttt{registers\_per\_thread}      & Reg.\ pressure   & Registers allocated / thread & MAX \\
-19 & \texttt{local\_memory\_spills}       & Reg.\ spills     & Spill events to L1 local mem & SUM \\
-20 & \texttt{dynamic\_smem\_per\_block}   & SMEM pressure    & Dynamic shared mem / block   & MAX \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\tabref{tab:counters} lists all 20 counters, their bottleneck axis, what they measure, and their
-aggregation method.  Seven counters require architecture-specific name fallbacks between Ampere
-(e.g.\ \texttt{dram\_\_bytes\_read.sum}), Hopper, and Blackwell
-(e.g.\ \texttt{dram\_\_bytes\_op\_read.sum} or \texttt{fbpa\_\_dram\_read\_bytes.sum});
-\sys queries all variants and uses the first that returns a value.
+\sys collects 20 hardware counters covering all major bottleneck axes: memory bandwidth,
+compute throughput, Tensor Core utilization, occupancy, latency, and register pressure.
+The full counter list with bottleneck axis, aggregation method, and architecture-specific
+name fallbacks is in \tabref{tab:counters} (\secref{sec:appendix:counters}).  Seven counters
+require name fallbacks between Ampere, Hopper, and Blackwell; \sys queries all variants and
+uses the first that returns a value.
 
 \subsection{Duration-Weighted Aggregation}
 \label{sec:aggregation}
@@ -582,40 +579,6 @@ max-autotune
 \end{table}
 
 
-\subsection{Layer Deduplication}
-\label{sec:dedup}
-
-For models with repeated structure (\eg transformer decoder blocks), profiling and
-compiling every layer independently costs $O(N)$ ncu replay time.
-\texttt{UniqueSubgraphRegistry} detects structurally identical FX subgraphs by
-computing a canonical hash of each partition's node types and connectivity.  Only
-one representative per equivalence class is compiled and profiled; metrics and
-compiled callables are propagated to all structural duplicates by positional index
-within each partition group.
-
-The deduplication is transparent to the outer profiling loop: each duplicate
-partition's forward pass is wrapped with an NVTX range tagged
-\texttt{layer::duplicate::<label>}, and the partition equivalence map (written to
-\texttt{<prefix>.part.json} during the correlation pass) is passed to
-\texttt{KernelProfileConfig} so the \ncu orchestrator skips duplicate-partition
-kernels during replay and propagates metrics from the unique representative.
-
-\textbf{Impact.}  For GPT-2 (12 identical transformer blocks),
-deduplication reduces \ncu replay time from ${\sim}$30--45\,min to
-${\sim}$3--5\,min---a 12$\times$ improvement.  Layer deduplication is activated
-automatically by \texttt{run\_workload.py} when structurally repeated partitions
-are detected.
-
-\textbf{Warmup-gating fix.}  An important correctness invariant: the
-\texttt{layer::unique::} and \texttt{layer::duplicate::} NVTX ranges must only be
-emitted during the \emph{measured} capture window, not during warmup iterations.
-\texttt{run\_workload.py} gates all layer-partition NVTX emission behind an
-\texttt{\_NVTX\_STATE[`active']} flag that is set only after warmup completes.
-Without this guard, warmup-phase kernels appear in the nsys trace inside
-layer-partition ranges, causing \texttt{ManifestBuilder} to misattribute them to
-operators rather than classifying them as pre-NVTX initialization---inflating
-attributed kernel counts and biasing operator durations.
-
 \subsection{Closed-Loop Validation Protocol}
 \label{sec:validation}
 
@@ -625,9 +588,9 @@ The full optimization cycle consists of four steps:
   \item \textbf{Diagnose}: \texttt{profile.json} is examined per-operator; per-operator hardware
     counter values are used to produce ranked optimization proposals (\texttt{optimizations.json})
     with evidence citations and dependency ordering.
-  \item \textbf{Transform}: implement a workload-specific optimized backend;
+  \item \textbf{Transform}: implement a workload-specific optimized backend and
     run \texttt{torch.compile(model, backend="<workload>\_opt")} to apply the patterns and compile.
-  \item \textbf{Validate}: capture optimized \texttt{profile\_optimized.json}; generate a delta
+  \item \textbf{Validate}: capture optimized \texttt{profile\_optimized.json} and generate a delta
     report comparing per-operator counter values, flagging any regression.
 \end{enumerate}
 
