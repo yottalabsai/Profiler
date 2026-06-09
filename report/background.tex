@@ -34,17 +34,6 @@ traces them to an FX graph in the Aten IR (\texttt{torch.ops.aten.*}).  Inductor
 graph to Triton-generated GPU kernels, applying fusion heuristics such as pointwise-into-reduction
 and elementwise-chaining.
 
-Custom compilation backends are registered via:
-\begin{lstlisting}[style=pystyle]
-@torch._dynamo.register_backend("my_backend")
-def my_backend(gm: torch.fx.GraphModule,
-               example_inputs) -> Callable:
-    # apply FX passes, then compile
-    return torch._inductor.compile_fx(gm, example_inputs)
-\end{lstlisting}
-This hook intercepts the Aten IR \texttt{GraphModule} before Inductor processes it, enabling
-hardware-informed FX passes to modify the graph based on profiling data (\secref{sec:pgo}).
-
 Triton \cite{triton2019} generates fused kernels whose names encode constituent operations, \eg
 \texttt{triton\_poi\_fused\_relu\_addmm\_0} for a pointwise kernel fusing \texttt{relu} and
 \texttt{addmm}.  When NVTX ranges are absent or ambiguous, these names provide a low-confidence
@@ -62,12 +51,12 @@ taxonomy at the per-operator level using hardware counters:
 \begin{itemize}[leftmargin=1.5em]
   \item \textbf{Tensor Core idle} (\texttt{tensor\_core\_active\_pct} $\approx 0$):
     compute-bound path is not engaging hardware-accelerated units; fix via dtype change
-    (\secref{sec:passes}).
+    (\secref{sec:cs:gpt2}).
   \item \textbf{Wave starvation} (Waves/SM~$<$~1, i.e., total thread blocks launched
     $<$ SM count): fewer blocks than SMs leaves some processors completely idle
     regardless of per-SM warp occupancy; observable as low \texttt{achieved\_occupancy}
     combined with small grid dimensions; fix via batch padding or kernel fusion
-    (\secref{sec:passes}).
+    (\secref{sec:cs:sdpa}).
   \item \textbf{Register pressure} (\texttt{registers\_per\_thread} $> 128$):
     NVIDIA SMs provide 65,536 registers per SM with a maximum of 2,048 resident
     threads~\cite{cudaprogrammingguide}; at 128 registers per thread the
@@ -80,10 +69,9 @@ taxonomy at the per-operator level using hardware counters:
     and the kernel is saturating DRAM bandwidth---placing it on the memory-bandwidth
     ceiling of the Roofline model~\cite{williams2009roofline}; on GEMM paths this
     typically signals a column-major vs.\ row-major layout mismatch; fix via weight
-    pre-transposition (\secref{sec:passes}).
+    pre-transposition.
   \item \textbf{Memory spill} (\texttt{local\_memory\_spills} $> 0$):
-    register-file overflow to L1; fix via kernel substitution (FlashAttention-2 vs.\ standard FMHA,
-    \secref{sec:passes}).
+    register-file overflow to L1; fix via kernel substitution (FlashAttention-2 vs.\ standard FMHA).
 \end{itemize}
 
 These five patterns cover the bottlenecks observed across the evaluated workloads in

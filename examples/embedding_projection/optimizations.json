@@ -1,7 +1,7 @@
-{
+﻿{
   "analysis": {
     "model": "embedding_projection",
-    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "device": "NVIDIA RTX PRO 6000 Blackwell",
     "compile_mode": "inductor",
     "dtype": "float32",
     "total_profiled_wall_time_ms": 12.532871,
@@ -196,7 +196,7 @@
   ],
   "global_notes": [
     "2 operators below 1% threshold omitted (combined 0.66% of attributed time): aten::addmm fused gelu (0.43%) and aten::embedding fused native_layer_norm (0.23%).",
-    "hardware-limits.md was not present in the repository; architecture context derived from the device string 'NVIDIA RTX PRO 6000 Blackwell Server Edition' (Blackwell / GB202-class, ~188 SMs). Per Blackwell guidance, warp_cycles_per_instruction is unavailable (confirmed null for every operator) and latency-bound diagnosis uses eligible_cycles_pct < 20; the dominant GEMMs show eligible_cycles_pct ~64.5%, so they are NOT latency-bound -- they are compute-bound on the SIMT FP32 path.",
+    "hardware-limits.md was not present in the repository; architecture context derived from the device string 'NVIDIA RTX PRO 6000 Blackwell' (Blackwell / GB202-class, ~188 SMs). Per Blackwell guidance, warp_cycles_per_instruction is unavailable (confirmed null for every operator) and latency-bound diagnosis uses eligible_cycles_pct < 20; the dominant GEMMs show eligible_cycles_pct ~64.5%, so they are NOT latency-bound -- they are compute-bound on the SIMT FP32 path.",
     "MCP tools (context7, exa-search, memory, sequential-thinking) were unavailable; per the fallback policy, FX API patterns were drawn from built-in knowledge and novel/uncertain transforms are capped at medium confidence. knowledge/fx-patterns.md was also absent.",
     "fused_kernel_double_count flag set: aten::embedding (fused_with native_layer_norm) and aten::addmm (fused_with view+gelu) are is_fused=true Inductor Triton kernels; their aten-level fused_with members are not separately timed, so do not double-count them. Both fall below the 1% threshold and are not targeted.",
     "duration_ns values are 2-5x inflated by ncu counter-collection overhead and are used here only for RELATIVE comparison within this profile, never as absolute latency.",

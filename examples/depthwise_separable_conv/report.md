@@ -1,4 +1,4 @@
-# Optimization Report — DepthwiseSepConv
+﻿# Optimization Report — DepthwiseSepConv
 
 **This optimization achieved 1.03× total speedup on DepthwiseSepConv (B=16, NVIDIA RTX PRO 6000 Blackwell).** All three proposed FX/config transformations registered and applied cleanly (validation: 4/4), but only the channels-last layout pass (OPT-3) produced a measurable kernel-level change — it cut the NCHW→NHWC boundary-copy operator by 1.47×. The two graph-level passes (Conv-BN fold via freezing, bf16 promotion) applied at the IR level but did **not** transform the lowered kernels, because every convolution in this model lowers to an **extern cuDNN kernel** that Inductor's freezing and dtype-promotion machinery cannot rewrite. The net effect is the layout-copy reduction, partially diluted by per-kernel noise on the unchanged cuDNN convolutions.
 
@@ -8,7 +8,7 @@
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
+| GPU | NVIDIA RTX PRO 6000 Blackwell |
 | Architecture | Blackwell |
 | PyTorch | 2.11.0+cu128 (CUDA 12.8) |
 | Compile mode (baseline) | inductor (built-in dedup backend) |

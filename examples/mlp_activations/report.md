@@ -1,6 +1,6 @@
-# Optimization Report — `mlp_activations`
+﻿# Optimization Report — `mlp_activations`
 
-**This optimization achieved a 3.55× total speedup on MLPActivations (B=256, NVIDIA RTX PRO 6000 Blackwell Server Edition)**, by promoting the four FP32 matmuls onto bf16 tensor cores — a 5.1× win on the GEMMs themselves — of which roughly a quarter is reabsorbed by the newly-introduced bf16 dtype-cast (`aten::copy_`) kernels that the promotion requires.
+**This optimization achieved a 3.55× total speedup on MLPActivations (B=256, NVIDIA RTX PRO 6000 Blackwell)**, by promoting the four FP32 matmuls onto bf16 tensor cores — a 5.1× win on the GEMMs themselves — of which roughly a quarter is reabsorbed by the newly-introduced bf16 dtype-cast (`aten::copy_`) kernels that the promotion requires.
 
 ---
 
@@ -8,7 +8,7 @@
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
+| GPU | NVIDIA RTX PRO 6000 Blackwell |
 | Architecture | Blackwell |
 | PyTorch | 2.11.0+cu128 |
 | Baseline compile mode | `dedup-inductor` (built-in dedup + Inductor backend) |

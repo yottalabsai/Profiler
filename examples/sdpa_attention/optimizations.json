@@ -1,7 +1,7 @@
-{
+﻿{
   "analysis": {
     "model": "sdpa_attention",
-    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "device": "NVIDIA RTX PRO 6000 Blackwell",
     "compile_mode": "dedup_inductor",
     "dtype": "float32",
     "total_profiled_wall_time_ms": 0.905984,
@@ -189,7 +189,7 @@
   "global_notes": [
     "schema_version validated == '1.0'.",
     "0 operators below the 1% threshold omitted (combined 0% of attributed time) -- all 12 measured operators are >= 1%.",
-    "Device 'NVIDIA RTX PRO 6000 Blackwell Server Edition' is not present in any knowledge/hardware-limits.md (the knowledge/ directory does not exist in this repo). Assumed Blackwell GB202-class limits: ~188 SMs, and per the Blackwell rule warp_cycles_per_instruction is unavailable (confirmed: all aggregated.warp_cycles_per_instruction are null) so eligible_cycles_pct (~3.6-4.7% on memory-bound LayerNorm/view, ~58% on GEMMs) was used as the latency-bound indicator. Waves/SM and SM-idle estimates depend on the assumed 188 SM count; treat the wave-quantization numbers as approximate.",
+    "Device 'NVIDIA RTX PRO 6000 Blackwell' is not present in any knowledge/hardware-limits.md (the knowledge/ directory does not exist in this repo). Assumed Blackwell GB202-class limits: ~188 SMs, and per the Blackwell rule warp_cycles_per_instruction is unavailable (confirmed: all aggregated.warp_cycles_per_instruction are null) so eligible_cycles_pct (~3.6-4.7% on memory-bound LayerNorm/view, ~58% on GEMMs) was used as the latency-bound indicator. Waves/SM and SM-idle estimates depend on the assumed 188 SM count; treat the wave-quantization numbers as approximate.",
     "MCP tools (context7, exa-search, memory, sequential-thinking) were unavailable; FX API patterns drawn from built-in knowledge per the documented fallback. Novel-transform confidence cap not triggered -- OPT-1/OPT-2 are standard, well-established transforms.",
     "edge_case_flag 'fused_kernel_double_count': both aten::_efficient_attention_forward ops carry is_fused=true and fused_with the SDPA op; their ncu metric blocks are empty ('raw': {}). SDPA diagnosis therefore relies on the kernel name (fmha_cutlassF_f32_aligned_..._sm80) rather than counters, and their durations should not be summed with the un-fused SDPA op to avoid double counting.",
     "warm_up_inflation could not be evaluated: capture_metadata has no measure_iters field. The profile contains two near-identical sets of op_ids (4/5/6/21 and 26/27/28/43) plus two SDPA ops, consistent with 2 measured forward passes; per-op kernel_count is 1 for each mm. If measure_iters differs from the per-op kernel multiplicity, attribution indexing assumptions in the spec would warrant the flag -- not raised here due to missing metadata.",

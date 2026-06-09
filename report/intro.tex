@@ -1,4 +1,4 @@
-\section{Introduction}
+﻿\section{Introduction}
 \label{sec:intro}
 
 The throughput of a GPU workload is determined by a handful of hardware bottlenecks: memory
@@ -12,8 +12,8 @@ identify the slow operator, guess at the cause, edit the model, repeat. The bott
 PyTorch, not because the hardware data is absent, but because nothing bridges it to the framework.
 
 \paragraph{The attribution gap.}
-\texttt{torch.profiler} and Kineto \cite{kineto2021} record wall-clock durations for each
-\texttt{aten::} operator, but do not access hardware counters. \ncu collects per-kernel hardware
+\texttt{torch.profiler}~\cite{kineto2021} and \nsys record wall-clock durations---at the
+\texttt{aten::} operator and CUDA kernel level respectively---but neither exposes hardware counters. \ncu collects per-kernel hardware
 metrics---occupancy, DRAM bytes, Tensor Core utilization, cache hit rates---but its output is keyed
 on internal CUDA kernel names such as
 \texttt{ampere\_sgemm\_128x32\_tn} or \texttt{triton\_poi\_fused\_relu\_addmm\_0}, with no awareness
@@ -50,23 +50,16 @@ We present \textbf{\sys}, a hardware attribution pipeline for PyTorch. Our contr
   \texttt{StreamIntervalTree} per \texttt{(stream\_id, device\_id)} pair attributes CUDA kernels
   to \texttt{aten::} operators via NVTX temporal enclosure (MEDIUM confidence); a torch.profiler
   invocation-order join provides HIGH-confidence coverage.  Clock-domain joins are avoided
-  entirely.  Unattributed kernels are surfaced explicitly, never dropped.
-
-\item \textbf{20-counter curated metric set (\secref{sec:metrics}).}  Counters span all
-  bottleneck axes with architecture-specific fallbacks for Ampere, Hopper, and Blackwell;
+  entirely.  Unattributed kernels are surfaced explicitly, never dropped.  A curated 20-counter
+  metric set spanning all roofline bottleneck axes is collected via application-mode \ncu replay
+  with architecture-specific counter fallbacks for Ampere, Hopper, and Blackwell;
   duration-weighted aggregation gives long-running kernels proportional influence on
-  operator-level summaries.
-
-\item \textbf{Profile-guided optimization case studies (\secref{sec:pgo}, \secref{sec:experiments}).}
-  To demonstrate that attributed profiles are actionable, we implement a profile-driven FX pass
-  framework and apply it to three workloads.  Each optimization decision is grounded in a specific
-  counter symptom from the attribution output; re-profiling at locked clocks verifies that the
-  diagnosed bottleneck was actually eliminated.
+  operator-level summaries (\secref{sec:metrics}).
 
 \end{enumerate}
 
 \paragraph{Results.}
-On an NVIDIA RTX PRO 6000 Blackwell Server Edition, \sys attributes 95--100\% of kernel runtime
+On an NVIDIA RTX PRO 6000 Blackwell, \sys attributes 95--100\% of kernel runtime
 on GPT-2 and SDPA Attention; LSTM's $>$85\% unattributed fraction is correctly diagnosed as
 cuDNN RNN opacity rather than silently dropped.  Layer deduplication reduces \ncu replay time
 from 30--45\,min to 3--5\,min for GPT-2's 12 identical transformer blocks.  Applying attributed

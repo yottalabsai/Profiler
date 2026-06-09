@@ -1,6 +1,6 @@
-# Optimization Report — `sdpa_attention`
+﻿# Optimization Report — `sdpa_attention`
 
-This optimization achieved a **2.24× total speedup** on the SDPA multi-head attention block (B=8, NVIDIA RTX PRO 6000 Blackwell Server Edition), driven by promoting the FP32 SIMT GEMMs and attention kernel onto bf16 Tensor Cores. The largest single mechanism — the SDPA kernel — sped up ~3.0×, but the end-to-end figure is reabsorbed by newly-introduced bf16-cast / QKV-split / weight-transpose glue kernels (`aten::cat`, `aten::t`, and a wider fused-view group) that did not exist in the baseline.
+This optimization achieved a **2.24× total speedup** on the SDPA multi-head attention block (B=8, NVIDIA RTX PRO 6000 Blackwell), driven by promoting the FP32 SIMT GEMMs and attention kernel onto bf16 Tensor Cores. The largest single mechanism — the SDPA kernel — sped up ~3.0×, but the end-to-end figure is reabsorbed by newly-introduced bf16-cast / QKV-split / weight-transpose glue kernels (`aten::cat`, `aten::t`, and a wider fused-view group) that did not exist in the baseline.
 
 ---
 
@@ -8,7 +8,7 @@ This optimization achieved a **2.24× total speedup** on the SDPA multi-head att
 
 | Field | Value |
 |---|---|
-| GPU model | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs, assumed GB202-class) |
+| GPU model | NVIDIA RTX PRO 6000 Blackwell (~188 SMs, assumed GB202-class) |
 | Architecture family | Blackwell |
 | PyTorch version | 2.11.0+cu128 |
 | Compile mode (baseline) | `dedup_inductor` (built-in dedup + Inductor) |

@@ -1,4 +1,4 @@
-{
+﻿{
   "schema_version": "1.0",
   "capture_metadata": {
     "model_name": "lstm_sequence_encoder",
@@ -8,7 +8,7 @@
     "nsys_report_path": "/home/ubuntu/Profiler/examples/lstm_sequence_encoder/profiler_output/lstm_sequence_encoder.nsys-rep",
     "ncu_report_path": "/home/ubuntu/Profiler/examples/lstm_sequence_encoder/profiler_output/ncu_reps",
     "capture_timestamp_utc": "2026-05-31T20:27:36.379923+00:00",
-    "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell"
   },
   "operators": [
     {

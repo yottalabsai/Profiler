@@ -1,4 +1,4 @@
-\documentclass{article}
+﻿\documentclass{article}
 \PassOptionsToPackage{table,xcdraw}{xcolor}
 \usepackage{xcolor}
 \usepackage{bbm}
@@ -11,6 +11,7 @@
 \usepackage{graphicx}
 \usepackage[colorlinks=true, allcolors=blue]{hyperref}
 \usepackage{booktabs}
+\usepackage{float}
 \usepackage{caption}
 \input{macro_small}
 \input{notation}
@@ -48,7 +49,7 @@ timestamp joins across incompatible clock domains. A curated 20-counter metric s
 duration-weighted aggregation covers all hardware bottleneck axes; layer deduplication reduces
 \ncu replay time by $O(\text{num\_duplicate\_layers})$ for models with repeated structure.
 GPU clock locking ensures reproducible per-operator duration measurements.
-On an NVIDIA RTX PRO 6000 Blackwell Server Edition, \sys attributes 95--100\% of kernel
+On an NVIDIA RTX PRO 6000 Blackwell, \sys attributes 95--100\% of kernel
 runtime across most evaluated workloads; structurally opaque backends (e.g., cuDNN's RNN
 path) are correctly surfaced as unattributed rather than silently dropped.
 To demonstrate that attributed profiles are actionable, we apply them to drive

@@ -1,4 +1,4 @@
-"""
+﻿"""
 lstm_sequence_encoder_optimized.py — Custom torch.compile() backend for the
 stacked-LSTM sequence encoder.
 
@@ -6,7 +6,7 @@ Backend name (registered with torch._dynamo): ``lstm_sequence_encoder_opt``
 
 Source proposal: examples/lstm_sequence_encoder/optimizations.json
 Cross-validated against: examples/lstm_sequence_encoder/profile.json
-    device   = NVIDIA RTX PRO 6000 Blackwell Server Edition
+    device   = NVIDIA RTX PRO 6000 Blackwell
     dtype    = float32 (baseline)
     shapes   = input (B=32, T=128, INPUT_SIZE=256); classifier addmm [32,512]x[512,10]
 

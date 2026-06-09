@@ -1,4 +1,4 @@
-# Optimization Report — conv_block
+﻿# Optimization Report — conv_block
 
 This optimization achieved **1.63× total speedup** on conv_block (B=16, RTX PRO 6000 Blackwell), driven by moving the convolution GEMMs onto bf16 Tensor Cores and eliminating the cuDNN NCHW↔NHWC convert kernels and the standalone BatchNorm kernels; a standout per-operator win — the 64→128 conv dropping from ~104 µs to ~41 µs on the bf16 tensor-op path (Section 7) — is partly reabsorbed by six newly-introduced Triton dtype-convert/elementwise kernels (6.66 µs) that the bf16 promotion adds on the optimized side.
 
@@ -6,7 +6,7 @@ This optimization achieved **1.63× total speedup** on conv_block (B=16, RTX PRO
 
 | Field | Value |
 |---|---|
-| GPU model | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs) |
+| GPU model | NVIDIA RTX PRO 6000 Blackwell (~188 SMs) |
 | Architecture family | Blackwell (GB202) |
 | PyTorch version | 2.11.0+cu128 |
 | Compile mode (baseline) | inductor |

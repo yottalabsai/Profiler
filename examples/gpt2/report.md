@@ -1,4 +1,4 @@
-# GPT-2 Small — GPU Optimization Report
+﻿# GPT-2 Small — GPU Optimization Report
 
 This optimization achieved **1.76× total speedup** on GPT-2 small (B=4, seq=128, RTX PRO 6000 Blackwell), measured end-to-end across all GPU kernels at locked clocks. The mechanism is a dtype promotion that moved every transformer GEMM off the FP32 SIMT path onto the Blackwell bf16 Tensor Cores (the GEMM family alone went 2.37× faster, 6.40 ms → 2.70 ms); part of that win is reabsorbed by new fp32↔bf16 cast Triton kernels that a cleanup pass (OPT-4) was unable to cancel, which is why the end-to-end number is 1.76× rather than ~2.1×.
 
@@ -8,7 +8,7 @@ This optimization achieved **1.76× total speedup** on GPT-2 small (B=4, seq=128
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
+| GPU | NVIDIA RTX PRO 6000 Blackwell |
 | Architecture | Blackwell |
 | PyTorch | 2.11.0+cu128 (CUDA 12.8) |
 | Compile mode (baseline) | `inductor` (built-in dedup backend) |

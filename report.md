@@ -1,4 +1,4 @@
-# GPT-2 Optimization Report
+﻿# GPT-2 Optimization Report
 
 **This optimization achieved a 1.95× speedup on the GEMM compute path (1.82× across all attributed compute) for GPT-2 small (B=4, S=128) on an NVIDIA RTX PRO 6000 Blackwell — by moving every Linear-layer matmul off the idle-Tensor-Core FP32 SIMT path onto BF16 Tensor Cores.**
 
@@ -8,7 +8,7 @@
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (sm_120, ~188 SMs assumed GB202) |
+| GPU | NVIDIA RTX PRO 6000 Blackwell (sm_120, ~188 SMs assumed GB202) |
 | Architecture family | Blackwell |
 | PyTorch | 2.11.0+cu128 |
 | Compile mode (baseline) | inductor (built-in dedup backend) |

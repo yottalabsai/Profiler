@@ -1,4 +1,4 @@
-\section{Reproduction and Additional Details}
+﻿\section{Reproduction and Additional Details}
 \label{sec:appendix:exp}
 
 \subsection{Hardware Specification}
@@ -6,7 +6,7 @@
 
 All experiments run on a single GPU:
 \begin{itemize}[leftmargin=1.5em]
-  \item \textbf{NVIDIA RTX PRO 6000 Blackwell Server Edition}: ${\sim}$188 SMs (GB202),
+  \item \textbf{NVIDIA RTX PRO 6000 Blackwell}: ${\sim}$188 SMs (GB202),
     96\,GB GDDR7 (${\sim}$1.8\,TB/s memory bandwidth),
     5th-generation Tensor Cores (HMMA BF16/FP8), Blackwell architecture (sm\_120).
     Note: the \texttt{warp\_cycles\_per\_instruction} counter is absent from the
@@ -19,7 +19,7 @@ All experiments run on a single GPU:
 
 All three case study workloads are reproduced using the commands below.
 Each workload requires an NVIDIA GPU (Ampere architecture minimum---all experiments in this paper
-use an NVIDIA RTX PRO 6000 Blackwell Server Edition), \nsys $\ge$ 2024.6,
+use an NVIDIA RTX PRO 6000 Blackwell), \nsys $\ge$ 2024.6,
 \ncu $\ge$ 2025.4.1, PyTorch 2.11+, and CUDA 12.8.
 
 \begin{lstlisting}[style=pystyle]

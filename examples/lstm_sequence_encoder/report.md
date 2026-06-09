@@ -1,4 +1,4 @@
-# Optimization Report — LSTM Sequence Encoder
+﻿# Optimization Report — LSTM Sequence Encoder
 
 **This optimization achieved a 3.63× total speedup on LSTMSequenceEncoder (B=32, NVIDIA RTX PRO 6000 Blackwell)** by abandoning Inductor's harmful decomposition of `nn.LSTM` and letting the recurrent region run eagerly through cuDNN's fused Tensor-Core RNN. The baseline's Inductor build unrolled the LSTM into ~1,280 FP32 **SIMT scalar** GEMMs (Tensor Cores 0.0% active) plus an equal number of `splitKreduce` epilogues; the optimized build replaces them with cuDNN's batched bf16 tensor-op GEMMs (input projection batched to M=4096, Tensor Cores 23.8% active). A standalone `triton_poi_fused_t_*` transpose cohort (~0.41 ms) is newly introduced by the compiled head and is included in the optimized total below.
 
@@ -8,7 +8,7 @@
 
 | Field | Value |
 |---|---|
-| GPU model | NVIDIA RTX PRO 6000 Blackwell Server Edition |
+| GPU model | NVIDIA RTX PRO 6000 Blackwell |
 | Architecture family | Blackwell |
 | PyTorch version | 2.11.0+cu128 |
 | Compile mode (baseline) | `inductor` (built-in dedup backend) |
@@ -101,7 +101,7 @@ config_patches=_config_patches())`. Routed by `ir_level`
 
 ## 6. Before/After Results
 
-Both captures share batch size B=32 and ran on the same GPU (`NVIDIA RTX PRO 6000 Blackwell Server Edition`), ~5h15m apart, locked to the identical 1845 MHz — under the 6-hour cross-session threshold, so no clock-variation caveat applies.
+Both captures share batch size B=32 and ran on the same GPU (`NVIDIA RTX PRO 6000 Blackwell`), ~5h15m apart, locked to the identical 1845 MHz — under the 6-hour cross-session threshold, so no clock-variation caveat applies.
 
 **Totals** (deduped unique-kernel GPU time):
 

@@ -1,4 +1,4 @@
-{
+﻿{
   "schema_version": "1.0",
   "capture_metadata": {
     "model_name": "conv_block",
@@ -8,7 +8,7 @@
     "nsys_report_path": "/home/ubuntu/Profiler/examples/conv_block/profiler_output/conv_block_optimized.nsys-rep",
     "ncu_report_path": "/home/ubuntu/Profiler/examples/conv_block/profiler_output/ncu_reps",
     "capture_timestamp_utc": "2026-06-01T01:41:04.302774+00:00",
-    "device_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell"
   },
   "operators": [
     {

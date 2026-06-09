@@ -1,4 +1,4 @@
-# Optimization Report — embedding_projection
+﻿# Optimization Report — embedding_projection
 
 This optimization achieved **2.74x total speedup** on `embedding_projection` (B=64, T=128, NVIDIA RTX PRO 6000 Blackwell): end-to-end GPU time dropped from **12.533 ms** to **4.577 ms**. The two dominant logit GEMMs were moved off the idle FP32 SIMT path onto bf16 Tensor Cores (a ~5.5x per-kernel win), but roughly **2.15 ms** of that gain is reabsorbed by two newly-introduced bf16↔fp32 conversion copies that the dtype-promotion pass inserts around the logit output.
 
@@ -8,7 +8,7 @@ This optimization achieved **2.74x total speedup** on `embedding_projection` (B=
 
 | Field | Value |
 |---|---|
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition (~188 SMs, GB202-class) |
+| GPU | NVIDIA RTX PRO 6000 Blackwell (~188 SMs, GB202-class) |
 | Architecture | Blackwell |
 | CUDA | 12.8 |
 | PyTorch | 2.11.0+cu128 |
@@ -136,7 +136,7 @@ uniformity with the other example backends.
 
 ## 6. Before/After Results
 
-Both captures used B=64 on the same device (`NVIDIA RTX PRO 6000 Blackwell Server Edition`), ~38 minutes apart in one session — within the cross-session threshold, so no caveat applies.
+Both captures used B=64 on the same device (`NVIDIA RTX PRO 6000 Blackwell`), ~38 minutes apart in one session — within the cross-session threshold, so no caveat applies.
 
 Operators are matched by role across the two captures (the FP32 op_ids in the baseline differ from the bf16-rewritten op_ids in the optimized graph). The optimized total **includes** the bf16↔fp32 conversion copies the optimization newly introduced.
 

@@ -1,11 +1,11 @@
-\section{Evaluation: Attribution Quality and Optimization Case Studies}
+﻿\section{Evaluation: Attribution Quality and Optimization Case Studies}
 \label{sec:experiments}
 
 We evaluate \sys on two axes: (1) \emph{coverage}---what fraction of kernel runtime is
 correctly attributed to \texttt{aten::} operators at each confidence tier; and
 (2) \emph{utility}---whether attributed profiles provide sufficient signal to ground and
 verify optimization decisions.  The second axis is examined through three case studies on
-an NVIDIA RTX PRO 6000 Blackwell Server Edition, each demonstrating a qualitatively
+an NVIDIA RTX PRO 6000 Blackwell, each demonstrating a qualitatively
 distinct profile-to-decision pattern: a TC-idle guided GEMM transformation (GPT-2,
 \secref{sec:cs:gpt2}), an occupancy-guided QKV fusion decision (SDPA Attention,
 \secref{sec:cs:sdpa}), and a structural miscompilation only diagnosable through attribution
@@ -13,19 +13,19 @@ data (LSTM, \secref{sec:cs:lstm}).
 
 \subsection{Experimental Setup}
 
-\textbf{Hardware.}  All experiments run on a single NVIDIA RTX PRO 6000 Blackwell Server Edition GPU; full hardware specifications are in \secref{sec:appendix:hwspec}.
+\textbf{Hardware.}  All experiments run on a single NVIDIA RTX PRO 6000 Blackwell GPU; full hardware specifications are in \secref{sec:appendix:hwspec}.
 
 \textbf{Software.}  PyTorch 2.11.0+cu128, CUDA 12.8, Nsight Systems 2024.6,
 Nsight Compute 2025.4.1, Python 3.11.
 
 \textbf{Workloads.}  \tabref{tab:workloads} describes the three workloads evaluated.  Each
 isolates a distinct operator category and hardware challenge; all have complete profiling and
-optimization results on the RTX PRO 6000 Blackwell Server Edition.
+optimization results on the RTX PRO 6000 Blackwell.
 
 \begin{table}[h]
 \centering
 \caption{Case study workloads.  Each is chosen to demonstrate a distinct profile-to-decision
-  pattern; all run on NVIDIA RTX PRO 6000 Blackwell Server Edition using the
+  pattern; all run on NVIDIA RTX PRO 6000 Blackwell using the
   \texttt{get\_model\_and\_input()} interface.}
 \label{tab:workloads}
 \small
@@ -202,7 +202,7 @@ at locked GPU clocks.
 \begin{table}[h]
 \centering
 \caption{Forward-pass attributed kernel wall time and speedup on NVIDIA RTX PRO 6000 Blackwell
-  Server Edition.  All times are from \nsys CUPTI records at locked GPU clocks (not \ncu replay).
+ .  All times are from \nsys CUPTI records at locked GPU clocks (not \ncu replay).
   Speedup = Inductor FP32 $\div$ Optimized (attributed kernel time only; see \S\ref{sec:experiments}
   for scope).  Each result is a point estimate from 2 measured iterations.}
 \label{tab:speedup}

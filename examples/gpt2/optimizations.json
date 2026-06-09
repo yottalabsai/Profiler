@@ -1,7 +1,7 @@
-{
+﻿{
   "analysis": {
     "model": "gpt2",
-    "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "device": "NVIDIA RTX PRO 6000 Blackwell",
     "compile_mode": "inductor",
     "dtype": "fp32",
     "total_profiled_wall_time_ms": 3.79,
