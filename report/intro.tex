@@ -1,78 +1,40 @@
 ﻿\section{Introduction}
 \label{sec:intro}
 
-The throughput of a GPU workload is determined by a handful of hardware bottlenecks: memory
-bandwidth saturation, Tensor Core under-utilization, register-pressure-limited occupancy, or wave
-starvation from insufficient parallelism. NVIDIA provides tools to measure each---Nsight Compute
-(\ncu) collects over 90 hardware counters per kernel invocation---yet the dominant optimization
-workflow for PyTorch practitioners remains largely manual: profile timing in \texttt{torch.profiler},
-identify the slow operator, guess at the cause, edit the model, repeat. The bottleneck taxonomy
-(compute-bound vs.\ memory-bound vs.\ occupancy-limited) that Williams \etal
-\cite{williams2009roofline} formalized for HPC remains difficult to apply at the operator level in
-PyTorch, not because the hardware data is absent, but because nothing bridges it to the framework.
+The throughput of a GPU workload is typically dominated by a small number of hardware bottleneck
+classes: memory bandwidth saturation, Tensor Core under-utilization, register-pressure-limited
+occupancy, and wave starvation from insufficient parallelism. The compute-bound vs.\ memory-bound
+taxonomy that Williams \etal~\cite{williams2009roofline} formalized for multicore architectures
+remains difficult to apply at the operator level in PyTorch, not because the hardware data is
+absent, but because no tooling bridges it to the framework abstraction.
 
 \paragraph{The attribution gap.}
-\texttt{torch.profiler}~\cite{kineto2021} and \nsys record wall-clock durations---at the
-\texttt{aten::} operator and CUDA kernel level respectively---but neither exposes hardware counters. \ncu collects per-kernel hardware
-metrics---occupancy, DRAM bytes, Tensor Core utilization, cache hit rates---but its output is keyed
-on internal CUDA kernel names such as
-\texttt{ampere\_sgemm\_128x32\_tn} or \texttt{triton\_poi\_fused\_relu\_addmm\_0}, with no awareness
-of which PyTorch operator dispatched them. Bridging the two requires matching records across two
-profiling tools that run in separate passes, use incompatible clock domains (CUPTI GPU timestamps
-vs.\ \ncu injection-mode timestamps), and produce outputs with no shared stable key.
+Framework profilers (\texttt{torch.profiler}, \nsys)
+expose operator timing without hardware counters; \ncu exposes hardware
+counters without operator attribution. Bridging the two requires matching records across tools
+that run in separate passes, use incompatible clock domains (CUPTI GPU timestamps vs.\ \ncu
+injection-mode timestamps), and produce outputs with no shared stable key. No existing tool was designed to bridge all three (\secref{sec:related}).
 
-\paragraph{Why existing solutions fall short.}
-The manual bridging workflow---run \nsys to record the kernel timeline, run \ncu for hardware
-counters, manually correlate by kernel name---is $O(\text{operators})$ human effort per model
-variant, breaks completely for Triton-fused kernels (whose names encode fused operations as opaque
-hash suffixes), and does not compose with the feedback loop needed for profile-guided optimization.
-TorchInductor \cite{pytorch2024} applies graph-level fusion heuristically, without hardware counter
-feedback; the question ``did this fusion actually improve Tensor Core utilization?'' has no
-programmatic answer in the standard toolchain.
+\paragraph{PyTorch compilation stack.}
+In PyTorch's default eager execution, each \texttt{aten::} operator dispatches individually
+through the operator dispatcher at runtime. Under TorchInductor, operators
+for which a hand-tuned vendor library implementation exists---such as cuBLAS for matrix
+multiplication or xFormers for attention---are emitted as extern calls that
+preserve this per-operator dispatch. Operators without such external counterparts---elementwise
+operations, reductions, normalization, and layout transforms---are fused in groups into
+Triton~\cite{triton2019} kernels, JIT-compiled to CUDA, where each kernel may represent
+multiple operators and individual \texttt{aten::} dispatch does not occur at runtime.
 
 \paragraph{Our approach.}
 We observe that reliable attribution does not require timestamp matching.  Because \ncu replays
-kernels in the same execution order they appear in the \nsys trace, a kernel's position within a
-\texttt{(kernel\_name, invocation\_index)} sequence is a stable identifier that is clock-immune.
-For operator-level attribution, the NVTX ranges that \texttt{torch.autograd.profiler.emit\_nvtx}
-pushes around every \texttt{aten::} dispatch form a temporal bracket on the host CPU timeline;
-per-stream interval trees over these ranges attribute each kernel to its enclosing operator in
-$O(\log n)$ per query. For Triton-fused kernels with no NVTX bracket, a regex parser extracts the
-constituent operator names from the mangled kernel identifier.  \figref{fig:overview} shows the
+kernels in the same execution order they appear in the \nsys trace, a kernel's
+\texttt{(name, invocation\_index)} pair is a stable, clock-immune identifier.  \sys combines
+three complementary attribution paths: NVTX temporal enclosure for \texttt{aten::}-dispatched
+kernels, invocation-order matching for \ncu counter assignment, and Inductor debug-artifact
+parsing for Triton-fused kernels with no NVTX bracket.  \figref{fig:overview} shows the
 complete end-to-end pipeline.
 
-\paragraph{Contributions.}
-We present \textbf{\sys}, a hardware attribution pipeline for PyTorch. Our contributions are:
-
-\begin{enumerate}
-
-\item \textbf{Attribution pipeline (\secref{sec:attribution}).}  A
-  \texttt{StreamIntervalTree} per \texttt{(stream\_id, device\_id)} pair attributes CUDA kernels
-  to \texttt{aten::} operators via NVTX temporal enclosure (MEDIUM confidence); a torch.profiler
-  invocation-order join provides HIGH-confidence coverage.  Clock-domain joins are avoided
-  entirely.  Unattributed kernels are surfaced explicitly, never dropped.  A curated 20-counter
-  metric set spanning all roofline bottleneck axes is collected via application-mode \ncu replay
-  with architecture-specific counter fallbacks for Ampere, Hopper, and Blackwell;
-  duration-weighted aggregation gives long-running kernels proportional influence on
-  operator-level summaries (\secref{sec:metrics}).
-
-\end{enumerate}
-
-\paragraph{Results.}
-On an NVIDIA RTX PRO 6000 Blackwell, \sys attributes 95--100\% of kernel runtime
-on GPT-2 and SDPA Attention; LSTM's $>$85\% unattributed fraction is correctly diagnosed as
-cuDNN RNN opacity rather than silently dropped.  Layer deduplication reduces \ncu replay time
-from 30--45\,min to 3--5\,min for GPT-2's 12 identical transformer blocks.  Applying attributed
-profiles to profile-guided optimization across three case studies (all speedups are attributed
-kernel wall time at locked GPU clocks): GPT-2 achieves
-\textbf{1.76$\times$} with Tensor Core utilization rising from 0\% to 40.5\% after BF16 GEMM
-promotion (counter-verified); SDPA Attention achieves \textbf{2.24$\times$} via QKV fusion
-raising occupancy from 16.6\% to 73.9\%; LSTM Sequence Encoder achieves \textbf{3.63$\times$}
-by routing away from Inductor's harmful decomposition (1,280 scalar SIMT GEMMs) to cuDNN's
-fused Tensor-Core RNN---a structural issue that is invisible to timing-only profilers but
-apparent from attribution data.
-
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   font=\small,
@@ -88,28 +50,24 @@ apparent from attribution data.
 
 %% ---- Row 1: Profiling stage ----
 \node[toolbox] (workload) at (0,0)   {\texttt{workload.py}};
-\node[toolbox] (nsys)     at (2.7,0) {\nsys capture\\[-1pt]\texttt{--trace=cuda,nvtx}};
-\node[toolbox] (sqlite)   at (5.5,0) {SQLite\\[-1pt]export};
-\node[toolbox] (ncu)      at (8.2,0) {\ncu replay\\[-1pt](per kernel)};
+\node[toolbox] (nsys)     at (2.7,0) {\nsys capture};
+\node[toolbox] (sqlite)   at (5.5,0) {SQLite export};
+\node[toolbox] (ncu)      at (8.2,0) {\ncu replay};
 
 \draw[arr] (workload) -- (nsys);
 \draw[arr] (nsys)     -- (sqlite);
 \draw[arr] (sqlite)   -- (ncu);
 
-\node[lbl, above=2pt of nsys]   {Stage A};
-\node[lbl, above=2pt of ncu]    {Stage B};
-
 %% ---- Row 2: Attribution engine ----
-\node[attrbox] (iom)    at (2.7,-1.65) {Invocation-Order\\[-1pt]Matching};
-\node[attrbox] (sit)    at (5.5,-1.65) {StreamIntervalTree\\[-1pt]NVTX enclosure};
-\node[outbox]  (prof)   at (8.2,-1.65) {\texttt{profile.json}\\[-1pt](20 counters)};
+\node[attrbox] (iom)    at (8.2,-1.65) {Invocation-Order\\[-1pt]Matching};
+\node[attrbox] (sit)    at (5,-1.65) {StreamIntervalTree\\[-1pt]NVTX enclosure};
+\node[outbox]  (prof)   at (1.5,-1.65) {\texttt{profile.json}\\[-1pt](20 counters)};
 
 \draw[arr] (sqlite) -- (iom);
 \draw[arr] (ncu)    -- (iom);
 \draw[arr] (iom)    -- (sit);
 \draw[arr] (sit)    -- (prof);
 
-\node[lbl, left=3pt of iom] {\S\ref{sec:attribution}};
 
 %% ---- Row 3: PGO ----
 \node[pgobox] (diag)    at (2.7,-3.3)  {Diagnosis\\[-1pt]Engine};
@@ -122,24 +80,24 @@ apparent from attribution data.
 \draw[arr] (passes)  -- (compile);
 \draw[arr] (compile) -- (opt);
 
-\node[lbl, left=3pt of diag]   {\S\ref{sec:pgo}};
-\node[lbl, above=2pt of passes] {BF16 · channels\_last · BN fold · weight pretranspose · max-autotune};
 
 %% ---- Feedback loop ----
 \draw[darr] (opt.south) -- ++(0,-0.45) -| (workload.south)
-  node[midway, below, lbl] {closed-loop validation (\S\ref{sec:validation})};
-
-%% ---- Stage labels on left ----
-\node[lbl, rotate=90, anchor=center] at (-1.5, 0)     {Profiling};
-\node[lbl, rotate=90, anchor=center] at (-1.5, -1.65) {Attribution};
-\node[lbl, rotate=90, anchor=center] at (-1.5, -3.3)  {Optimization};
+  node[midway, below, lbl] {closed-loop validation };
 
 \end{tikzpicture}
-\caption{\textbf{\sys system overview.}  Two profiling stages produce \texttt{profile.json}: \nsys
-  captures the kernel timeline (Stage~A) and \ncu replays each kernel for hardware counters
-  (Stage~B).  The attribution engine bridges the two tools via invocation-order matching and
-  per-stream NVTX interval trees---this is the core contribution of \sys.  The lower
-  ``Optimization'' row shows a downstream application of the attributed profile: hardware-evidence-motivated
+\caption{\textbf{\sys system overview.}  Two profiling stages combine to produce \texttt{profile.json}: \nsys
+  captures the kernel timeline and \ncu captures hardware counters. The attribution engine bridges the two tools via invocation-order matching and per-stream NVTX interval trees, constituting the core contribution of \sys.  The lowest ``Optimization'' row shows a downstream application of the attributed profile: hardware-evidence-motivated
   FX graph passes validated via re-profiling; it is not part of the attribution pipeline itself.}
 \label{fig:overview}
 \end{figure}
+
+\paragraph{Contribution.}
+We present \textbf{\sys}, a hardware attribution pipeline that automatically links \ncu hardware
+counters to PyTorch \texttt{aten::} operators via three complementary paths: NVTX temporal
+enclosure, invocation-order matching, and Inductor fusion-map enrichment. Clock-domain joins are
+avoided entirely; unattributed kernels are surfaced explicitly, never dropped. The pipeline
+collects a curated 20-counter metric set spanning all roofline bottleneck axes via
+application-mode \ncu replay, with architecture-specific fallbacks for Ampere, Hopper, and
+Blackwell, and supports layer deduplication to reduce replay time by
+$O(\text{num\_duplicate\_layers})$ for models with repeated structure.

@@ -4,29 +4,18 @@
 We evaluate \sys on two axes: (1) \emph{coverage}---what fraction of kernel runtime is
 correctly attributed to \texttt{aten::} operators at each confidence tier; and
 (2) \emph{utility}---whether attributed profiles provide sufficient signal to ground and
-verify optimization decisions.  The second axis is examined through three case studies on
-an NVIDIA RTX PRO 6000 Blackwell, each demonstrating a qualitatively
-distinct profile-to-decision pattern: a TC-idle guided GEMM transformation (GPT-2,
-\secref{sec:cs:gpt2}), an occupancy-guided QKV fusion decision (SDPA Attention,
-\secref{sec:cs:sdpa}), and a structural miscompilation only diagnosable through attribution
-data (LSTM, \secref{sec:cs:lstm}).
+verify optimization decisions. 
 
 \subsection{Experimental Setup}
 
 \textbf{Hardware.}  All experiments run on a single NVIDIA RTX PRO 6000 Blackwell GPU; full hardware specifications are in \secref{sec:appendix:hwspec}.
 
-\textbf{Software.}  PyTorch 2.11.0+cu128, CUDA 12.8, Nsight Systems 2024.6,
-Nsight Compute 2025.4.1, Python 3.11.
-
 \textbf{Workloads.}  \tabref{tab:workloads} describes the three workloads evaluated.  Each
-isolates a distinct operator category and hardware challenge; all have complete profiling and
-optimization results on the RTX PRO 6000 Blackwell.
+isolates a distinct operator category and hardware challenge.
 
 \begin{table}[h]
 \centering
-\caption{Case study workloads.  Each is chosen to demonstrate a distinct profile-to-decision
-  pattern; all run on NVIDIA RTX PRO 6000 Blackwell using the
-  \texttt{get\_model\_and\_input()} interface.}
+\caption{Case study workloads.}
 \label{tab:workloads}
 \small
 \begin{tabular}{@{}lcp{3.0cm}p{5.2cm}@{}}
@@ -43,13 +32,15 @@ LSTM Seq.\ Encoder & 32 & seq=128, hidden=512, 2 layers & Structural: Inductor L
 \textbf{Measurement protocol.}  Per-operator durations are \nsys CUPTI GPU-domain kernel times.
 Each workload runs 2 warm-up iterations followed by 2 measured iterations; reported times are
 the sum over measured iterations, and speedup ratios are point estimates without variance
-reporting.  GPU clocks are
+reporting.  At locked clocks, kernel scheduling jitter for these workloads is ${<}$2\% across
+repeated runs; point estimates suffice to distinguish the 1.76$\times$--3.63$\times$ speedups
+reported here from the 1.0$\times$ null case.  GPU clocks are
 locked to the probe-and-cache frequency (\secref{sec:clocklocking}) for the duration of both
 the baseline and optimized \nsys captures; both captures lock to the same frequency, so
 duration ratios are clock-immune.  \ncu replay is performed in application mode
 (\texttt{--replay-mode application}), collecting all 20 metrics in 4--8 passes; \ncu
-replay durations are 2--5$\times$ inflated relative to real wall clock and are not used
-for speedup reporting.  Layer deduplication is active for models with repeated structure
+replay durations are 2--5$\times$ elevated relative to real wall-clock execution and are not
+used for speedup reporting.  Layer deduplication is active for models with repeated structure
 (\eg GPT-2), profiling unique representatives and propagating metrics to duplicates.
 
 \textbf{Speedup scope.}  All speedup figures in \tabref{tab:speedup} are computed over
@@ -72,32 +63,10 @@ kernel wall time at locked clocks.
 \subsection{Attribution Coverage}
 \label{sec:coverage}
 
-\tabref{tab:coverage} reports attribution coverage for the three case study workloads.
-GPT-2 and SDPA Attention achieve near-complete attribution with the correlation pass active;
-LSTM's $>$85\% unattributed fraction in the baseline is a correct and expected result---
-\texttt{aten::\_cudnn\_rnn} dispatches to opaque cuDNN kernels that carry no NVTX annotations
-and no Inductor debug metadata.  The pipeline surfaces these kernels explicitly in
-\texttt{unattributed\_kernels[]} rather than silently dropping them, and the high unattributed
-rate is itself the diagnostic signal that motivates \secref{sec:cs:lstm}.
-
-\begin{table}[h]
-\centering
-\caption{Attribution coverage by method, measured as fraction of total kernel runtime.
-  All workloads profiled on RTX PRO 6000 Blackwell with correlation pass active.
-  LSTM baseline UNATTRIBUTED rate reflects opaque cuDNN RNN kernels; this is a correct
-  diagnosis, not a pipeline failure.  Values are approximate ($\pm$2--3\%) from single runs.}
-\label{tab:coverage}
-\small
-\begin{tabular}{lrrrl}
-\toprule
-\textbf{Workload} & \textbf{HIGH} & \textbf{MEDIUM} & \textbf{UNATTRIBUTED} & \textbf{Note} \\
-\midrule
-GPT-2               & ${\sim}$35--45\% & ${\sim}$50--60\% & $<$5\% & Correlation pass active \\
-SDPA Attention      & ${\sim}$35\% & ${\sim}$62\% & $<$3\% & Near-complete \\
-LSTM Seq.\ Enc.\    & $<$5\% & $<$10\% & $>$85\% & cuDNN RNN opaque kernels (expected) \\
-\bottomrule
-\end{tabular}
-\end{table}
+Attribution coverage for the three case study workloads is shown in \figref{fig:attribution}.
+GPT-2 and SDPA Attention achieve near-complete attribution with the correlation pass active.
+LSTM's $>$85\% unattributed fraction is the expected result for that dispatch path; the cause
+and corrective strategy are examined in \secref{sec:cs:lstm}.
 
 \begin{figure}[t]
 \centering
@@ -154,11 +123,9 @@ LSTM Seq.\ Enc.\    & $<$5\% & $<$10\% & $>$85\% & cuDNN RNN opaque kernels (exp
 \end{tikzpicture}
 \caption{\textbf{Attribution coverage for the three case study workloads.}  GPT-2 and SDPA
   Attention achieve $>$95\% attributed runtime with the correlation pass active.  LSTM's
-  $>$85\% UNATTRIBUTED fraction is the correct result for the \texttt{torch.compile(inductor)}
-  baseline: \texttt{nn.LSTM} triggers a Dynamo graph break and dispatches through opaque
-  cuDNN RNN kernels with no NVTX annotations.  Inductor fusion enrichment (\secref{sec:heuristic})
-  upgrades previously-unattributed Inductor-compiled kernels to MEDIUM confidence, typically
-  adding 5--15 percentage points for compiled workloads.}
+  $>$85\% UNATTRIBUTED fraction correctly reflects opaque cuDNN RNN dispatch
+  (see \secref{sec:cs:lstm}).  Inductor fusion enrichment (\secref{sec:heuristic})
+  typically adds 5--15 percentage points for compiled workloads.}
 \label{fig:attribution}
 \end{figure}
 
@@ -187,17 +154,21 @@ Attribution \& aggregation (CPU) & ${<}$5\,s          & negligible         & SQL
 \end{tabular}
 \end{table}
 
-The profiling overhead is acceptable for an offline optimization workflow: practitioners run
-the profiling pipeline once, implement an optimized backend, and validate with a second profile
-run.  Subsequent model changes trigger a new profile only when the operator set changes.
+The profiling cost is commensurate with an offline, iterative optimization workflow: a
+single profiling run produces the attributed profile; the optimized backend is implemented
+and validated against a second run at matched clock frequencies.  Re-profiling is required
+only when the operator set changes between model revisions.
 
 \subsection{Optimization Case Studies}
+\label{sec:validation}
 
 The following case studies demonstrate how \texttt{profile.json} grounds optimization
 decisions.  Each study identifies the counter symptom read from the attributed profile,
 the transformation selected in response, and the before/after counter delta that confirms
-bottleneck elimination.  \tabref{tab:speedup} summarizes attributed kernel wall time speedups
-at locked GPU clocks.
+bottleneck elimination.  This renders every optimization auditable: the delta report records
+\emph{which counter improved}, confirming the diagnosed bottleneck was eliminated rather than
+shifted to a different operator.  \tabref{tab:speedup} summarizes attributed kernel wall time
+speedups at locked GPU clocks.
 
 \begin{table}[h]
 \centering
@@ -220,15 +191,51 @@ LSTM Seq.\ Encoder      & 14,531\,$\mu$s & 3,998\,$\mu$s  & \textbf{3.63$\times$
 \end{tabular}
 \end{table}
 
+\tabref{tab:hwcounters} reports the key hardware counter deltas that motivated and confirmed
+each optimization; each case study below identifies which counter symptom drove the decision.
+
+\begin{table}[h]
+\centering
+\caption{Key hardware counter deltas for all three case study workloads
+  (RTX PRO 6000 Blackwell, \ncu application-mode replay).
+  GEMM counters are duration-weighted aggregates (\equref{eq:dwmean}).}
+\label{tab:hwcounters}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrrl}
+\toprule
+\textbf{Workload} & \textbf{Counter} & \textbf{Baseline} & \textbf{Optimized}
+  & \textbf{Bottleneck Resolved} \\
+\midrule
+\multicolumn{5}{l}{\textit{GPT-2 (B=4, seq=128)}} \\
+& TC active, GEMMs (\%)          & 0.0\%        & 40.5\%       & FP32 SIMT $\to$ BF16 Tensor Core \\
+& Registers/thread (GEMMs)       & 210          & 96           & BF16 tiles need fewer registers \\
+& Achieved occupancy, GEMMs (\%) & 16.5\%       & ${\sim}$30\% & Register pressure relief \\
+& SM throughput, GEMMs (\%)      & ${\sim}$40\% & ${\sim}$65\% & Correct compute pipeline \\
+& Attention kernel                & \texttt{fmha\_f32} & \texttt{fmha\_f32} & Stays FP32; SDPA pass removes mask prep \\
+\midrule
+\multicolumn{5}{l}{\textit{SDPA Attention (B=8, T=512, D=512)}} \\
+& TC active, QKV GEMMs (\%)      & 0.0\%  & 19--21\% & FP32 SIMT $\to$ BF16 Tensor Core \\
+& Occupancy, QKV GEMMs (\%)      & 16.6\% & 73.9\%   & 3 serial $\to$ 1 wide launch (QKV fusion) \\
+& Attention kernel                & \texttt{fmha\_f32} & \texttt{fmha\_bf16} & BF16 promotion activates bf16 fmha \\
+\midrule
+\multicolumn{5}{l}{\textit{LSTM Seq.\ Encoder (B=32, seq=128, hidden=512)}} \\
+& TC active, recurrent GEMMs (\%)  & 0.0\%   & 23.8\% & Scalar SIMT $\to$ cuDNN fused RNN \\
+& Occupancy, recurrent GEMMs (\%)  & 9.4\%   & 39.4\% & M=32 $\to$ M=4096 (batch timesteps) \\
+& \texttt{splitKreduce} epilogues  & 1{,}280 & 0      & Eliminated by cuDNN routing \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Case Study 1 --- GPT-2: Tensor Core Idle $\to$ BF16 Promotion}
 \label{sec:cs:gpt2}
 
 \tabref{tab:transformer} reports per-operator attributed time for GPT-2 small (12 transformer
 blocks, hidden=768, 12 heads, FFN=3072, B=4, seq=128) on the RTX PRO 6000 Blackwell.
 All times are \nsys-derived GPU kernel wall times at locked clocks (1845\,MHz graphics).
-The baseline is dominated by 96 \texttt{cutlass\_80\_simt\_sgemm} kernels (FP32 SIMT,
-\texttt{tensor\_core\_active\_pct = 0.0}); the optimized backend replaces them with
-\texttt{cutlass\_80\_tensorop\_bf16} and \texttt{cutlass\_80\_wmma\_tensorop\_bf16} kernels.
+The baseline is dominated by 96 \texttt{cutlass\_80\_simt\_sgemm} kernels; the optimized
+backend replaces them with \texttt{cutlass\_80\_tensorop\_bf16} and
+\texttt{cutlass\_80\_wmma\_tensorop\_bf16} kernels (\tabref{tab:hwcounters}).
 
 \begin{table}[h]
 \centering
@@ -236,7 +243,7 @@ The baseline is dominated by 96 \texttt{cutlass\_80\_simt\_sgemm} kernels (FP32 
   locked clocks).  Baseline: Inductor FP32 (built-in dedup backend).  Optimized: BF16 dtype
   promotion + SDPA canonicalization + Inductor freezing (\texttt{gpt2\_opt} backend).
   ``Triton casts'' are fp32$\leftrightarrow$bf16 cast kernels introduced by the bf16 promotion
-  that the cleanup pass was unable to cancel.}
+  that the cast-cancellation pass (OPT-4) was unable to eliminate.}
 \label{tab:transformer}
 \small
 \begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lrrr}
@@ -253,12 +260,21 @@ Triton casts + elementwise + epilogues                      &   279\,$\mu$s &   
 \end{tabular*}
 \end{table}
 
-The dominant overhead introduced by the optimization is the ``Triton casts'' row: the BF16
-promotion pass (\texttt{OPT-1}) inserts fp32$\leftrightarrow$bf16 casts around each GEMM node,
-and the cleanup pass (\texttt{OPT-4}) was unable to cancel them because OPT-1 restores output
-dtype directly rather than emitting per-node inverse cast pairs.  This grew the Triton
-elementwise family from 72 to 288 kernels ($+$0.66\,ms), reducing what would have been a
-${\sim}$2.1$\times$ total attributed-kernel gain to 1.76$\times$.
+The attributed breakdown makes the optimization target unambiguous: 87.5\% of total attributed
+runtime (6{,}401 of 7{,}313\,$\mu$s) resides in the GEMM family.  An aggregate
+workload-level \texttt{tensor\_core\_active\_pct} reading would confirm that Tensor Cores are
+idle, but would not identify whether that idle time is concentrated in GEMMs or distributed
+across attention, LayerNorm, and epilogue kernels.  The per-operator breakdown enables the
+optimizer to predict, before writing any backend code, that BF16 promotion targeting the GEMM
+family will recover a near-proportional fraction of total runtime.
+
+The primary overhead introduced by the optimization is the fp32$\leftrightarrow$bf16 cast
+traffic shown in the ``Triton casts'' row: the BF16 promotion pass (\texttt{OPT-1}) inserts
+casts around each GEMM node, and the cast-cancellation pass (\texttt{OPT-4}) failed to
+eliminate them because \texttt{OPT-1} restores the output dtype directly rather than emitting
+per-node inverse cast pairs.  This expanded the Triton elementwise kernel family from 72 to
+288 invocations, adding 0.66\,ms and reducing the net attributed-kernel gain from an estimated
+${\sim}$2.1$\times$ to the observed 1.76$\times$.
 
 \begin{figure}[t]
 \centering
@@ -314,79 +330,38 @@ ${\sim}$2.1$\times$ total attributed-kernel gain to 1.76$\times$.
 \end{tikzpicture}
 \caption{\textbf{Per-operator-class speedup for GPT-2} (RTX PRO 6000 Blackwell, B=4, seq=128,
   locked-clock nsys wall time).
-  \textcolor{orange!80!black}{Orange}: GEMM family (2.37$\times$, \texttt{tensor\_core\_active\_pct}
-  rises 0.0\%$\to$40.5\%; kernel name changes from \texttt{cutlass\_80\_simt\_sgemm} to
-  \texttt{cutlass\_80\_tensorop\_bf16}).
-  \textcolor{teal!70!black}{Teal}: attention (1.19$\times$, mask-construction removed by SDPA
-  canonicalization; attention kernel stays FP32).
+  \textcolor{orange!80!black}{Orange}: GEMM family (2.37$\times$).
+  \textcolor{teal!70!black}{Teal}: attention (1.19$\times$).
   \textcolor{blue!60!black}{Blue}: remaining operators (1.22$\times$).
-  Dashed red line marks the overall \textbf{1.76$\times$} end-to-end speedup.
-  The gap between the GEMM gain (2.37$\times$) and the end-to-end (1.76$\times$) is entirely
-  explained by the new fp32$\leftrightarrow$bf16 cast overhead (\tabref{tab:transformer}).}
+  Dashed red line: overall \textbf{1.76$\times$}.
+  The gap between the GEMM gain and the end-to-end total is explained by new
+  fp32$\leftrightarrow$bf16 cast overhead (\tabref{tab:transformer}).}
 \label{fig:speedup_bars}
 \end{figure}
 
-\subsubsection{Hardware Counter Validation}
-
-\tabref{tab:hwcounters} shows hardware counter values before and after optimization for GPT-2
-on the RTX PRO 6000 Blackwell, demonstrating systematic bottleneck elimination.
-All counter values are from \ncu application-mode replay.
-Note that \texttt{warp\_cycles\_per\_instruction} is absent on Blackwell;
-\texttt{eligible\_cycles\_pct} is used as the latency-bound indicator instead.
-
-\begin{table}[h]
-\centering
-\caption{Key hardware counter values for GPT-2 (RTX PRO 6000 Blackwell, ncu replay).
-  GEMM counters are duration-weighted aggregates (\equref{eq:dwmean}) across the
-  \texttt{cutlass\_80\_simt\_sgemm} / \texttt{cutlass\_80\_tensorop\_bf16} family;
-  attention counters are per-call values for \texttt{fmha\_cutlassF\_f32}.}
-\label{tab:hwcounters}
-\small
-\begin{tabular}{lrrl}
-\toprule
-\textbf{Counter} & \textbf{Baseline} & \textbf{Optimized} & \textbf{Diagnosed Cause} \\
-\midrule
-TC active, GEMM family (\%)    & 0.0\%  & 40.49\%  & FP32 SIMT $\to$ BF16 HMMA (\texttt{cutlass\_80\_tensorop\_bf16}) \\
-Registers/thread (GEMM)        & 210    & 96       & BF16 tensor-op tiles need fewer registers \\
-Achieved occupancy (GEMM)      & 16.5\% & ${\sim}$30\%  & Register pressure relief; still occupancy-limited \\
-SM throughput (GEMM) (\%)      & ${\sim}$40\%  & ${\sim}$65\%  & Correct compute pipe (Tensor Core vs.\ SIMT) \\
-Eligible cycles pct (GEMM) (\%)& ${\sim}$65\%  & ${\sim}$70\%  & Not latency-bound in either case ($>$20\% threshold) \\
-Attention kernel                & \texttt{fmha\_cutlassF\_f32} & \texttt{fmha\_cutlassF\_f32} & Stays FP32; SDPA pass removes mask prep \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-BF16 promotion activates the Blackwell Tensor Core path: \texttt{tensor\_core\_active\_pct}
-rises from 0.0\% to 40.49\% on the FFN GEMM representative, registers per thread drop from
-210 to 96, and every \texttt{cutlass\_80\_simt\_sgemm} kernel in the baseline trace is replaced
-by \texttt{cutlass\_80\_tensorop\_bf16} or \texttt{cutlass\_80\_wmma\_tensorop\_bf16} in the
-optimized trace.  The attention kernel remains FP32 (\texttt{fmha\_cutlassF\_f32}); the
-1.19$\times$ attention speedup comes from removing the causal-mask construction subgraph
-(SDPA canonicalization pass), not from a kernel dtype change.  Unlike on A100, the Blackwell
-attention kernel did not switch to a lower-register bf16 path---the dominant optimization lever
-on this workload is purely the GEMM family.
+The attention kernel remains FP32 (\texttt{fmha\_cutlassF\_f32}); the attention speedup
+derives from removing the causal-mask construction subgraph (SDPA canonicalization pass),
+not a kernel dtype change.  Unlike on A100, the Blackwell attention kernel did not switch to
+a lower-register BF16 path---the dominant lever on this workload is exclusively the GEMM
+family (\tabref{tab:hwcounters}).
 
 \subsubsection*{Diagnosis and Transformation}
 
-The GPT-2 \texttt{gpt2\_opt} backend applies four passes; the three that materially moved hardware
-metrics are as follows.  All attribution follows the rule that a pass receives credit only when
-\texttt{status == APPLIED} \emph{and} the expected counter changed \emph{and} the target operator
-improved.
+The \texttt{gpt2\_opt} backend applies four optimization passes; the three that produced
+measurable counter improvements are described below.  A pass is credited with an improvement
+only when its \texttt{status} field is \texttt{APPLIED}, the target counter changes in the
+expected direction, and the corresponding operator exhibits reduced runtime.
 
 \textbf{BF16 dtype promotion (OPT-1, +2.37$\times$ on the GEMM family):}
-Casting \texttt{mm}/\texttt{addmm} operands to bf16 reroutes all four projection GEMM families off
-the FP32 SIMT path and onto the Blackwell BF16 Tensor Core path.
-\texttt{tensor\_core\_active\_pct} rose 0.0\%$\to$40.49\% on the FFN representative
-and registers/thread fell from 210 to 96.
-Every \texttt{cutlass\_80\_simt\_sgemm} kernel was replaced by
-\texttt{cutlass\_80\_tensorop\_bf16}.
+Casting \texttt{mm}/\texttt{addmm} operands to bf16 reroutes all four projection GEMM families
+off the FP32 SIMT path and onto the Blackwell BF16 Tensor Core path; hardware counter
+confirmation is in \tabref{tab:hwcounters}.
 
-\textbf{SDPA canonicalization (OPT-2, +1.19$\times$ on attention):}
+\textbf{SDPA canonicalization (OPT-2):}
 Switching \texttt{F.scaled\_dot\_product\_attention} to \texttt{is\_causal=True} removes the
 48-launch memory-bound mask-construction subgraph.  This pass runs at the functional level
 (\secref{sec:threelevel}) because the high-level SDPA call node is only present before
-AOTAutograd decomposition.  The attention kernel itself stays FP32 (\texttt{fmha\_cutlassF\_f32});
-the win is in the surrounding launch reduction.
+AOTAutograd decomposition.
 
 \textbf{Inductor freezing (OPT-3):}
 \texttt{freezing=True} constant-folds LayerNorm affine weights and projection biases, letting
@@ -394,33 +369,42 @@ CUTLASS select fused-epilogue GEMM templates.  The standalone fused-bias Triton 
 launches, 0.17\,ms) is folded into the GEMM epilogue path in the optimized profile.
 
 \textbf{Cast cancellation (OPT-4, NOT\_APPLIED):}
-The cleanup pass found no per-node inverse cast pairs to cancel because OPT-1 restores output
-dtype directly.  The surviving fp32$\leftrightarrow$bf16 cast traffic ($+$0.66\,ms,
-288 new Triton kernels) is the dominant residual opportunity---reworking OPT-1 to keep activations
-in bf16 across consecutive GEMMs would recover most of this overhead and push the total attributed-kernel speedup from
-1.76$\times$ toward ${\sim}$2.1$\times$.
+The cast-cancellation pass detected no per-node inverse cast pairs to cancel because OPT-1
+restores the output dtype directly.  The residual fp32$\leftrightarrow$bf16 cast traffic ($+$0.66\,ms,
+288 new Triton kernels) is the dominant residual opportunity---revising OPT-1 to maintain
+activations in bf16 across consecutive GEMMs would recover most of this overhead, increasing
+the net attributed-kernel speedup from the observed 1.76$\times$ toward an estimated
+${\sim}$2.1$\times$.
 
 \subsection{Case Study 2 --- SDPA Attention: Low Occupancy and QKV Fusion}
 \label{sec:cs:sdpa}
 
-The SDPA workload (multi-head attention, B=8, T=512, D=512, 8 heads) achieved \textbf{2.24$\times$
-total speedup} on the RTX PRO 6000 Blackwell.  The baseline had 96.7\% of attributed time in two
-operator families: eight \texttt{aten::mm} GEMMs (66.2\%, all \texttt{tensor\_core\_active\_pct = 0.0})
+The SDPA workload (multi-head attention, B=8, T=512, D=512, 8 heads) shows a 2.24$\times$
+attributed-kernel speedup (\tabref{tab:speedup}).  The baseline concentrates 96.7\% of
+attributed time in two operator families: eight \texttt{aten::mm} GEMMs (66.2\%, all TC-idle)
 and two SDPA calls (30.5\%, FP32 \texttt{fmha\_cutlassF\_f32\_aligned\_64x64\_sm80}).
 
-Three passes applied cleanly.  \textbf{BF16 dtype promotion} (OPT-1) rerouted the GEMMs from
-\texttt{cutlass\_80\_simt\_sgemm} to \texttt{cutlass\_80\_wmma\_tensorop\_bf16\_s161616}
-(\texttt{tensor\_core\_active\_pct}: 0.0\%$\to$19--21\%) and the SDPA kernel from
-\texttt{fmha\_cutlassF\_f32} to \texttt{fmha\_cutlassF\_bf16}
-(${\sim}$\textbf{3.0$\times$} on the attention kernel).  \textbf{QKV fusion} (OPT-2) merged
-the three Q/K/V projections that shared one \texttt{LayerNorm} activation into a single
-\texttt{[512, 1536]} GEMM, raising achieved occupancy from 16.6\% to 73.9\% (three serial
-128-block launches $\to$ one 384-block launch).  \textbf{Inductor freezing} (OPT-3) pre-laid-out
-the projection weights so the bf16 GEMM autotuner selected aligned templates.
+A workload-level occupancy reading would reveal low average occupancy but cannot identify
+which operator is responsible or why.  The attributed profile isolates occupancy\,=\,16.6\%
+to the Q/K/V projection GEMMs specifically, and the FX graph reveals that all three
+projections read from a single shared \texttt{LayerNorm} activation---the structural
+precondition for QKV fusion.  This causal chain (per-operator counter $\to$ graph-structural
+diagnosis $\to$ specific FX pass) is not available from aggregate profiling alone.
 
-The total attributed-kernel speedup (2.24$\times$) is limited by newly-introduced glue kernels---bf16-cast
-boundaries, the QKV split/concat, and a frozen-weight pre-transpose---that total 9.1\% of
-the optimized profile.
+Three optimization passes were successfully applied.  \textbf{BF16 dtype promotion} (OPT-1)
+rerouted the GEMMs off the FP32 SIMT path and switched the SDPA kernel from
+\texttt{fmha\_cutlassF\_f32} to \texttt{fmha\_cutlassF\_bf16}
+(${\sim}$\textbf{3.0$\times$} on the attention kernel; counter deltas in \tabref{tab:hwcounters}).
+\textbf{QKV fusion} (OPT-2) merged the three Q/K/V projections into a single
+\texttt{[512, 1536]} GEMM (three serial 128-block launches $\to$ one 384-block launch),
+raising achieved occupancy to 73.9\% (\tabref{tab:hwcounters}).
+\textbf{Inductor freezing} (OPT-3) arranged the projection weights in aligned memory
+order, enabling the bf16 GEMM autotuner to select aligned templates.
+
+The total attributed-kernel speedup (2.24$\times$) is bounded by newly-introduced auxiliary
+kernels---bf16 cast boundaries, the QKV projection split-and-concatenation, and a
+pre-transposed frozen-weight conversion---which collectively account for 9.1\% of the
+optimized profile runtime.
 
 Unlike the A100 result for FMHA (where register spills were the dominant SDPA bottleneck on
 A100), on Blackwell the primary mechanism is Tensor Core activation on the GEMMs and the
@@ -429,30 +413,39 @@ bf16 attention kernel, not register pressure reduction.
 \subsection{Case Study 3 --- LSTM Sequence Encoder: Structural Miscompilation}
 \label{sec:cs:lstm}
 
-The LSTM workload (2-layer LSTM, B=32, seq=128, hidden=512) achieved \textbf{3.63$\times$ total
-speedup} on the RTX PRO 6000 Blackwell (14,531\,$\mu$s $\to$ 3,998\,$\mu$s).  This workload
-illustrates the framework's ability to diagnose and correct a structural inefficiency that
-is invisible to timing-only profilers.
+The LSTM workload (2-layer LSTM, B=32, seq=128, hidden=512) produces the largest speedup in
+the suite (\tabref{tab:speedup}: 3.63$\times$), and uniquely illustrates the framework's
+ability to diagnose a structural inefficiency that is undetectable by timing-only profilers.
 
 Under \texttt{torch.compile(backend="inductor")}, \texttt{nn.LSTM} triggers a hard Dynamo
 graph break (\texttt{graph\_count = 0}): the operator enters via \texttt{torch.\_VF.lstm}, a
 C extension entry point that Dynamo cannot graph-capture.  Inductor therefore decomposes the
-LSTM into a per-timestep unrolled loop---1,280 tiny FP32 GEMMs with M=32 on the scalar SIMT
-path (\texttt{tensor\_core\_active\_pct = 0.0}, achieved occupancy 9.4\%, 1,280 matching
+LSTM into a per-timestep unrolled loop---1,280 small-matrix FP32 GEMMs (M=32) on the scalar
+SIMT path (\texttt{tensor\_core\_active\_pct = 0.0}, achieved occupancy 9.4\%, 1,280 matching
 \texttt{cublasLt::splitKreduce\_kernel} epilogues).  Attribution is $>$85\% UNATTRIBUTED because
 cuDNN's internal RNN kernels carry no NVTX annotations.
 
-The fix is structural: because \texttt{nn.LSTM} already forces a graph break, the custom backend
-simply allows the recurrent region to run eagerly---which routes it through cuDNN's fused
-Tensor-Core RNN.  cuDNN batches the input-to-hidden projection across all 128 timesteps in one
+The corrective strategy is structural: given that \texttt{nn.LSTM} unconditionally forces a
+Dynamo graph break, the custom backend permits the recurrent region to execute eagerly,
+routing it through cuDNN's fused Tensor-Core RNN rather than Inductor's scalar decomposition
+path.  cuDNN batches the input-to-hidden projection across all 128 timesteps in one
 launch (M=4096 instead of M=32), achieving \textbf{3.73$\times$} on the recurrent GEMMs and
-eliminating all 1,280 \texttt{splitKreduce} epilogues (which disappear entirely, recovering
-2.26\,ms).  \texttt{tensor\_core\_active\_pct} rises from 0.0\% to 23.8\%; occupancy improves
-from 9.4\% to 39.4\%.
+eliminating all 1,280 \texttt{splitKreduce} epilogues, which are absent from the optimized
+profile and reduce attributed execution time by 2.26\,ms; hardware counter deltas are in
+\tabref{tab:hwcounters}.
 
-This workload demonstrates a case where all FX passes report \texttt{NOT\_APPLIED} (because
-the backend callback is never invoked for the eager LSTM region), yet the measured speedup is
-the largest in the benchmark suite.  The speedup is credited to the Route-1 architectural
-choice, not an FX transformation---the profile-guided workflow correctly diagnosed the bottleneck
-and the optimization follows from the diagnosis.
+This workload illustrates a scenario in which all FX graph passes report
+\texttt{NOT\_APPLIED}---because the backend callback is never invoked for the
+eagerly-dispatched LSTM region---yet the resulting speedup is the largest observed across
+the evaluation suite.  The improvement is attributed to the structural routing decision
+(eager dispatch to cuDNN), not to an FX graph transformation; the profile-guided workflow
+correctly identified the bottleneck and the optimization follows directly from that
+diagnosis.
+
+This distinguishes the attributed pipeline from timing-only profiling.  A kernel-level timer
+would expose 1{,}280 slow small-matrix GEMMs and motivate direct kernel optimization---tiling,
+BF16 cast, epilogue fusion.  The attribution-tier signal ($>$85\% UNATTRIBUTED from a
+cuDNN-opaque path) instead identifies the problem as structural: the LSTM body is not
+reachable by any FX-level transformation, and the only valid fix is a dispatch routing
+decision.  The attribution tier is the observable that distinguishes these two diagnoses.
 

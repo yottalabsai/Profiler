@@ -15,8 +15,8 @@ GPU clock locking ensures reproducible per-operator duration measurements,
 and layer deduplication reduces \ncu replay time by
 $O(\text{num\_duplicate\_layers})$ for models with repeated structure.
 
-To demonstrate that attributed profiles are actionable, we implemented a profile-guided
-FX pass framework (\secref{sec:pgo}) and applied it across three case studies on an NVIDIA
+To establish that attributed profiles are sufficient to ground optimization decisions,
+we implemented a profile-guided FX pass framework (\secref{sec:pgo}) and applied it across three case studies on an NVIDIA
 RTX PRO 6000 Blackwell.  Each optimization decision was grounded in a
 specific counter reading from the attributed profile, and each claimed improvement was
 verified by re-profiling at identical locked clocks (all figures are attributed kernel wall
@@ -27,9 +27,10 @@ time speedups):
 attention kernel $3.0\times$); and
 \textbf{3.63$\times$} on LSTM Sequence Encoder (structural re-routing from Inductor's
 decomposed SIMT path to cuDNN's fused Tensor-Core RNN, diagnosable only via the attribution
-data).  The LSTM case is the clearest illustration of the pipeline's value: the bottleneck
-is invisible to timing-only profilers but apparent from the high unattributed fraction and
-scalar GEMM signatures in the attributed profile.
+data).  The LSTM case study provides the most direct demonstration of the pipeline's diagnostic
+utility: the structural bottleneck is undetectable by timing-only profilers yet manifest
+in the elevated unattributed fraction and the characteristic scalar GEMM signatures
+surfaced by the attribution data.
 
 \paragraph{Limitations.}
 Attribution coverage degrades for cuDNN-backed operators (\texttt{nn.LSTM},

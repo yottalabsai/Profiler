@@ -4,18 +4,19 @@
 \sys ingests two data sources produced for the same workload run: (1) an \nsys SQLite export
 containing CUDA kernel activity and NVTX range annotations, and (2) \ncu CSV output containing
 per-kernel hardware counter measurements. The pipeline produces a hardware-attributed
-\texttt{OperatorProfile}: a JSON document mapping each \texttt{aten::} operator to its constituent
-kernels, their hardware metrics, and the confidence tier of each attribution.
-Attribution is assigned at one of three confidence tiers (\tabref{tab:tiers}); per-workload
-coverage fractions are reported in \secref{sec:coverage}.
+\texttt{OperatorProfile}: a JSON document mapping each dispatched PyTorch operator to its constituent CUDA kernels,
+along with the hardware metrics and attribution confidence of each kernel.
+For Inductor-compiled workloads, fused kernels are annotated with all constituent
+\texttt{aten::} operators rather than attributed to a single dispatch call.
+Attribution is assigned at one of three confidence tiers (\tabref{tab:tiers}); per-workload coverage fractions are reported in \secref{sec:coverage}.
 
 \begin{table}[H]
 \centering
-\caption{Attribution methods in \sys. Coverage fractions are workload-dependent; see \tabref{tab:coverage}.}
+\caption{Attribution methods in \sys.}
 \label{tab:tiers}
 \small
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{p{2.0cm}p{2.6cm}p{6.4cm}}
+\begin{tabular}{p{3.0cm}p{4.5cm}p{6.0cm}}
 \toprule
 \textbf{Method} & \textbf{Evidence} & \textbf{Trigger Condition} \\
 \midrule
@@ -24,7 +25,7 @@ HIGH & torch.profiler IOM & Kineto trace available; kernel count agrees with dis
 \rowcolor{medcol!15}
 MEDIUM (NVTX) & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range \\
 \rowcolor{medcol!10}
-MEDIUM (Inductor) & Inductor \texttt{output\_code.py} comments & Kernel name in Inductor fusion map; NVTX enclosure absent \\
+MEDIUM (Inductor) & Inductor debug artifacts & Kernel name in Inductor fusion map; NVTX enclosure absent \\
 \rowcolor{ucol!15}
 UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN conv.); eager Triton without NVTX \\
 \bottomrule
@@ -34,19 +35,16 @@ UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN conv.); eager Triton w
 \subsection{Data Ingestion}
 \label{sec:ingestion}
 
-A non-obvious constraint shapes the entire capture design: \nsys and \texttt{torch.profiler}
-both consume CUPTI for kernel timing and cannot run simultaneously within the same process.
-An early design ran the torch.profiler correlation pass \emph{inside} an \texttt{nsys profile}
-invocation, expecting both to collect independently.  In practice, CUPTI preempts the
-\texttt{torch.profiler} callback with no error; the correlation pass produces a
-\texttt{.corr.json} with zero entries and the silence makes the failure invisible.
-The pipeline was therefore redesigned as two sequential invocations: Phase~1 is a plain
-Python run (no \nsys) that captures torch.profiler output and writes \texttt{.corr.json};
-Phase~2 runs under \texttt{nsys profile} and reuses the Inductor cache from Phase~1.
+A fundamental resource contention constrains the capture architecture: \nsys and
+\texttt{torch.profiler} both register CUPTI subscribers for kernel timing and cannot coexist
+within the same process. \nsys's CUPTI subscriber preempts the
+\texttt{torch.profiler} callback silently; the correlation pass terminates with a
+\texttt{.corr.json} containing zero entries and produces no diagnostic indication of failure.
+Thus, two sequential, non-overlapping invocations are needed. The first executes as an untraced Python process to capture \texttt{torch.profiler} correlation output and the the second executes under \texttt{nsys profile} and reuses the
+Inductor compilation cache produced prior.
 
-\textbf{Nsight Systems export.}  Running the workload under
-\texttt{nsys profile --trace=cuda,nvtx} produces a \texttt{.nsys-rep} file, exported to SQLite
-via \texttt{nsys export --type=sqlite}. \sys queries three tables:
+\textbf{Nsight Systems export.}  
+\sys queries three tables in the SQLite nsys output:
 \texttt{CUPTI\_ACTIVITY\_KIND\_KERNEL} for GPU-domain kernel timestamps and launch geometry,
 \texttt{CUPTI\_ACTIVITY\_KIND\_RUNTIME} (joined via \texttt{correlationId}) for the host-side
 API timestamp at the moment the kernel launch call returned, and \texttt{NVTX\_EVENTS} for
@@ -60,11 +58,8 @@ for NVTX bracket queries without conflating it with the GPU-domain kernel execut
 counter group (4--8 passes total) rather than once per kernel, collecting all 20 metrics
 simultaneously.  This makes profiling cost $O(\text{counter groups})$ rather than
 $O(\text{unique kernels})$---a 10--50$\times$ efficiency gain for multi-layer models.
-An optional kernel-name filter enables targeted re-profiling of a single kernel without
-a full workload sweep.  The resulting \texttt{.ncu-rep} is exported to CSV via
-\texttt{ncu --import}, producing one row per kernel invocation per metric.
 
-Arriving at application-mode replay required ruling out two earlier approaches.  The first
+Two other ncu replay modes were considered. The first
 was a per-kernel-name subprocess loop: \ncu was invoked once per unique kernel name with a
 name filter, each as an independent replay.  This is $O(\text{unique kernels})$ in profiling
 cost---for a model like GPT-2 with hundreds of unique Triton kernel variants, the total
@@ -85,10 +80,11 @@ Per-operator durations in \texttt{profile.json} are derived from \nsys CUPTI GPU
 timestamps.  These durations are subject to a subtle confound: a GPU's boost clock floats
 with die temperature and power draw, typically varying 5--15\% across captures separated
 by minutes or hours.  An optimized workload dissipates less power than the baseline (fewer
-FLOPs on the SIMT path), so its capture may run at a \emph{higher} sustained clock,
-inflating the apparent speedup.  Conversely, thermal throttling during a long baseline
-capture deflates the baseline.  Both effects corrupt the $\text{baseline}/\text{optimized}$
-duration ratio even when no hardware change was made.  In one observed case, an
+FLOPs on the SIMT path), so its capture may execute at a \emph{higher} sustained clock frequency,
+artificially elevating the apparent speedup.  Conversely, thermal throttling during a
+prolonged baseline capture suppresses the measured baseline duration.  Both effects bias
+the $\text{baseline}/\text{optimized}$ duration ratio even when no architectural change
+was made.  In one observed case, an
 architecturally unchanged kernel showed an apparent 1.2$\times$ speedup solely from clock
 drift between baseline and optimized captures---an error that is indistinguishable from a
 real optimization without external clock control.
@@ -129,9 +125,9 @@ execution through incompatible timing mechanisms. \nsys records CUPTI GPU-domain
 the hardware's free-running clock. \ncu replays kernels in an isolated profiling pass with injected
 performance counter reads; its internal invocation clock reflects replay-mode execution, not the
 original capture clock. On a single GPU, these two clocks routinely diverge by 10--100~$\mu$s per
-kernel due to replay serialization and PMU injection overhead. A naive timestamp join would
-incorrectly associate hardware counter measurements with the wrong operator---especially dangerous
-for operators with similar execution times.
+kernel due to replay serialization and Performance Monitoring Unit (PMU) injection overhead. A naive timestamp join would
+incorrectly associate hardware counter measurements with the wrong operator---a failure mode
+particularly susceptible to misattribution for operators with similar execution times.
 
 \textbf{Invocation-Order Matching (Algorithm~\ref{alg:iom}).}  The key insight is that \ncu
 replays kernels in the same execution order they appear in the \nsys timeline: the $i$-th
@@ -210,9 +206,9 @@ invocation-order matching avoids the problem.
   node[near start, left=3pt, lbl, text=red!70!black] {\textbf{\ding{55}} wrong match};
 \draw[darr] (k3c.north) -- (k3n.south);
 
-\draw[decorate,decoration={brace,amplitude=5pt},gray!60]
-  (k1n.south east)++(0.1,0) -- (k1c.north east)++(0.1,0)
-  node[midway, right=6pt, lbl, align=left] {clock\\drift};
+\draw[decorate,decoration={brace,mirror,amplitude=5pt},gray!60]
+  (k1n.south west)++(-0.1,0) -- (k1c.north west)++(-0.1,0)
+  node[midway, left=6pt, lbl, align=right] {clock\\drift};
 
 %% ---- (b) IOM ----
 \node[hl] at (4.5,-2.15) {(b) Invocation-order matching (IOM) --- \textcolor{green!50!black}{correct}};
@@ -245,8 +241,51 @@ invocation-order matching avoids the problem.
 \label{fig:iom}
 \end{figure}
 
+\subsection{torch.profiler Correlation Attribution (HIGH Confidence)}
+\label{sec:tprofiler}
+
+The highest-confidence attribution path exploits CUPTI's External Activity API, which records a
+causal link between CPU-side operator dispatch and the GPU kernels it launches.  When
+\texttt{torch.profiler} is active with the Kineto backend, each \texttt{aten::} dispatch call is
+assigned a correlation ID at the moment of \texttt{cuLaunchKernel}; CUPTI propagates this ID
+through the driver stack and attaches it to every kernel invocation that the dispatch triggers.
+The result is a hardware-recorded mapping
+$\{(\textit{kernel\_name},\ i) \to \texttt{aten::op}\}$ that requires no timestamp comparison
+and no pattern matching---a causal record of dispatch rather than an inference from proximity.
+
+\textbf{Capture and output.}  As noted in \secref{sec:ingestion}, \texttt{torch.profiler} and
+\nsys cannot coexist within the same process.  The correlation pass therefore runs as a standalone
+Phase~1 invocation with no \nsys, producing \texttt{<prefix>.corr.json}: a map from
+\texttt{(kernel\_name, invocation\_index)} to \texttt{aten::op\_name}.
+\texttt{ManifestBuilder} loads this map and applies it as the first-priority attribution tier;
+any kernel with a matching entry receives HIGH-confidence attribution before the NVTX and
+Inductor passes are consulted.
+
+\textbf{Validity condition.}  The correlation map is applied only when the per-kernel invocation
+count recorded by \texttt{torch.profiler} in Phase~1 agrees with the invocation count observed
+in the \nsys trace from Phase~2.  A count mismatch---caused by JIT recompilation, conditional
+control flow, or workspace kernel emission differences between runs---indicates structural
+divergence between the two captures; the affected kernels are downgraded to UNATTRIBUTED rather
+than silently misattributed.  This invariant is enforced by requiring identical
+\texttt{--warmup-iters} and \texttt{--measure-iters} across both phases and the \ncu replay:
+any iteration-count difference shifts invocation indices and corrupts the mapping.  In practice,
+the condition holds for all evaluated workloads once the Inductor compilation cache is warm.
+
+\textbf{Why HIGH confidence.}  NVTX enclosure (MEDIUM, \secref{sec:intervaltree}) infers
+operator identity from a temporal bracket on the host timeline, which is ambiguous when
+operators overlap asynchronously or when Inductor fuses across operator boundaries.
+The torch.profiler path has no such ambiguity: the CUPTI correlation ID is a hardware-level
+record of dispatch causality, not a post-hoc inference from timing.
+
 \subsection{StreamIntervalTree Attribution}
 \label{sec:intervaltree}
+
+NVTX (NVIDIA Tools Extension) ranges are CPU-side annotations pushed and popped by the host
+process.  PyTorch's \texttt{torch.autograd.profiler.emit\_nvtx()} context manager inserts
+\texttt{nvtxRangePushA("aten::linear")} before and \texttt{nvtxRangePop()} after every
+\texttt{aten::} dispatch call, labeling the host-side window during which that operator's CUDA
+kernels are launched.  These annotations appear in the \nsys SQLite export as
+\texttt{NVTX\_EVENTS} rows with CPU-domain timestamps.
 
 For each unique \texttt{(stream\_id, device\_id)} pair observed in the \nsys trace, \sys
 constructs a \texttt{StreamIntervalTree}: a sorted list of NVTX ranges indexed by
@@ -286,8 +325,8 @@ and GPU execution makes GPU timestamps unreliable for enclosure queries.
 \label{sec:heuristic}
 
 When NVTX enclosure fails (no enclosing range exists at the query point), \sys applies a
-post-attribution enrichment pass that recovers ground-truth fused operator identity from Inductor
-debug artifacts, rather than guessing from kernel names.
+post-attribution enrichment pass that recovers the fused operator identity from Inductor
+debug artifacts, rather than applying heuristic inference from kernel names alone.
 
 \textbf{Inductor debug extraction.}  When \texttt{torch.compile(backend="inductor")} runs with
 debug mode enabled, Inductor writes \texttt{output\_code.py} artifacts containing the generated
@@ -329,8 +368,7 @@ and are surfaced explicitly in the profile output.
 
 \begin{enumerate}[leftmargin=1.5em]
 
-\item \textbf{Clock domain mismatch.} Invocation-order matching (\algref{alg:iom}) makes
-  attribution clock-immune by construction.
+\item \textbf{Clock domain mismatch.} Invocation-order matching makes attribution clock-immune by construction.
 
 \item \textbf{CUDA Graph replay.} During graph capture, operators emit NVTX ranges and kernels are
   attributed normally.  During replay, new GPU timestamps with no NVTX correspondence are generated.
@@ -378,11 +416,6 @@ partition's forward pass is wrapped with an NVTX range tagged
 \texttt{KernelProfileConfig} so the \ncu orchestrator skips duplicate-partition
 kernels during replay and propagates metrics from the unique representative.
 
-\textbf{Impact.}  For GPT-2 (12 identical transformer blocks),
-deduplication reduces \ncu replay time from ${\sim}$30--45\,min to
-${\sim}$3--5\,min---a 12$\times$ improvement.  Layer deduplication is activated
-automatically by \texttt{run\_workload.py} when structurally repeated partitions
-are detected.
 
 \textbf{Warmup-gating fix.}  An important correctness invariant: the
 \texttt{layer::unique::} and \texttt{layer::duplicate::} NVTX ranges must only be
@@ -391,30 +424,23 @@ emitted during the \emph{measured} capture window, not during warmup iterations.
 \texttt{\_NVTX\_STATE[`active']} flag that is set only after warmup completes.
 Without this guard, warmup-phase kernels appear in the nsys trace inside
 layer-partition ranges, causing \texttt{ManifestBuilder} to misattribute them to
-operators rather than classifying them as pre-NVTX initialization---inflating
+operators rather than classifying them as pre-NVTX initialization---artificially augmenting
 attributed kernel counts and biasing operator durations.
 
 % -------------------------------------------------------
-\subsection{Metric Set and Aggregation}
+\subsection{Bottleneck Axes and Counter Selection}
 \label{sec:metrics}
 
-\subsubsection{Counter Selection Rationale}
-
-Collecting all 90+ \ncu counters is expensive (multiple replay passes) and produces profiles too
-large for operator-level analysis.  We select 20 counters according to three criteria:
-(1)~coverage of every bottleneck axis in the roofline taxonomy (\secref{sec:roofline});
-(2)~availability of a valid counter name on Ampere, Hopper, \emph{and} Blackwell (some counters
-were renamed in the Blackwell GB202 silicon); (3)~non-redundancy (no two selected counters
-correlate perfectly).
-
-\subsubsection{The 20-Counter Set}
-
-\sys collects 20 hardware counters covering all major bottleneck axes: memory bandwidth,
-compute throughput, Tensor Core utilization, occupancy, latency, and register pressure.
-The full counter list with bottleneck axis, aggregation method, and architecture-specific
-name fallbacks is in \tabref{tab:counters} (\secref{sec:appendix:counters}).  Seven counters
-require name fallbacks between Ampere, Hopper, and Blackwell; \sys queries all variants and
-uses the first that returns a value.
+Collecting all 90+ \ncu counters incurs substantial overhead (multiple replay passes) and
+produces profiles too large for operator-level analysis.  \sys selects 20 counters spanning
+memory bandwidth, compute throughput, Tensor Core utilization, occupancy and latency hiding,
+register pressure, and warp divergence, subject to two additional constraints:
+cross-architecture availability on Ampere, Hopper, \emph{and} Blackwell (several counter
+names were renamed in the Blackwell GB202 silicon), and non-redundancy (no two selected
+counters correlate perfectly).  The full counter list with bottleneck axis, aggregation
+method, and architecture-specific name fallbacks is in \tabref{tab:counters}
+(\secref{sec:appendix:counters}).  Seven counters require name fallbacks; \sys queries all
+variants and uses the first that returns a non-null value.
 
 \subsubsection{Duration-Weighted Aggregation}
 \label{sec:aggregation}
@@ -437,36 +463,15 @@ spills), \sys uses plain summation.  For per-kernel constants (register count, s
 \section{Applying the Profile: Optimization Case Study}
 \label{sec:pgo}
 
-To demonstrate that the attributed hardware profiles produced in \secref{sec:attribution}
-are actionable, we implement a profile-guided optimization workflow in which per-operator
+To establish that the attributed hardware profiles produced in \secref{sec:attribution}
+are sufficient to ground optimization decisions, we implement a profile-guided optimization
+workflow in which per-operator
 counter values from \texttt{profile.json} drive the selection of FX graph transformations.
 This section describes the optimization infrastructure and patterns; their empirical results
 are in \secref{sec:experiments}.  The optimization layer is one possible downstream
 application of the attribution pipeline---others include hardware-aware neural architecture
 search, performance regression detection in CI, and kernel-level profiling of serving stacks
 such as vLLM or SGLang.
-
-\subsection{FX Pass Infrastructure}
-
-\sys provides two composable components for graph-level optimization.
-\textbf{UniqueSubgraphRegistry} partitions the FX graph by detected layer
-structure, identifies structurally identical subgraphs via hash comparison,
-and compiles a single representative per equivalence class.  Duplicate
-partitions share the compiled callable, reducing compilation and ncu replay
-time by $O(\text{num\_duplicate\_layers})$.
-
-\textbf{FxPassRunner} applies user-defined pattern rewrites to unique
-representatives only, then propagates the transformed compiled callables to
-all structural duplicates:
-
-\begin{lstlisting}[style=pystyle]
-runner = FxPassRunner(registry)
-for pattern_fn, replacement_fn in get_passes():
-    runner.apply_pass(pattern_fn, replacement_fn)
-\end{lstlisting}
-
-Custom backends are registered via Torch Dynamo's backend hook and receive
-the Aten IR \texttt{GraphModule} before Inductor lowering.
 
 \subsection{Three-Level FX Pass Architecture}
 \label{sec:threelevel}
@@ -475,11 +480,11 @@ Profile-guided optimizations are routed across three IR levels depending on the
 graph representation at which each transformation is expressible.
 
 \textbf{Level 1 --- Functional (pre-AOTAutograd).}
-Fusion and operator substitution passes run here.  The key invariant is that the
+Fusion and operator substitution passes are applied at this level.  The key invariant is that the
 Dynamo graph preserves the single shared-activation node for operations like a QKV
 projection: at this level, three linear layers reading from one \texttt{LayerNorm}
 output form a three-GEMM pattern that can be fused into one wide GEMM.
-AOTAutograd decomposition shatters that shared node into per-consumer
+AOTAutograd decomposition disaggregates that shared node into per-consumer
 \texttt{aten.view} copies, making the pattern undetectable at the Aten level.
 SDPA canonicalization similarly requires the high-level \texttt{F.scaled\_dot\_product\_attention}
 call node, which is replaced by Inductor-specific primitives after decomposition.
@@ -499,42 +504,13 @@ are passed as a scoped configuration dictionary to \texttt{compile\_fx} rather t
 mutating the global \texttt{torch.\_inductor.config}.  This ensures the policy applies
 only to the specific compilation and cannot leak across compilation units.
 
-The three levels compose as a fixed funnel:
-\begin{lstlisting}[style=pystyle]
-@register_backend
-def my_backend(gm, example_inputs):
-    gm = _run_functional_passes(gm)               # Level 1
-    inner = functools.partial(_aten_inner_compile,
-                              real_inputs=list(example_inputs))
-    return compile_fx(gm, example_inputs,          # Level 2 + 3
-                      inner_compile=inner,
-                      config_patches={"freezing": True})
-\end{lstlisting}
+The three levels compose as a fixed funnel. Custom backends are registered via Torch Dynamo's backend hook, apply functional fx passes, lower to Aten IR, apply Aten IR fx passes, and then lower to inductor with the specified configuration.
 
-Each pass degrades gracefully: a \texttt{try}/\texttt{except} wrapper logs
-\texttt{WARNING} and returns the graph unchanged if the target pattern is absent,
-so partial optimization is always preferred over a compilation failure.
-\texttt{gm.graph.lint()} is called after each mutation to validate graph invariants.
-When \texttt{UniqueSubgraphRegistry} detects repeated layer structure, the funnel
-runs once per unique representative and shares the compiled callable across all
-structural duplicates---each FX pass is therefore authored once for the full model.
-
-\subsection{Closed-Loop Validation Protocol}
-\label{sec:validation}
-
-The full optimization cycle consists of four steps:
-\begin{enumerate}
-  \item \textbf{Profile}: capture baseline \texttt{profile.json} via \nsys + \ncu pipeline. The \nsys capture runs with GPU clocks locked to the probe-and-cache frequency (\secref{sec:clocklocking}); the same cached clock is reused for the optimized re-capture in step~4, ensuring duration ratios reflect architectural changes rather than thermal variation.
-  \item \textbf{Diagnose}: \texttt{profile.json} is examined per-operator; per-operator hardware
-    counter values are used to produce ranked optimization proposals (\texttt{optimizations.json})
-    with evidence citations and dependency ordering.
-  \item \textbf{Transform}: implement a workload-specific optimized backend and
-    run \texttt{torch.compile(model, backend="<workload>\_opt")} to apply the patterns and compile.
-  \item \textbf{Validate}: capture optimized \texttt{profile\_optimized.json} and generate a delta
-    report comparing per-operator counter values, flagging any regression.
-\end{enumerate}
-
-This protocol makes every optimization auditable: the delta report shows not just speedup, but
-\emph{which counter improved}, providing evidence that the diagnosed bottleneck was actually
-eliminated rather than merely shifted to a different operator.
-
+\sys provides two composable components for graph-level optimization.
+\textbf{UniqueSubgraphRegistry} partitions the FX graph by detected layer
+structure, identifies structurally identical subgraphs via hash comparison,
+and compiles a single representative per equivalence class.  Duplicate
+partitions share the compiled callable, reducing compilation and ncu replay
+time by $O(\text{num\_duplicate\_layers})$. \textbf{FxPassRunner} applies user-defined pattern rewrites to unique
+representatives only, then propagates the transformed compiled callables to
+all structural duplicates. 

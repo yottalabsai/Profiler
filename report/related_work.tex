@@ -1,59 +1,85 @@
 \section{Related Work}
 \label{sec:related}
 
-\paragraph{GPU profiling infrastructure.}
-\texttt{torch.profiler} and its Kineto backend \cite{kineto2021} record operator-level wall-clock
-durations and Chrome traces, but expose no hardware performance counters---leaving practitioners
-unable to distinguish memory-bound from compute-bound operators programmatically. NVIDIA Nsight
-Systems~\cite{nsightsystems} captures the kernel timeline with NVTX annotations, but produces
-no operator-level view: every kernel appears by its internal CUDA name (\eg
-\texttt{cutlass\_80\_simt\_sgemm\_128x32\_tn}), with no indication of which PyTorch operator
-launched it. NVIDIA Nsight Compute~\cite{nsightcompute} collects per-kernel hardware counters
-at full precision, but its output is keyed on kernel names and invocation indices in the
-replay timeline---again, no awareness of the operator graph. These three tools each solve
-a distinct subproblem; \sys's contribution is the bridge that combines all three into a
-unified per-operator hardware profile. NVIDIA DCGM and Dynolog~\cite{dynolog2023} target
-cluster-level monitoring rather than per-operator attribution. \sys is the first
-\emph{published} system to automatically attribute \ncu hardware counters to
-\texttt{aten::} operators via NVTX enclosure and invocation-order matching; NVIDIA internal
-tools may provide related capabilities, but no public system with comparable scope has been
-described in the literature.
+The tools closest to \sys fall short along three primary dimensions: operator-level timing
+without counters, kernel-level counter collection without operator identity, and
+compilation-level optimization without counter-verified feedback. Adjacent areas---fused kernel
+libraries and profile-guided optimization---are surveyed below for completeness.
 
-\paragraph{Deep learning compilers.}
-TorchDynamo and TorchInductor~\cite{pytorch2024} compile PyTorch programs to Triton kernels using
-heuristic fusion rules (pointwise chaining, matmul epilogue fusion), but do not incorporate
-hardware counter feedback in pass selection.  \sys wraps Inductor as a downstream delegate and
-inserts hardware-evidence-motivated FX passes \emph{before} Inductor's lowering step, creating a
-feedback loop that Inductor alone lacks.  TVM~\cite{tvm2018} and Halide~\cite{halide2013} optimize
-tensor programs via measurement-based auto-tuning and schedule/algorithm separation respectively;
-neither uses per-kernel hardware counters to decide which optimization class to apply.
-ONNX Runtime and TensorRT perform layer fusion and quantization but present black-box interfaces
-that cannot be extended for custom architectures or augmented with profiling evidence.
+\paragraph{Operator-level profilers.}
+\texttt{torch.profiler} and its Kineto backend \cite{kineto2021} record wall-clock durations and
+Chrome traces at the \texttt{aten::} operator granularity and expose CUDA activity correlation
+via CUPTI External IDs---giving kernel-level \emph{timing} attribution but no access to hardware
+performance counters. Practitioners can identify \emph{which} operator is slow, but cannot
+determine \emph{which hardware resource} it is contending for---the distinction that determines
+whether the correct fix is dtype promotion, operator fusion, or a layout change. Without hardware
+counter data at the operator level, optimization choices remain heuristic.
 
-\paragraph{Attention and fused kernel libraries.}
-FlashAttention~\cite{flashattention2022} and FlashAttention-2~\cite{flashattention2023} tile
+\paragraph{Kernel-level profilers.}
+NVIDIA Nsight Systems (\nsys) \cite{nsightsystems} captures the full CUDA kernel timeline with
+NVTX annotations at high throughput, but produces no operator-level view: every kernel appears by
+its internal CUDA or Triton name (\eg \texttt{cutlass\_80\_simt\_sgemm\_128x32\_tn}), with no
+indication of which PyTorch operator dispatched it. NVIDIA Nsight Compute (\ncu)
+\cite{nsightcompute} collects per-kernel hardware counters at full precision---occupancy, DRAM
+bytes, Tensor Core utilization, cache hit rates---but its output is keyed on kernel names and
+invocation indices in the replay timeline, again with no awareness of the operator graph above.
+NVIDIA DCGM and Dynolog \cite{dynolog2023} operate at cluster monitoring granularity and do not
+perform per-kernel or per-operator attribution. Taken together, these tools collectively address
+hardware counter collection and kernel-timeline capture but leave the question ``which operator
+is responsible for this kernel?'' entirely unanswered.
+
+\paragraph{Why the tools cannot be trivially combined.}
+The na\"{i}ve approach---run \nsys for the kernel timeline, run \ncu for hardware counters, join
+on kernel name---fails for three reasons. First, \nsys and \ncu use incompatible clock domains:
+\nsys reads CUPTI activity records with GPU-domain timestamps, while \ncu replays kernels under
+injection mode and records replay-mode timestamps; the two clocks diverge by a variable amount
+per kernel---an artifact of replay-mode serialization---making timestamp joins systematically
+incorrect. Second, Inductor-compiled Triton
+kernels carry opaque hash suffixes (\eg \texttt{triton\_poi\_fused\_relu\_addmm\_0}) that do not
+map cleanly to a single \texttt{aten::} operator. Third, the manual bridging workflow is
+$O(\text{operators})$ human effort per model variant and does not compose with the closed-loop
+feedback needed for profile-guided optimization. \sys resolves all three failure modes via
+invocation-order matching, Inductor fusion-map enrichment, and NVTX interval-tree attribution
+respectively.
+
+\paragraph{Deep learning compilers and optimizers.}
+TorchDynamo and TorchInductor \cite{pytorch2024} compile PyTorch programs to Triton kernels
+using heuristic fusion rules (pointwise chaining, matmul epilogue fusion), but fusion decisions
+are made without hardware counter feedback: whether a given fusion improved Tensor Core
+utilization is not a question the standard Inductor toolchain can answer programmatically.
+\sys wraps Inductor as a downstream delegate and inserts hardware-informed FX passes
+\emph{before} Inductor's lowering step, creating the counter-feedback loop that Inductor alone
+lacks. TVM \cite{tvm2018} and Halide \cite{halide2013} optimize tensor programs via
+measurement-based auto-tuning and schedule/algorithm separation respectively; both optimize
+\emph{latency} directly rather than using hardware counters to identify the bottleneck class
+driving that latency. ONNX Runtime\footnote{\url{https://onnxruntime.ai}} and NVIDIA
+TensorRT\footnote{\url{https://developer.nvidia.com/tensorrt}} perform layer fusion and
+quantization behind black-box interfaces that cannot be extended for custom architectures or
+augmented with attribution data.
+
+\paragraph{Fused kernel libraries and inference frameworks.}
+FlashAttention \cite{flashattention2022} and FlashAttention-2 \cite{flashattention2023} tile
 attention computation to keep the $[B, H, S, S]$ attention matrix in on-chip SRAM, eliminating
-DRAM round-trips and register-spill pressure.  \sys implements a FlashAttention substitution pass
-triggered by \texttt{local\_memory\_spills $> 0$} and \texttt{l2\_hit\_rate $< 20\%$}; this pass
-was not triggered in the evaluated workloads because the Blackwell SDPA bottleneck is Tensor Core
-idle (FP32 $\to$ BF16 promotion), not register spills.  xFormers~\cite{xformers2022} provides a
-static library of fused attention variants; \sys is complementary: it determines \emph{which}
-variant is warranted for a specific operator's hardware counter profile. Triton~\cite{triton2019} provides the JIT compilation
-framework underlying Inductor kernels; \sys additionally \emph{parses} Triton kernel names to
-recover fused operator identity when NVTX annotation is unavailable.
+DRAM round-trips. xFormers \cite{xformers2022} provides a static library of fused attention
+variants. These hand-coded kernels represent the class of optimization that attributed profiles
+should motivate rather than apply unconditionally: \sys uses hardware counter evidence to decide
+\emph{which} variant is warranted for a given operator's measured profile, rather than
+substituting unconditionally.
+
+At a higher level, inference serving frameworks take a complementary approach: rather than
+providing a diagnostic layer, they ship pre-tuned kernels for specific access patterns.
+vLLM \cite{vllm2023} and SGLang \cite{sglang2024} achieve high LLM serving throughput via
+PagedAttention and continuous batching; their hand-coded kernels represent the endpoint of an
+operator-level optimization process that \sys \emph{diagnoses and motivates} for arbitrary model
+architectures. Neither framework provides a mechanism to surface residual kernel-level
+inefficiencies in workloads not already covered by their serving-layer optimizations; \sys is
+complementary and can profile a workload running inside vLLM to identify such operators.
 
 \paragraph{Profile-guided optimization.}
 Classic PGO in C/C++ compilers (GCC, LLVM) collects branch frequency profiles to guide inlining
-and layout decisions \cite{autofdo2016}.  \sys applies the same principle at the operator level:
-hardware counter profiles select FX graph transformations.  The optimization layer is a downstream
-application of the attribution pipeline described in \secref{sec:pgo}.
-
-\paragraph{Inference optimization frameworks.}
-vLLM~\cite{vllm2023} and SGLang~\cite{sglang2024} achieve high LLM serving throughput via
-PagedAttention, continuous batching, and memory pooling.  These frameworks operate at the
-scheduling level; their hand-coded kernels (BF16 GEMMs, FlashAttention-2) represent the
-operator-level optimizations that the \sys attribution pipeline \emph{surfaces and motivates
-automatically} from hardware counter evidence for arbitrary model architectures.  The two
-systems are complementary: \sys can profile a workload running inside vLLM to provide
-operator-attributed hardware counter data for identifying residual kernel-level inefficiencies
-not covered by serving-layer scheduling.
+and layout decisions \cite{autofdo2016}. \sys applies the same principle at the GPU operator
+level: hardware counter profiles select FX graph transformations, with each optimization pass
+gated on a specific counter symptom rather than applied heuristically. To our knowledge, \sys is
+the first \emph{published} system to close the attribution gap---automatically attributing \ncu
+hardware counters to \texttt{aten::} operators---and to use the resulting attributed profile to
+drive hardware-informed FX graph optimization.
