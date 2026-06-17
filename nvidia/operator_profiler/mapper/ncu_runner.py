@@ -11,7 +11,7 @@ Application-mode profiling
 ---------------------------
 ncu replays the entire workload once per counter group (typically 4–8 passes),
 collecting hardware counters for all kernels in each pass.  This is far more
-efficient than kernel-mode replay for multi-layer models, because the number
+efficient than kernel-mode replay, because the number
 of ncu subprocess calls is bounded by the counter-group count rather than the
 unique kernel count.
 

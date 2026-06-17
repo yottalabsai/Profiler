@@ -22,8 +22,7 @@
 \pgfplotsset{compat=1.18}
 \usetikzlibrary{arrows.meta,shapes,positioning,fit,backgrounds,calc,decorations.pathreplacing}
 
-\title{Hardware-Attributed GPU Operator Profiling for PyTorch:\\
-       Automatic Kernel-to-Operator Mapping via Nsight Systems and Nsight Compute}
+\title{Hardware-Attributed Operator Profiling for PyTorch}
 
 \author{
 Logan Chu$^{1}$ \quad
@@ -43,19 +42,19 @@ $^{2}$UC Merced
 Framework profilers expose operator timing without hardware counters; GPU profilers expose
 hardware counters without operator attribution. Bridging this gap manually is error-prone and
 does not scale. We present \textbf{\sys}, a hardware attribution pipeline that automatically
-linkshardware metrics to PyTorch \texttt{aten::} operators via three
+links hardware metrics to PyTorch operators via three
 complementary attribution paths: torch.profiler CUPTI correlation,
 NVTX temporal enclosure with per-stream interval trees, and Inductor fusion-map
 enrichment from debug artifacts. NVIDIA Nsight Compute (ncu)  hardware counters are matched to NVIDIA Nsight Systems (nsys) kernel records
 via invocation-order matching, avoiding timestamp joins across incompatible clock domains. A curated 20-counter metric set with
-duration-weighted aggregation covers all hardware bottleneck axes; layer deduplication reduces \ncu replay time by $O(\text{num\_duplicate\_layers})$ for models with repeated structure.
+duration-weighted aggregation covers all hardware bottleneck axes, layer deduplication reduces \ncu replay time by $O(\text{num\_duplicate\_layers})$ for models with repeated structure, and
 GPU clock locking ensures reproducible per-operator duration measurements.
 On an NVIDIA RTX PRO 6000 Blackwell, \sys attributes 95--100\% of kernel
 runtime across most evaluated workloads; black-box library backends (e.g., cuDNN's RNN
 path) are correctly surfaced as unattributed rather than silently dropped.
 Applied to profile-guided FX graph optimization, attributed profiles yield
 \textbf{1.76$\times$--3.63$\times$} kernel wall-time speedups across three case studies,
-each grounded in a specific counter symptom identified by \sys.
+with each optimization grounded in a specific counter symptom identified by \sys.
 \end{abstract}
 
 \input{intro}
@@ -70,5 +69,6 @@ each grounded in a specific counter symptom identified by \sys.
 \appendix
 \onecolumn
 \input{appendix_exp}
+\input{appendix_candidates}
 
 \end{document}

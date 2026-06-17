@@ -1,8 +1,20 @@
 \section{Attribution Pipeline}
 \label{sec:attribution}
 
+The na\"{i}ve approach---run \nsys for the kernel timeline, run \ncu for hardware counters, and
+join on kernel name---fails on three fronts. First, kernel names are not unique identifiers:
+any kernel invoked more than once (\eg the same GEMM across 12 transformer layers) produces
+multiple indistinguishable rows with no stable key. Timestamps are the natural tiebreaker,
+but \nsys and \ncu use incompatible clock domains (\secref{sec:clockdomain}), making
+timestamp joins systematically incorrect. Second, even a correctly joined kernel record
+carries no operator identity: Inductor-compiled Triton kernels bear opaque hash suffixes
+(\eg \texttt{triton\_poi\_fused\_relu\_addmm\_0}) that do not map to a single
+\texttt{aten::} operator without additional artifacts. Third, manual bridging is
+$O(\text{operators})$ effort per model variant and does not scale. \sys addresses all three
+failures through the pipeline described below.
+
 \sys ingests two data sources produced for the same workload run: (1) an \nsys SQLite export
-containing CUDA kernel activity and NVTX range annotations, and (2) \ncu CSV output containing
+containing CUDA kernel activity and NVTX range annotations, and (2) an \ncu CSV output containing
 per-kernel hardware counter measurements. The pipeline produces a hardware-attributed
 \texttt{OperatorProfile}: a JSON document mapping each dispatched PyTorch operator to its constituent CUDA kernels,
 along with the hardware metrics and attribution confidence of each kernel.
@@ -23,9 +35,9 @@ Attribution is assigned at one of three confidence tiers (\tabref{tab:tiers}); p
 \rowcolor{highcol!15}
 HIGH & torch.profiler IOM & Kineto trace available; kernel count agrees with dispatch count \\
 \rowcolor{medcol!15}
-MEDIUM (NVTX) & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range \\
+MEDIUM & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range \\
 \rowcolor{medcol!10}
-MEDIUM (Inductor) & Inductor debug artifacts & Kernel name in Inductor fusion map; NVTX enclosure absent \\
+MEDIUM & Inductor debug artifacts & Kernel name in Inductor fusion map; NVTX enclosure absent \\
 \rowcolor{ucol!15}
 UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN conv.); eager Triton without NVTX \\
 \bottomrule
@@ -43,34 +55,34 @@ within the same process. \nsys's CUPTI subscriber preempts the
 Thus, two sequential, non-overlapping invocations are needed. The first executes as an untraced Python process to capture \texttt{torch.profiler} correlation output and the the second executes under \texttt{nsys profile} and reuses the
 Inductor compilation cache produced prior.
 
-\textbf{Nsight Systems export.}  
-\sys queries three tables in the SQLite nsys output:
-\texttt{CUPTI\_ACTIVITY\_KIND\_KERNEL} for GPU-domain kernel timestamps and launch geometry,
-\texttt{CUPTI\_ACTIVITY\_KIND\_RUNTIME} (joined via \texttt{correlationId}) for the host-side
-API timestamp at the moment the kernel launch call returned, and \texttt{NVTX\_EVENTS} for
-completed operator range annotations.
-The host-side launch timestamp (\texttt{cpu\_launch\_start\_ns}) serves as a CPU-domain anchor
-for NVTX bracket queries without conflating it with the GPU-domain kernel execution timestamp
-(\secref{sec:clockdomain}).
+\textbf{Nsight Systems export.}
+\sys extracts three classes of records from the SQLite nsys output:
+GPU-domain kernel timestamps and launch geometry; the host-side API timestamp
+at the moment each \texttt{cuLaunchKernel} call returned; and completed NVTX
+operator range annotations.  The host and GPU records are linked by a CUPTI
+correlation identifier---an integer that CUPTI assigns to both the CPU-side
+launch call and the resulting GPU kernel execution, enabling a join across the
+two tables in the nsys SQLite export.
+The host-side launch timestamp serves as a CPU-domain anchor for NVTX bracket queries
+without conflating it with the GPU-domain kernel execution timestamp (\secref{sec:clockdomain}).
 
-\textbf{Nsight Compute export.}  For the full set of kernels in the \nsys trace, \sys invokes
-\ncu in application-mode replay, which re-executes the entire workload once per hardware
-counter group (4--8 passes total) rather than once per kernel, collecting all 20 metrics
-simultaneously.  This makes profiling cost $O(\text{counter groups})$ rather than
-$O(\text{unique kernels})$---a 10--50$\times$ efficiency gain for multi-layer models.
+\textbf{Nsight Compute export.}  Collecting hardware counters for every kernel in the \nsys
+trace requires selecting an \ncu replay strategy.  Two candidates were evaluated and rejected.
+The first was a per-kernel-name subprocess loop in which \ncu is invoked once per unique
+kernel name with a name filter, each constituting an independent replay.  The profiling cost
+is $O(\text{unique kernels})$: for a model such as GPT-2, which produces hundreds of distinct
+Triton kernel variants, this approach is computationally prohibitive at scale.  The second
+candidate was \ncu's \texttt{--filter-by-nvtx-range}, which confines each replay to kernels
+enclosed within a specified \texttt{aten::} range.  This mode fails silently: \ncu's injection
+mechanism targets the dynamically-loaded NVTX library, whereas PyTorch~2.x links NVTX
+statically inside \texttt{libtorch\_cuda.so}, rendering its annotations invisible to \ncu
+irrespective of \texttt{emit\_nvtx} instrumentation---and producing no diagnostic output to
+indicate that the collected counters are empty.
 
-Two other ncu replay modes were considered. The first
-was a per-kernel-name subprocess loop: \ncu was invoked once per unique kernel name with a
-name filter, each as an independent replay.  This is $O(\text{unique kernels})$ in profiling
-cost---for a model like GPT-2 with hundreds of unique Triton kernel variants, the total
-runtime exceeded an hour, making it impractical for iterative development.  The second
-approach was \ncu's \texttt{--filter-by-nvtx-range}, which appeared to solve the cost problem
-by replaying only the kernels within each \texttt{aten::} range.  This failed silently:
-PyTorch~2.x statically links NVTX~v3 inside \texttt{libtorch\_cuda.so}, whereas \ncu's
-injection hooks target the dynamically-loaded NVTX library.  As a result, \ncu never
-observes any NVTX events and the range filter captures nothing regardless of
-\texttt{emit\_nvtx} activity---with no error or warning to indicate the output is empty.
-Application-mode replay is the only path that reliably collects counters for
+\sys therefore uses application-mode replay, in which \ncu re-executes the entire workload
+once per hardware counter group (4--8 passes total), collecting all 20 metrics simultaneously.
+This reduces profiling cost to $O(\text{counter groups})$ rather than $O(\text{unique kernels})$---a
+10--50$\times$ reduction---and is the only mode that reliably collects counters for
 Inductor-compiled workloads.
 
 \subsection{GPU Clock Locking for Reproducible Duration Comparisons}
@@ -84,10 +96,7 @@ FLOPs on the SIMT path), so its capture may execute at a \emph{higher} sustained
 artificially elevating the apparent speedup.  Conversely, thermal throttling during a
 prolonged baseline capture suppresses the measured baseline duration.  Both effects bias
 the $\text{baseline}/\text{optimized}$ duration ratio even when no architectural change
-was made.  In one observed case, an
-architecturally unchanged kernel showed an apparent 1.2$\times$ speedup solely from clock
-drift between baseline and optimized captures---an error that is indistinguishable from a
-real optimization without external clock control.
+was made.
 
 \textbf{Probe-and-lock.}
 \sys pins the SM and memory clocks for the duration of the \nsys capture.  The default
@@ -98,19 +107,10 @@ during the probe is selected as the lock target.  Locking to the \emph{sustained
 lock is genuinely held throughout the capture.
 
 \textbf{Cache and reuse.}
-The probed clock is written to \texttt{profiler\_output/.gpu\_clock\_lock.json} with a
-6-hour TTL per GPU index.  The baseline capture probes once; the optimized capture reuses
+The probed clock is written to a per-GPU clock cache with a 6-hour TTL.  The baseline capture probes once; the optimized capture reuses
 the cached clock.  Both captures therefore execute at exactly the same frequency, making
 their duration ratio clock-immune by construction---the same guarantee that invocation-order
 matching provides for the hardware counter join.
-
-\textbf{Implementation.}
-Clocks are set via \texttt{nvidia-smi -lgc/-lmc} and released through a context manager
-that registers a \texttt{SIGTERM} handler, guaranteeing a reset even on exception, timeout,
-or Ctrl-C.  The \nsys capture runs inside this context so that the lock is held for
-exactly the duration of the profiling pass and released unconditionally on exit.
-Clock setting uses \texttt{sudo -n} (non-interactive); if permission is unavailable, \sys
-logs a \texttt{WARNING} and proceeds at dynamic clocks rather than aborting.
 
 \textbf{Scope.}
 Clock locking applies to the \nsys capture phase only.  The \ncu replay phase is
@@ -135,6 +135,14 @@ invocation of kernel $K$ in the \nsys trace corresponds to the $i$-th row for ke
 \ncu CSV output.  We exploit this ordering to assign hardware metrics without any timestamp
 comparison:
 
+This matching is correct when the workload is \emph{deterministic}: the same kernel names must
+appear in the same counts and the same execution order in both the \nsys capture and the \ncu
+replay.  Concretely, models with conditional control flow, dynamic dispatch, or
+allocator-emitted workspace kernels can violate this invariant without producing a shape
+error.  \sys validates that per-kernel invocation counts match between the two runs before
+issuing counter assignments; a count mismatch on any kernel name is logged as a
+warning and metric assignment for that kernel is skipped.
+
 \begin{algorithm}[t]
 \caption{Invocation-Order Matching (\nsys $\times$ \ncu)}
 \label{alg:iom}
@@ -142,104 +150,19 @@ comparison:
 \Require \texttt{nsys\_kernels}: list of \texttt{KernelRow} sorted by \texttt{start\_ns} per stream
 \Require \texttt{ncu\_rows}: list of \texttt{NcuRow} sorted by invocation index per kernel name
 \Ensure  Each \texttt{KernelRow} assigned a \texttt{KernelMetrics} object
-\State $\textit{counter} \gets \text{defaultdict}(\text{int})$
-  \Comment{per kernel name}
+\State $\textit{counter} \gets \{\,\}$
+  \Comment{invocation count per kernel name, initialized to 0}
 \For{$k \in \texttt{nsys\_kernels}$}
   \State $i \gets \textit{counter}[k.\textit{name}]$
   \If{$i \ge |\texttt{ncu\_rows}[k.\textit{name}]|$}
-    \State \textbf{raise} \texttt{InvocationCountMismatchError}($k.\textit{name}$, $i$)
-    \Comment{iteration count mismatch between captures}
+    \State \textbf{warn}($k.\textit{name}$, $i$); \textbf{continue}
+    \Comment{invocation count mismatch: log warning, skip metric assignment}
   \EndIf
   \State $k.\textit{metrics} \gets \texttt{ncu\_rows}[k.\textit{name}][i]$
   \State $\textit{counter}[k.\textit{name}] \mathrel{+}= 1$
 \EndFor
 \end{algorithmic}
 \end{algorithm}
-
-This matching is correct when the workload is \emph{deterministic}: the same kernel names must
-appear in the same counts and the same execution order in both the \nsys capture and the \ncu
-replay.  Concretely, models with conditional control flow, dynamic dispatch, or
-\texttt{cudaMallocAsync} workspace kernels can violate this invariant without producing a shape
-error.  \sys validates that per-kernel invocation counts match between the two runs before
-issuing counter assignments; a count mismatch on any kernel name raises
-\texttt{InvocationCountMismatchError} and aborts attribution for that workload.  Shape validation
-before the replay step enforces the shape portion of this invariant
-(\secref{sec:edgecases}).  \figref{fig:iom} illustrates why timestamp joins fail and how
-invocation-order matching avoids the problem.
-
-\begin{figure}[t]
-\centering
-\begin{tikzpicture}[
-  font=\small,
-  arr/.style={-{Stealth[length=4pt]}, thick},
-  karr/.style={-{Stealth[length=4pt]}, thick, red!70!black},
-  garr/.style={-{Stealth[length=4pt]}, thick, green!50!black},
-  kern/.style={draw, rounded corners=2pt, fill=blue!10, draw=blue!60!black,
-               minimum width=1.6cm, minimum height=1.4em, align=center, font=\footnotesize},
-  kernncu/.style={draw, rounded corners=2pt, fill=purple!10, draw=purple!60!black,
-               minimum width=1.6cm, minimum height=1.4em, align=center, font=\footnotesize},
-  tl/.style={-{Stealth[length=5pt]}, thick, gray},
-  lbl/.style={font=\scriptsize, text=gray!80!black},
-  hl/.style={font=\footnotesize\bfseries},
-  darr/.style={-{Stealth[length=4pt]}, thick, dashed, gray!50},
-]
-
-%% ---- (a) Naive timestamp join ----
-\node[hl] at (4.5, 0.7) {(a) Naive timestamp join --- \textcolor{red!70!black}{incorrect}};
-
-\draw[tl] (0.0, 0) -- (9.8, 0) node[right,lbl] {nsys (GPU clock)};
-\node[lbl, left=2pt] at (0.0, 0) {\small nsys};
-
-\node[kern] (k1n) at (1.1, 0)  {$K_1$\;\tiny t=10};
-\node[kern] (k2n) at (4.0, 0)  {$K_2$\;\tiny t=45};
-\node[kern] (k3n) at (7.1, 0)  {$K_3$\;\tiny t=80};
-
-\draw[tl] (0.0,-1.25) -- (9.8,-1.25) node[right,lbl] {ncu (replay clock)};
-\node[lbl, left=2pt] at (0.0,-1.25) {\small ncu};
-
-\node[kernncu] (k1c) at (2.3,-1.25)  {$K_1$\;\tiny t=35};
-\node[kernncu] (k2c) at (5.1,-1.25)  {$K_2$\;\tiny t=62};
-\node[kernncu] (k3c) at (8.1,-1.25)  {$K_3$\;\tiny t=95};
-
-\draw[darr] (k1c.north) -- (k1n.south);
-\draw[karr] (k2c.north) -- (k1n.south)
-  node[near start, left=3pt, lbl, text=red!70!black] {\textbf{\ding{55}} wrong match};
-\draw[darr] (k3c.north) -- (k3n.south);
-
-\draw[decorate,decoration={brace,mirror,amplitude=5pt},gray!60]
-  (k1n.south west)++(-0.1,0) -- (k1c.north west)++(-0.1,0)
-  node[midway, left=6pt, lbl, align=right] {clock\\drift};
-
-%% ---- (b) IOM ----
-\node[hl] at (4.5,-2.15) {(b) Invocation-order matching (IOM) --- \textcolor{green!50!black}{correct}};
-
-\draw[tl] (0.0,-2.9) -- (9.8,-2.9) node[right,lbl] {nsys order};
-\node[lbl, left=2pt] at (0.0,-2.9) {\small nsys};
-\node[kern] (k1ni) at (1.4,-2.9) {$K_1$\;\tiny $i{=}0$};
-\node[kern] (k2ni) at (4.0,-2.9) {$K_2$\;\tiny $i{=}1$};
-\node[kern] (k3ni) at (6.7,-2.9) {$K_3$\;\tiny $i{=}2$};
-
-\draw[tl] (0.0,-4.1) -- (9.8,-4.1) node[right,lbl] {ncu order};
-\node[lbl, left=2pt] at (0.0,-4.1) {\small ncu};
-\node[kernncu] (k1ci) at (1.4,-4.1) {$K_1$\;\tiny $i{=}0$};
-\node[kernncu] (k2ci) at (4.0,-4.1) {$K_2$\;\tiny $i{=}1$};
-\node[kernncu] (k3ci) at (6.7,-4.1) {$K_3$\;\tiny $i{=}2$};
-
-\draw[garr] (k1ci.north) -- (k1ni.south) node[midway,right=1pt,lbl,text=green!50!black] {\textbf{\ding{51}}};
-\draw[garr] (k2ci.north) -- (k2ni.south) node[midway,right=1pt,lbl,text=green!50!black] {\textbf{\ding{51}}};
-\draw[garr] (k3ci.north) -- (k3ni.south) node[midway,right=1pt,lbl,text=green!50!black] {\textbf{\ding{51}}};
-
-\node[lbl, align=center] at (4.9,-4.75)
-  {Match key: \texttt{(kernel\_name, invocation\_index)} --- no timestamp comparison required};
-
-\end{tikzpicture}
-\caption{\textbf{Why timestamp joins fail and how IOM avoids them.}
-  (a)~The nsys GPU-domain clock and the \ncu replay clock diverge by $>$10\,$\mu$s; a
-  nearest-timestamp join misattributes $K_2$'s hardware counters to $K_1$.
-  (b)~IOM matches kernels by ordinal position within each \texttt{(kernel\_name,
-  invocation\_index)} sequence, making attribution clock-immune by construction.}
-\label{fig:iom}
-\end{figure}
 
 \subsection{torch.profiler Correlation Attribution (HIGH Confidence)}
 \label{sec:tprofiler}
@@ -255,52 +178,40 @@ and no pattern matching---a causal record of dispatch rather than an inference f
 
 \textbf{Capture and output.}  As noted in \secref{sec:ingestion}, \texttt{torch.profiler} and
 \nsys cannot coexist within the same process.  The correlation pass therefore runs as a standalone
-Phase~1 invocation with no \nsys, producing \texttt{<prefix>.corr.json}: a map from
+Phase~1 invocation with no \nsys, producing a correlation map from
 \texttt{(kernel\_name, invocation\_index)} to \texttt{aten::op\_name}.
-\texttt{ManifestBuilder} loads this map and applies it as the first-priority attribution tier;
+The attribution engine loads this map and applies it as the first-priority tier;
 any kernel with a matching entry receives HIGH-confidence attribution before the NVTX and
 Inductor passes are consulted.
 
-\textbf{Validity condition.}  The correlation map is applied only when the per-kernel invocation
-count recorded by \texttt{torch.profiler} in Phase~1 agrees with the invocation count observed
-in the \nsys trace from Phase~2.  A count mismatch---caused by JIT recompilation, conditional
-control flow, or workspace kernel emission differences between runs---indicates structural
-divergence between the two captures; the affected kernels are downgraded to UNATTRIBUTED rather
-than silently misattributed.  This invariant is enforced by requiring identical
-\texttt{--warmup-iters} and \texttt{--measure-iters} across both phases and the \ncu replay:
-any iteration-count difference shifts invocation indices and corrupts the mapping.  In practice,
-the condition holds for all evaluated workloads once the Inductor compilation cache is warm.
-
-\textbf{Why HIGH confidence.}  NVTX enclosure (MEDIUM, \secref{sec:intervaltree}) infers
-operator identity from a temporal bracket on the host timeline, which is ambiguous when
-operators overlap asynchronously or when Inductor fuses across operator boundaries.
-The torch.profiler path has no such ambiguity: the CUPTI correlation ID is a hardware-level
-record of dispatch causality, not a post-hoc inference from timing.
+\textbf{Validity condition.}  The same determinism invariant from \secref{sec:clockdomain}
+applies across phases: \texttt{--warmup-iters} and \texttt{--measure-iters} must be identical
+across Phase~1, Phase~2, and the \ncu replay, as any iteration-count difference shifts
+invocation indices and corrupts the mapping.  In practice, the condition holds for all
+evaluated workloads once the Inductor compilation cache is warm.
 
 \subsection{StreamIntervalTree Attribution}
 \label{sec:intervaltree}
 
 NVTX (NVIDIA Tools Extension) ranges are CPU-side annotations pushed and popped by the host
 process.  PyTorch's \texttt{torch.autograd.profiler.emit\_nvtx()} context manager inserts
-\texttt{nvtxRangePushA("aten::linear")} before and \texttt{nvtxRangePop()} after every
+\texttt{nvtxRangePushA(\allowbreak"aten::linear")} before and \texttt{nvtxRangePop()} after every
 \texttt{aten::} dispatch call, labeling the host-side window during which that operator's CUDA
 kernels are launched.  These annotations appear in the \nsys SQLite export as
 \texttt{NVTX\_EVENTS} rows with CPU-domain timestamps.
 
-For each unique \texttt{(stream\_id, device\_id)} pair observed in the \nsys trace, \sys
-constructs a \texttt{StreamIntervalTree}: a sorted list of NVTX ranges indexed by
-\texttt{start\_ns}, implemented using Python's \texttt{sortedcontainers.SortedList} for
-$O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = number of enclosing ranges).
+For each CUDA stream observed in the \nsys trace, \sys
+constructs a per-stream interval tree: a sorted list of NVTX ranges indexed by start time,
+supporting $O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = number of enclosing ranges).
 
 \begin{algorithm}[t]
 \caption{NVTX Enclosure Attribution (MEDIUM Confidence)}
 \label{alg:nvtx}
 \begin{algorithmic}[1]
-\Require Kernel row $k$ with \texttt{cpu\_launch\_start\_ns}, \texttt{stream\_id}
-\Require \texttt{forest}: map from \texttt{(stream\_id, device\_id)} to \texttt{SortedList}
+\Require Kernel row $k$ with host-side launch timestamp $T_k$ and \texttt{host\_tid}
+\Require \texttt{forest}: map from stream to per-stream interval tree
 \Ensure Attribution at MEDIUM confidence, or fall through to heuristic
-\State $T \gets k.\textit{cpu\_launch\_start\_ns}$
-\State $\textit{ranges} \gets$ \texttt{forest}[$k.\textit{stream\_id}$].query\_enclosing($T$)
+\State $\textit{ranges} \gets$ \texttt{forest}[$k.\textit{host\_tid}$].query\_enclosing($T_k$)
   \Comment{all NVTX ranges $[s,e]$ with $s \le T \le e$}
 \If{$|\textit{ranges}| = 0$}
   \State \textbf{fall through} to Inductor fusion enrichment (\secref{sec:heuristic}) or UNATTRIBUTED
@@ -317,9 +228,17 @@ $O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = number of enclo
 \end{algorithmic}
 \end{algorithm}
 
-The \texttt{cpu\_launch\_start\_ns} field is used as the query point rather than the GPU
-\texttt{start\_ns}, because NVTX ranges are CPU-side events and the async gap between host launch
+The host-side launch timestamp is used as the query point rather than the GPU execution timestamp,
+because NVTX ranges are CPU-side events and the async gap between host launch
 and GPU execution makes GPU timestamps unreliable for enclosure queries.
+Kernels launched before the first NVTX range (JIT compilation artifacts during warm-up)
+produce an empty enclosure query and fall through to UNATTRIBUTED or Inductor enrichment;
+no special handling is required.  When a CUDA graph is replayed, new GPU timestamps are
+generated with no corresponding NVTX events; \sys detects the absence of enclosing ranges
+in the replay window and replays the attribution cache recorded during the graph capture phase.
+When multiple NVTX ranges enclose a single kernel---indicating Triton fusion across operator
+boundaries---Algorithm~\ref{alg:nvtx} sets \texttt{is\_fused=True} and stores all enclosing
+ranges in \texttt{all\_enclosing\_ranges} for downstream analysis.
 
 \subsection{Inductor Fusion Enrichment}
 \label{sec:heuristic}
@@ -328,7 +247,7 @@ When NVTX enclosure fails (no enclosing range exists at the query point), \sys a
 post-attribution enrichment pass that recovers the fused operator identity from Inductor
 debug artifacts, rather than applying heuristic inference from kernel names alone.
 
-\textbf{Inductor debug extraction.}  When \texttt{torch.compile(backend="inductor")} runs with
+\textbf{Inductor debug extraction.}  When \texttt{torch.compile(\allowbreak backend="inductor")} runs with
 debug mode enabled, Inductor writes \texttt{output\_code.py} artifacts containing the generated
 Triton kernel source.  Each kernel call site is preceded by a structured comment:
 
@@ -339,93 +258,42 @@ def triton_poi_fused_relu_addmm_0(in_ptr0, ...):
     ...
 \end{lstlisting}
 
-\sys's \texttt{InductorFusionExtractor} parses these comments via the regex
-\texttt{\# .+Original~ATen:\textbackslash{}s*\textbackslash{}[([\textasciicircum{}\textbackslash{}]]+)\textbackslash{}]},
-producing a mapping $\{$\textit{kernel\_short\_name} $\to$ $[$\texttt{aten::op}_1,
-\texttt{aten::op}_2, $\ldots]$$\}$ that contains the exact set of aten operators fused into
-each kernel.
+\sys parses these structured comments to extract the list of constituent \texttt{aten::} operators,
+producing a fusion map that contains the exact set of operators fused into each kernel.
 
 \textbf{Enrichment as a post-attribution pass.}  This map is applied \emph{after} the NVTX
 enclosure pass and never overrides a valid TORCH\_PROFILER or NVTX attribution:
 \begin{enumerate}[leftmargin=1.5em]
   \item For kernels that remain UNATTRIBUTED after NVTX enclosure, a lookup in the fusion map
-    upgrades them to \texttt{INDUCTOR\_FUSION} attribution at MEDIUM confidence, with
-    \texttt{source\_operators} populated from the \texttt{Original~ATen} comment.
+    upgrades them to Inductor-fusion attribution at MEDIUM confidence, with the
+    source operator list populated from the \texttt{Original~ATen} comment.
   \item For already-attributed kernels (TORCH\_PROFILER or NVTX), the enrichment augments the
-    \texttt{fused\_ops} field and sets \texttt{is\_fused~=~True} if multiple operators are present.
+    fused operator list and marks the kernel as fused if multiple operators are present.
 \end{enumerate}
 
 Kernels matching neither NVTX enclosure nor the Inductor fusion map remain in
-\texttt{unattributed\_kernels[]} with \texttt{attribution\_method = "unattributed"}.  For eager-mode
+\texttt{unattributed\_\allowbreak kernels[]} with \texttt{attribution\_method = "unattributed"}.  For eager-mode
 workloads or cuDNN-backed operators (\eg \texttt{nn.LSTM} via \texttt{aten::\_cudnn\_rnn}), which
 produce neither NVTX brackets nor Inductor debug output, unattributed rates of 20--85\% are expected
 and are surfaced explicitly in the profile output.
 
-\subsection{Edge Cases}
-\label{sec:edgecases}
-
-\sys explicitly handles the following attribution edge cases:
-
-\begin{enumerate}[leftmargin=1.5em]
-
-\item \textbf{Clock domain mismatch.} Invocation-order matching makes attribution clock-immune by construction.
-
-\item \textbf{CUDA Graph replay.} During graph capture, operators emit NVTX ranges and kernels are
-  attributed normally.  During replay, new GPU timestamps with no NVTX correspondence are generated.
-  \sys detects replay by the absence of NVTX events in the replay window and replays the attribution
-  cache from the capture phase.
-
-\item \textbf{Multi-stream execution.} Each \texttt{(stream\_id, device\_id)} pair has its own
-  \texttt{StreamIntervalTree}, preventing cross-stream false matches.
-
-\item \textbf{JIT warm-up kernels.} Kernels launched before the first NVTX range (JIT compilation
-  artifacts) are flagged using a duration-outlier heuristic ($> 10\times$ median kernel duration)
-  and excluded from operator mapping.
-
-\item \textbf{Async kernel launch.} NVTX push/pop occurs on the host before the kernel executes on
-  the GPU.  The RUNTIME table's \texttt{cpu\_launch\_start\_ns} field provides a host-side anchor
-  that lies within the NVTX range, whereas the GPU \texttt{start\_ns} may not.
-
-\item \textbf{Dynamic shapes.} \sys validates that input shapes at \ncu replay match those recorded
-  during \nsys capture; a \texttt{ShapeMismatchError} is raised otherwise.
-
-\item \textbf{Fused kernels.} When multiple NVTX ranges enclose a single kernel (Triton-fused
-  cross-operator), \sys sets \texttt{is\_fused=True} and stores all enclosing ranges in
-  \texttt{all\_enclosing\_ranges} for downstream analysis.
-
-\item \textbf{ncu timing independence.} \ncu timestamps are internal to each replay run and are
-  discarded entirely; only metric values are extracted from \ncu output.
-
-\end{enumerate}
-
 \subsection{Layer Deduplication}
 \label{sec:dedup}
 
-For models with repeated structure (\eg transformer decoder blocks), profiling and
-compiling every layer independently costs $O(N)$ ncu replay time.
-\texttt{UniqueSubgraphRegistry} detects structurally identical FX subgraphs by
-computing a canonical hash of each partition's node types and connectivity.  Only
-one representative per equivalence class is compiled and profiled; metrics and
-compiled callables are propagated to all structural duplicates by positional index
-within each partition group.
+For models with repeated structure (\eg transformer decoder blocks), profiling every
+layer independently costs $O(N)$ ncu replay time.  \sys identifies structurally
+identical subgraphs by computing a canonical hash over each partition's operator types
+and connectivity, grouping them into equivalence classes.  Only one representative per
+class is compiled and profiled; its hardware counter values are propagated to all
+structural duplicates, reducing replay cost to $O(\text{unique classes})$.
 
-The deduplication is transparent to the outer profiling loop: each duplicate
-partition's forward pass is wrapped with an NVTX range tagged
-\texttt{layer::duplicate::<label>}, and the partition equivalence map (written to
-\texttt{<prefix>.part.json} during the correlation pass) is passed to
-\texttt{KernelProfileConfig} so the \ncu orchestrator skips duplicate-partition
-kernels during replay and propagates metrics from the unique representative.
-
-
-\textbf{Warmup-gating fix.}  An important correctness invariant: the
-\texttt{layer::unique::} and \texttt{layer::duplicate::} NVTX ranges must only be
-emitted during the \emph{measured} capture window, not during warmup iterations.
-\texttt{run\_workload.py} gates all layer-partition NVTX emission behind an
-\texttt{\_NVTX\_STATE[`active']} flag that is set only after warmup completes.
-Without this guard, warmup-phase kernels appear in the nsys trace inside
-layer-partition ranges, causing \texttt{ManifestBuilder} to misattribute them to
-operators rather than classifying them as pre-NVTX initialization---artificially augmenting
-attributed kernel counts and biasing operator durations.
+Deduplication is transparent to the attribution pipeline: duplicate partitions are
+tagged in the \nsys trace and skipped during \ncu replay, with metrics inherited from
+the unique representative by positional index.  A correctness invariant is that
+partition tags must be emitted only during the measured capture window and not during
+warmup; otherwise warmup-phase kernels are misattributed to operators rather than
+classified as pre-measurement initialization, artificially inflating attributed kernel
+counts and biasing operator durations.
 
 % -------------------------------------------------------
 \subsection{Bottleneck Axes and Counter Selection}
@@ -459,58 +327,3 @@ proportionally to the operator-level summary.  For additive quantities (bytes, i
 spills), \sys uses plain summation.  For per-kernel constants (register count, shared memory),
 \sys takes the maximum across all kernels, since the highest-pressure kernel limits occupancy.
 
-% -------------------------------------------------------
-\section{Applying the Profile: Optimization Case Study}
-\label{sec:pgo}
-
-To establish that the attributed hardware profiles produced in \secref{sec:attribution}
-are sufficient to ground optimization decisions, we implement a profile-guided optimization
-workflow in which per-operator
-counter values from \texttt{profile.json} drive the selection of FX graph transformations.
-This section describes the optimization infrastructure and patterns; their empirical results
-are in \secref{sec:experiments}.  The optimization layer is one possible downstream
-application of the attribution pipeline---others include hardware-aware neural architecture
-search, performance regression detection in CI, and kernel-level profiling of serving stacks
-such as vLLM or SGLang.
-
-\subsection{Three-Level FX Pass Architecture}
-\label{sec:threelevel}
-
-Profile-guided optimizations are routed across three IR levels depending on the
-graph representation at which each transformation is expressible.
-
-\textbf{Level 1 --- Functional (pre-AOTAutograd).}
-Fusion and operator substitution passes are applied at this level.  The key invariant is that the
-Dynamo graph preserves the single shared-activation node for operations like a QKV
-projection: at this level, three linear layers reading from one \texttt{LayerNorm}
-output form a three-GEMM pattern that can be fused into one wide GEMM.
-AOTAutograd decomposition disaggregates that shared node into per-consumer
-\texttt{aten.view} copies, making the pattern undetectable at the Aten level.
-SDPA canonicalization similarly requires the high-level \texttt{F.scaled\_dot\_product\_attention}
-call node, which is replaced by Inductor-specific primitives after decomposition.
-
-\textbf{Level 2 --- Aten IR (\texttt{\_aten\_inner\_compile}).}
-Dtype casts, BatchNorm folding, and channels-last annotation run against the fully
-decomposed \texttt{torch.ops.aten.*} node set.  An important subtlety: the
-\texttt{example\_inputs} argument of \texttt{inner\_compile} may be \texttt{FakeTensor}
-objects (symbolic values without storage), making it impossible to read weight values
-directly.  Weight-reading passes (BN fold, pre-transposition) receive \texttt{real\_inputs}
-threaded through \texttt{functools.partial} at the outer backend call site, before any
-compilation begins.
-
-\textbf{Level 3 --- Inductor config (\texttt{config\_patches}).}
-Non-graph directives---\texttt{freezing}, \texttt{max\_autotune}, \texttt{max\_autotune\_gemm}---
-are passed as a scoped configuration dictionary to \texttt{compile\_fx} rather than
-mutating the global \texttt{torch.\_inductor.config}.  This ensures the policy applies
-only to the specific compilation and cannot leak across compilation units.
-
-The three levels compose as a fixed funnel. Custom backends are registered via Torch Dynamo's backend hook, apply functional fx passes, lower to Aten IR, apply Aten IR fx passes, and then lower to inductor with the specified configuration.
-
-\sys provides two composable components for graph-level optimization.
-\textbf{UniqueSubgraphRegistry} partitions the FX graph by detected layer
-structure, identifies structurally identical subgraphs via hash comparison,
-and compiles a single representative per equivalence class.  Duplicate
-partitions share the compiled callable, reducing compilation and ncu replay
-time by $O(\text{num\_duplicate\_layers})$. \textbf{FxPassRunner} applies user-defined pattern rewrites to unique
-representatives only, then propagates the transformed compiled callables to
-all structural duplicates. 

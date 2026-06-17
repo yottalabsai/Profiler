@@ -1,0 +1,257 @@
+% Candidate figures for main-text inclusion.
+% Each is labeled C1--C8 matching the visual-opportunity analysis.
+
+\subsection{Candidate Figures for Main-Text Inclusion}
+\label{sec:appendix:candidates}
+
+The eight figures below correspond to visual opportunities identified during manuscript
+review.  Each is annotated with the section it would supplement and the unique insight
+it contributes beyond the existing prose.  They are presented together here so all
+candidates can be evaluated before individual placement decisions are made.
+
+% ============================================================
+% C1: Clock Domain Divergence
+% ============================================================
+
+\subsubsection*{C1 --- Clock Domain Divergence and Invocation-Order Matching}
+\noindent\textit{Supplements \secref{sec:clockdomain}.  Shows why timestamp-based
+joining fails and how ordinal-position matching solves it.}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\small, >=Stealth]
+
+  %--- nsys timeline ---
+  \node[anchor=east, font=\small\bfseries] at (-0.1,3.25) {\nsys};
+  \node[anchor=east, font=\scriptsize, gray] at (-0.1,2.95) {CUPTI GPU clock};
+  \draw[->,thick] (0,3.1) -- (11.8,3.1);
+
+  % nsys kernels: K_A, K_B, K_C, K_D, K_E (all unique)
+  \draw[fill=blue!20,draw=blue!50] (0.55,2.85) rectangle (1.45,3.35);
+  \node[font=\scriptsize] at (1.0,3.1) {$K_A$};
+
+  \draw[fill=green!20,draw=green!60!black] (2.05,2.85) rectangle (2.95,3.35);
+  \node[font=\scriptsize] at (2.5,3.1) {$K_B$};
+
+  \draw[fill=cyan!20,draw=cyan!60!black] (3.55,2.85) rectangle (4.45,3.35);
+  \node[font=\scriptsize] at (4.0,3.1) {$K_C$};
+
+  \draw[fill=orange!20,draw=orange!60] (5.55,2.85) rectangle (6.45,3.35);
+  \node[font=\scriptsize] at (6.0,3.1) {$K_D$};
+
+  \draw[fill=red!15,draw=red!50] (7.55,2.85) rectangle (8.45,3.35);
+  \node[font=\scriptsize] at (8.0,3.1) {$K_E$};
+
+  %--- ncu timeline ---
+  \node[anchor=east, font=\small\bfseries] at (-0.1,0.9) {\ncu};
+  \node[anchor=east, font=\scriptsize, gray] at (-0.1,0.6) {replay clock};
+  \draw[->,thick] (0,0.75) -- (11.8,0.75);
+
+  % ncu kernels: same names, shifted right by accumulating drift
+  % K_A: +0.3, K_B: +0.6, K_C: +0.9, K_D: +1.5, K_E: +2.0
+  \draw[fill=blue!20,draw=blue!50] (0.85,0.5) rectangle (1.75,1.0);
+  \node[font=\scriptsize] at (1.3,0.75) {$K_A$};
+
+  \draw[fill=green!20,draw=green!60!black] (2.65,0.5) rectangle (3.55,1.0);
+  \node[font=\scriptsize] at (3.1,0.75) {$K_B$};
+
+  \draw[fill=cyan!20,draw=cyan!60!black] (4.45,0.5) rectangle (5.35,1.0);
+  \node[font=\scriptsize] at (4.9,0.75) {$K_C$};
+
+  \draw[fill=orange!20,draw=orange!60] (7.05,0.5) rectangle (7.95,1.0);
+  \node[font=\scriptsize] at (7.5,0.75) {$K_D$};
+
+  \draw[fill=red!15,draw=red!50] (9.55,0.5) rectangle (10.45,1.0);
+  \node[font=\scriptsize] at (10.0,0.75) {$K_E$};
+
+  %--- correct ordinal joins (green) ---
+  \draw[green!60!black,thick] (1.0,2.85) -- (1.3,1.0);
+  \draw[green!60!black,thick] (2.5,2.85) -- (3.1,1.0);
+  \draw[green!60!black,thick] (4.0,2.85) -- (4.9,1.0);
+  \draw[green!60!black,thick] (6.0,2.85) -- (7.5,1.0);
+  \draw[green!60!black,thick] (8.0,2.85) -- (10.0,1.0);
+
+  %--- wrong timestamp join (red dashed) ---
+  % nsys K_D at x=6.0; ncu K_C at x=4.9 is closer than ncu K_D at x=7.5
+  \draw[dashed,red!75,very thick] (6.0,2.85) -- (4.9,1.0);
+  \node[font=\scriptsize,red!75,align=center] at (4.9,1.95)
+    {\textit{wrong:}\\$K_D \!\leftrightarrow\! K_C$};
+
+  %--- divergence bracket ---
+  \draw[<->,orange!80!black,thick] (6.0,2.0) -- (7.5,2.0);
+  \node[above,font=\scriptsize,orange!80!black] at (6.75,2.0)
+    {$\Delta t$ grows per kernel};
+
+  %--- legend ---
+  \draw[green!60!black,thick] (9.0,2.1) -- (9.6,2.1);
+  \node[right,font=\scriptsize] at (9.6,2.1) {IOM: ordinal join};
+  \draw[dashed,red!75,thick] (9.0,1.75) -- (9.6,1.75);
+  \node[right,font=\scriptsize] at (9.6,1.75) {timestamp join (fails)};
+
+\end{tikzpicture}
+\caption{\textbf{C1: Clock domain divergence and invocation-order matching.}
+  The \nsys CUPTI GPU clock and the \ncu injection replay clock diverge by
+  10--100\,$\mu$s per kernel due to PMU serialization overhead; the gap
+  \emph{accumulates} across the trace.  A naïve timestamp join (dashed red)
+  maps the \nsys record of $K_D$ to the \ncu row for $K_C$---a wrong counter
+  assignment.  Invocation-Order Matching (green) connects each kernel in the
+  \nsys trace to the matching kernel in the \ncu output by name and position,
+  making the join clock-independent.}
+\label{fig:cand:clockdomain}
+\end{figure}
+
+% ============================================================
+% C2: Attribution Priority Decision Tree
+% ============================================================
+
+\subsubsection*{C2 --- Attribution Priority Decision Tree}
+\noindent\textit{Supplements \secref{sec:tprofiler}--\secref{sec:heuristic}.
+  Shows the hierarchical decision logic for the three attribution paths; not
+  expressible as a table.}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=Stealth,
+  decision/.style={diamond, draw, fill=yellow!15, align=center,
+                   inner sep=2pt, aspect=2, font=\small},
+  result/.style={rounded corners=4pt, draw, align=center,
+                 minimum width=4.2cm, inner sep=5pt},
+  high/.style={result, fill=blue!15, draw=blue!50!black},
+  med/.style={result, fill=cyan!12, draw=cyan!50!black},
+  unattr/.style={result, fill=gray!20, draw=gray!50},
+  arr/.style={-Stealth, thick},
+]
+
+  % Input kernel
+  \node[draw, rounded corners=3pt, fill=white, font=\small\bfseries,
+        inner sep=5pt] (k) at (0,0) {kernel $k$\\(name, invocation index)};
+
+  % Decision 1: corr.json
+  \node[decision] (d1) at (0,-2.2)
+    {\texttt{corr.json} entry\\for \texttt{(name, idx)}?};
+  \draw[arr] (k) -- (d1);
+
+  % HIGH result
+  \node[high] (high) at (7,-2.2)
+    {\textbf{HIGH}\\torch.profiler CUPTI\\correlation};
+  \draw[arr] (d1) -- node[above,font=\scriptsize]{YES} (high);
+
+  % Decision 2: NVTX enclosure
+  \node[decision] (d2) at (0,-5.0)
+    {NVTX enclosure at\\host launch time $T_k$?};
+  \draw[arr] (d1) -- node[right,font=\scriptsize]{NO} (d2);
+
+  % MEDIUM NVTX
+  \node[med] (mnvtx) at (7,-5.0)
+    {\textbf{MEDIUM}\\NVTX enclosure\\(innermost range)};
+  \draw[arr] (d2) -- node[above,font=\scriptsize]{YES} (mnvtx);
+
+  % Decision 3: Inductor map
+  \node[decision] (d3) at (0,-7.8)
+    {Inductor fusion map\\entry for kernel name?};
+  \draw[arr] (d2) -- node[right,font=\scriptsize]{NO} (d3);
+
+  % MEDIUM Inductor
+  \node[med] (mind) at (7,-7.8)
+    {\textbf{MEDIUM}\\Inductor fusion\\enrichment};
+  \draw[arr] (d3) -- node[above,font=\scriptsize]{YES} (mind);
+
+  % UNATTRIBUTED
+  \node[unattr] (unattr) at (0,-10.2)
+    {\textbf{UNATTRIBUTED}\\cuDNN-internal; eager Triton\\without NVTX or debug output};
+  \draw[arr] (d3) -- node[right,font=\scriptsize]{NO} (unattr);
+
+  % Augmentation side-note (applies to all tiers; arrow from MEDIUM Inductor for clarity)
+  \node[draw=orange!60, fill=orange!8, rounded corners=3pt,
+        align=left, font=\scriptsize, inner sep=5pt] (aug) at (7,-10.2)
+    {\textit{Augmentation pass (all tiers):}\\
+     Inductor fusion map also checked\\
+     after attribution is assigned;\\
+     \texttt{fused\_ops} list is populated\\
+     without changing the confidence tier.};
+  \draw[dashed, orange!60] (mind.south) -- (aug.north);
+
+\end{tikzpicture}
+\caption{\textbf{C2: Attribution priority decision tree.}
+  Each kernel is tested against the three attribution paths in descending confidence
+  order.  A HIGH-confidence entry from the \texttt{torch.profiler} correlation pass
+  (\secref{sec:tprofiler}) pre-empts the NVTX and Inductor checks.  The Inductor
+  fusion enrichment pass (\secref{sec:heuristic}) is applied as a \emph{post-attribution}
+  augmentation at all tiers: it populates \texttt{fused\_ops} without overriding
+  an existing attribution.  Only kernels that fail all three paths land in
+  \texttt{unattributed\_kernels[]}.}
+\label{fig:cand:decisiontree}
+\end{figure}
+
+% ============================================================
+% C4: Three-Level FX Pass Architecture
+% ============================================================
+
+\subsubsection*{C4 --- Three-Level FX Pass Hook Points in the \texttt{torch.compile()} Pipeline}
+\noindent\textit{Supplements \secref{sec:threelevel}.  Shows \emph{why} the Level~1/2/3
+  separation is necessary by locating each hook in the IR lowering chain.}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\small, >=Stealth,
+  stage/.style={draw, rounded corners=4pt, fill=white,
+                minimum width=3.6cm, minimum height=0.75cm,
+                align=center, inner sep=5pt, font=\small},
+  hook/.style={draw, rounded corners=3pt, align=left,
+               inner sep=5pt, font=\scriptsize},
+  arr/.style={-Stealth,thick},
+  harr/.style={-Stealth, thick, dashed},
+]
+
+  % Pipeline stages (vertical, left column)
+  \node[stage, fill=gray!10] (in)     at (0,0)    {\texttt{workload.py}};
+  \node[stage, fill=blue!8]  (dynamo) at (0,-2.2)  {Dynamo FX\\graph capture};
+  \node[stage, fill=blue!8]  (aot)    at (0,-4.4)  {AOTAutograd\\decomposition};
+  \node[stage, fill=blue!8]  (ind)    at (0,-6.6)  {Inductor\\code generation};
+  \node[stage, fill=gray!10] (out)    at (0,-8.8)  {Triton / CUDA kernels};
+
+  \draw[arr] (in)     -- (dynamo);
+  \draw[arr] (dynamo) -- (aot);
+  \draw[arr] (aot)    -- (ind);
+  \draw[arr] (ind)    -- (out);
+
+  % Level 1 hook (between Dynamo and AOT)
+  \node[hook, fill=red!8, draw=red!50] (l1) at (5.5,-2.2)
+    {\textbf{Level 1} (pre-decomposition)\\
+     \textbullet\ QKV fusion (\textit{SDPA case study})\\
+     \textbullet\ Attention canonicalization};
+  \draw[harr, red!60] (l1.west) -- (dynamo.east);
+
+  % Level 2 hook (between AOT and Inductor)
+  \node[hook, fill=orange!8, draw=orange!50] (l2) at (5.5,-4.4)
+    {\textbf{Level 2} (Aten IR)\\
+     \textbullet\ BF16 dtype promotion (\textit{all case studies})\\
+     \textbullet\ Weight folding, layout annotation};
+  \draw[harr, orange!60] (l2.west) -- (aot.east);
+
+  % Level 3 hook (at Inductor)
+  \node[hook, fill=green!8, draw=green!50!black] (l3) at (5.5,-6.6)
+    {\textbf{Level 3} (Inductor config)\\
+     \textbullet\ Weight freezing (\textit{all case studies})\\
+     \textbullet\ Autotuning mode selection};
+  \draw[harr, green!60!black] (l3.west) -- (ind.east);
+
+  % Compose label
+  \node[font=\scriptsize, gray, align=center] at (0,-9.6)
+    {Passes at each level compose\\without interfering across levels};
+
+\end{tikzpicture}
+\caption{\textbf{C4: Three-level FX pass hook points.}
+  The \texttt{torch.compile()} pipeline lowers a model through three IR stages.
+  Level~1 passes must run before AOTAutograd because structural patterns such as
+  a shared \texttt{LayerNorm} output feeding Q, K, and V projections---the
+  precondition for QKV fusion---are decomposed into per-consumer copies by
+  AOTAutograd and become invisible afterward.  Level~2 (Aten IR) applies
+  dtype and layout transforms on the fully decomposed graph.  Level~3
+  Inductor flags control non-graph behaviors such as weight freezing and
+  autotuning that cannot be expressed as graph rewrites.}
+\label{fig:cand:fxlevel}
+\end{figure}
+
+

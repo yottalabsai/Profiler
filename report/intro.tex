@@ -25,14 +25,17 @@ operations, reductions, normalization, and layout transforms---are fused in grou
 Triton~\cite{triton2019} kernels, JIT-compiled to CUDA, where each kernel may represent
 multiple operators and individual \texttt{aten::} dispatch does not occur at runtime.
 
-\paragraph{Our approach.}
-We observe that reliable attribution does not require timestamp matching.  Because \ncu replays
-kernels in the same execution order they appear in the \nsys trace, a kernel's
-\texttt{(name, invocation\_index)} pair is a stable, clock-immune identifier.  \sys combines
-three complementary attribution paths: NVTX temporal enclosure for \texttt{aten::}-dispatched
-kernels, invocation-order matching for \ncu counter assignment, and Inductor debug-artifact
-parsing for Triton-fused kernels with no NVTX bracket.  \figref{fig:overview} shows the
-complete end-to-end pipeline.
+\paragraph{Contributions.}
+\sys decomposes the attribution problem into two orthogonal steps.
+First, hardware counters from \ncu are joined to kernel records in the \nsys trace via
+invocation-order matching.
+Second, operator identity is assigned to each counter-enriched kernel record through three
+complementary attribution paths: CUPTI correlation via \texttt{torch.profiler}, NVTX temporal
+enclosure, and Inductor fusion-map enrichment.
+\figref{fig:overview} shows the complete end-to-end pipeline.
+Applied to profile-guided FX graph optimization, attributed profiles yield
+\textbf{1.76$\times$--3.63$\times$} kernel wall-time speedups grounded in
+counter-identified bottlenecks across three case studies.
 
 \begin{figure}[H]
 \centering
@@ -60,7 +63,7 @@ complete end-to-end pipeline.
 
 %% ---- Row 2: Attribution engine ----
 \node[attrbox] (iom)    at (8.2,-1.65) {Invocation-Order\\[-1pt]Matching};
-\node[attrbox] (sit)    at (5,-1.65) {StreamIntervalTree\\[-1pt]NVTX enclosure};
+\node[attrbox] (sit)    at (5,-1.65) {Attribution\\[-1pt]Engine};
 \node[outbox]  (prof)   at (1.5,-1.65) {\texttt{profile.json}\\[-1pt](20 counters)};
 
 \draw[arr] (sqlite) -- (iom);
@@ -86,18 +89,7 @@ complete end-to-end pipeline.
   node[midway, below, lbl] {closed-loop validation };
 
 \end{tikzpicture}
-\caption{\textbf{\sys system overview.}  Two profiling stages combine to produce \texttt{profile.json}: \nsys
-  captures the kernel timeline and \ncu captures hardware counters. The attribution engine bridges the two tools via invocation-order matching and per-stream NVTX interval trees, constituting the core contribution of \sys.  The lowest ``Optimization'' row shows a downstream application of the attributed profile: hardware-evidence-motivated
-  FX graph passes validated via re-profiling; it is not part of the attribution pipeline itself.}
+\caption{\textbf{\sys system overview.} The profiling stage (top) runs \nsys and \ncu to collect kernel timelines and hardware counters. The attribution engine (middle) combines these into \texttt{profile.json}. The optimization row (bottom) shows a downstream application of the attributed profile; it is not part of the attribution pipeline itself.}
 \label{fig:overview}
 \end{figure}
 
-\paragraph{Contribution.}
-We present \textbf{\sys}, a hardware attribution pipeline that automatically links \ncu hardware
-counters to PyTorch \texttt{aten::} operators via three complementary paths: NVTX temporal
-enclosure, invocation-order matching, and Inductor fusion-map enrichment. Clock-domain joins are
-avoided entirely; unattributed kernels are surfaced explicitly, never dropped. The pipeline
-collects a curated 20-counter metric set spanning all roofline bottleneck axes via
-application-mode \ncu replay, with architecture-specific fallbacks for Ampere, Hopper, and
-Blackwell, and supports layer deduplication to reduce replay time by
-$O(\text{num\_duplicate\_layers})$ for models with repeated structure.

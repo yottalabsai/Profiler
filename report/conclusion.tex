@@ -1,57 +1,83 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented \sys, a hardware attribution pipeline that bridges the gap between PyTorch's
-operator-level abstractions and NVIDIA's kernel-level hardware performance counters.  The
-core contribution is a mapping from CUDA kernels to \texttt{aten::} operators via NVTX
-temporal enclosure with per-stream interval trees, invocation-order matching across
-incompatible clock domains, and Inductor debug-artifact enrichment for compiled models.
-The result is \texttt{profile.json}: a hardware-attributed operator profile mapping each
-\texttt{aten::} operator to its constituent kernels and their full hardware counter state,
-produced automatically without manual kernel-to-operator correlation.  A curated 20-counter
-metric set with duration-weighted aggregation and architecture-specific fallbacks covers all
-hardware bottleneck axes.
-GPU clock locking ensures reproducible per-operator duration measurements,
-and layer deduplication reduces \ncu replay time by
-$O(\text{num\_duplicate\_layers})$ for models with repeated structure.
+The attribution gap between framework profilers and GPU hardware counter tools exists not
+because the relevant data is absent, but because no stable join key spans the two collection
+passes: kernel names are non-unique identifiers, timestamps are incompatible across tool clock
+domains, and manual bridging costs $O(\text{operators})$ effort per model variant.
+\sys resolves all three failures through three complementary attribution paths---CUPTI
+External Activity correlation (HIGH confidence, causal dispatch linkage), NVTX temporal
+enclosure via per-stream interval trees (MEDIUM), and Inductor debug-artifact enrichment
+(MEDIUM)---with invocation-order matching joining \ncu hardware counters to \nsys kernel
+records by execution order rather than timestamp, bypassing clock-domain incompatibility
+without any cross-tool timestamp comparison.
+GPU clock locking eliminates the systematic speedup bias that arises when a lower-power
+optimized workload sustains a higher boost frequency than the baseline; reported duration
+ratios are clock-immune by construction.
+A curated 20-counter metric set with duration-weighted aggregation and
+architecture-specific fallbacks covers all hardware bottleneck axes, and layer deduplication
+reduces \ncu replay time by a factor of $N/K$ for models with $N$ repeated layers across $K$
+unique structural classes ($12{\times}$ for GPT-2's 12 identical transformer blocks).
 
-To establish that attributed profiles are sufficient to ground optimization decisions,
-we implemented a profile-guided FX pass framework (\secref{sec:pgo}) and applied it across three case studies on an NVIDIA
-RTX PRO 6000 Blackwell.  Each optimization decision was grounded in a
-specific counter reading from the attributed profile, and each claimed improvement was
-verified by re-profiling at identical locked clocks (all figures are attributed kernel wall
-time speedups):
-\textbf{1.76$\times$} on GPT-2 (BF16 GEMM promotion, \texttt{tensor\_core\_active\_pct}:
-0\%$\to$40.5\%);
-\textbf{2.24$\times$} on SDPA Attention (QKV fusion raises occupancy 16.6\%$\to$73.9\%;
-attention kernel $3.0\times$); and
-\textbf{3.63$\times$} on LSTM Sequence Encoder (structural re-routing from Inductor's
-decomposed SIMT path to cuDNN's fused Tensor-Core RNN, diagnosable only via the attribution
-data).  The LSTM case study provides the most direct demonstration of the pipeline's diagnostic
-utility: the structural bottleneck is undetectable by timing-only profilers yet manifest
-in the elevated unattributed fraction and the characteristic scalar GEMM signatures
-surfaced by the attribution data.
+To establish that attributed profiles carry sufficient per-operator counter signal to
+identify and verify the elimination of specific hardware bottlenecks, we applied \sys as
+the upstream profiling component in a profile-guided FX optimization workflow---one
+downstream application among others including hardware-aware neural architecture search,
+serving-stack kernel profiling, and CI performance regression detection.
+Across three forward-pass case studies on a single NVIDIA RTX PRO 6000 Blackwell GPU
+(point estimates from 2 measured iterations at locked clocks), each optimization decision
+was grounded in a specific counter reading from the attributed profile and each claimed
+improvement was verified by re-profiling at identical locked clocks (all figures are
+attributed kernel wall-time speedups):
+\textbf{1.76$\times$} on GPT-2 (\texttt{tensor\_core\_active\_pct}: 0\%$\to$40.5\%);
+\textbf{2.24$\times$} on SDPA Attention (occupancy 16.6\%$\to$73.9\%);
+and \textbf{3.63$\times$} on LSTM Sequence Encoder.
+The LSTM result is diagnostic in nature: the $>$85\% UNATTRIBUTED attribution tier
+identifies the LSTM body as structurally unreachable by any FX-level transformation,
+routing the diagnosis to cuDNN re-dispatch rather than the kernel-level tuning that
+timing-only profiling would motivate.
+The speedup validates the diagnostic accuracy of the attribution tier; the corrective
+action is not taken by \sys but is made unambiguously identifiable from its output.
 
 \paragraph{Limitations.}
+The evaluation covers three workloads on a single GPU architecture; no multi-GPU
+configurations were evaluated, and generalizability across architectures and workload
+scales remains unverified.
+All speedup figures are point estimates from 2 measured iterations; run-to-run variance is
+not characterized, and the ${<}$2\% scheduling jitter observed at locked clocks has not been
+validated outside the evaluated configurations.
+The pipeline surfaces per-operator counter evidence but does not prescribe optimization
+actions; the Claude Code plugin (\appref{sec:appendix:plugin}) automates the closed-loop
+protocol at the prototype level, though whether agent-generated backends reproduce the
+manually-derived speedups reported here is left for future work.
 Attribution coverage degrades for cuDNN-backed operators (\texttt{nn.LSTM},
-\texttt{nn.MultiheadAttention} under cuDNN) where internal kernel names carry no NVTX
-correspondence and no Inductor debug metadata is available; expected unattributed rates of
-80--90\% make hardware-counter-driven optimization inapplicable, and bottleneck diagnosis must
-fall back to kernel-name inference.  Invocation-order matching requires a deterministic
-workload: models with conditional control flow or dynamic dispatch can violate the
-\texttt{(kernel\_name, invocation\_index)} invariant without producing a shape error;
-\sys validates invocation counts before issuing counter assignments and raises
-\texttt{InvocationCountMismatchError} on violation.  \ncu serializes kernels for replay,
-making concurrent multi-stream profiles require separate per-stream runs.  All speedup
-figures are point estimates from 2 measured iterations at locked clocks; run-to-run variance
-is not characterized.  Optimization patterns are currently user-defined per-workload;
-automatic pattern selection from counter evidence is left as future work.
+\texttt{nn.\allowbreak MultiheadAttention} under cuDNN) where internal kernel names carry no
+NVTX correspondence and no Inductor debug metadata is available; expected unattributed rates
+of 80--90\% make hardware-counter-driven optimization inapplicable at the FX level, and
+bottleneck diagnosis must fall back to kernel-name inference.
+Invocation-order matching requires a deterministic workload: models with conditional control
+flow or dynamic dispatch can violate the \texttt{(kernel\_name, invocation\_index)} invariant
+without producing a shape error; \sys validates invocation counts before issuing counter
+assignments and raises \texttt{InvocationCountMismatchError} on violation.
+\ncu serializes kernels for replay, making concurrent multi-stream profiles require separate
+per-stream runs.
 
 \paragraph{Future work.}
-Online profiling via CUPTI Perfworks streaming would eliminate the separate \ncu pass, enabling
-profiling during ordinary training without a dedicated replay run.  Multi-GPU attribution with
-NCCL stream synchronization events would extend the pipeline to distributed workloads.
-Counter-guided neural architecture search---using per-operator hardware utilization as a fitness
-signal rather than validation accuracy alone---represents a longer-term direction for hardware-aware
-model design.  Finally, extending the counter name mapping and pass library to AMD ROCm (\texttt{rocprof}
-+ \texttt{rocm-smi}) would generalize \sys beyond NVIDIA hardware.
+Multi-GPU attribution with NCCL stream synchronization events would extend coverage to
+distributed workloads, and online profiling via CUPTI Perfworks streaming would eliminate
+the separate \ncu replay pass, enabling attribution during any workload without a
+dedicated replay run.
+Cross-architecture validation on Ampere and Hopper is a near-term priority: counter name
+fallbacks are implemented but attribution quality has not been verified at evaluation scale
+on those architectures.
+Counter-attributed profiles also provide a precise regression signal for CI-integrated
+performance testing: a hardware-counter shift on a code change---rather than a latency
+shift alone---distinguishes architectural regressions from scheduling noise, a downstream
+application of the attribution output that does not require any optimization framework.
+Downstream of the attribution layer, automatic bottleneck-to-transformation mapping---
+inferring which graph passes are warranted from a counter symptom without expert
+interpretation---would close the loop to a fully autonomous optimization pipeline; a
+dataset of (workload, counter reading, transformation, measured outcome) tuples would
+make this a concrete supervised learning problem.
+Finally, generalizing the counter name mapping and pass library to AMD ROCm
+(\texttt{rocprof} + \texttt{rocm-smi}) would extend \sys beyond NVIDIA hardware.
