@@ -14,7 +14,6 @@
 \usepackage{float}
 \usepackage{caption}
 \input{macro_small}
-\input{notation}
 \usepackage{pifont}
 \usepackage{microtype}
 \usepackage{tikz}
@@ -28,8 +27,8 @@
 Logan Chu$^{1}$ \quad
 Dong Li$^{2}$ \\
 \\
-$^{1}$Duke University \quad
-$^{2}$UC Merced
+$^{1}$Yotta Labs \quad
+$^{2}$Yotta Labs
 }
 \date{}
 
@@ -45,16 +44,17 @@ does not scale. We present \textbf{\sys}, a hardware attribution pipeline that a
 links hardware metrics to PyTorch operators via three
 complementary attribution paths: torch.profiler CUPTI correlation,
 NVTX temporal enclosure with per-stream interval trees, and Inductor fusion-map
-enrichment from debug artifacts. NVIDIA Nsight Compute (ncu)  hardware counters are matched to NVIDIA Nsight Systems (nsys) kernel records
+enrichment from debug artifacts. NVIDIA Nsight Compute (ncu) hardware counters are matched to NVIDIA Nsight Systems (nsys) kernel records
 via invocation-order matching, avoiding timestamp joins across incompatible clock domains. A curated 20-counter metric set with
-duration-weighted aggregation covers all hardware bottleneck axes, layer deduplication reduces \ncu replay time by $O(\text{num\_duplicate\_layers})$ for models with repeated structure, and
-GPU clock locking ensures reproducible per-operator duration measurements.
+duration-weighted aggregation covers all hardware bottleneck axes, layer deduplication reduces \ncu replay time by a factor of $N/K$ for models with $N$ layers across $K$ unique structural classes, and
+GPU clock locking controls the kernel-duration aggregates used for operator-level comparison.
 On an NVIDIA RTX PRO 6000 Blackwell, \sys attributes 95--100\% of kernel
-runtime across most evaluated workloads; black-box library backends (e.g., cuDNN's RNN
-path) are correctly surfaced as unattributed rather than silently dropped.
+runtime for compiled workloads (GPT-2, SDPA Attention); black-box library backends
+such as cuDNN RNN are correctly surfaced as ${>}$85\% unattributed rather than silently dropped.
 Applied to profile-guided FX graph optimization, attributed profiles yield
-\textbf{1.76$\times$--3.63$\times$} kernel wall-time speedups across three case studies,
-with each optimization grounded in a specific counter symptom identified by \sys.
+\textbf{1.76$\times$--2.24$\times$} profiled-kernel-time speedups on the two
+compiled optimization case studies; a third LSTM diagnostic case identifies
+cuDNN re-dispatch as a structural fix rather than an FX graph rewrite.
 \end{abstract}
 
 \input{intro}
@@ -63,12 +63,11 @@ with each optimization grounded in a specific counter symptom identified by \sys
 \input{main_experiment}
 \input{conclusion}
 \newpage
-\bibliography{reference}
 \bibliographystyle{plainnat}
+\bibliography{reference}
 \newpage
 \appendix
 \onecolumn
 \input{appendix_exp}
-\input{appendix_candidates}
 
 \end{document}

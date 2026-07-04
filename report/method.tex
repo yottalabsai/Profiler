@@ -20,7 +20,7 @@ per-kernel hardware counter measurements. The pipeline produces a hardware-attri
 along with the hardware metrics and attribution confidence of each kernel.
 For Inductor-compiled workloads, fused kernels are annotated with all constituent
 \texttt{aten::} operators rather than attributed to a single dispatch call.
-Attribution is assigned at one of three confidence tiers (\tabref{tab:tiers}); per-workload coverage fractions are reported in \secref{sec:coverage}.
+Attribution is assigned at one of three confidence tiers (\tabref{tab:tiers}, \figref{fig:decisiontree}); per-workload coverage fractions are reported in \secref{sec:coverage}.
 
 \begin{table}[H]
 \centering
@@ -33,7 +33,7 @@ Attribution is assigned at one of three confidence tiers (\tabref{tab:tiers}); p
 \textbf{Method} & \textbf{Evidence} & \textbf{Trigger Condition} \\
 \midrule
 \rowcolor{highcol!15}
-HIGH & torch.profiler IOM & Kineto trace available; kernel count agrees with dispatch count \\
+HIGH & torch.profiler CUPTI correlation (IOM, \secref{sec:clockdomain}) & Kineto trace available; kernel count agrees with dispatch count \\
 \rowcolor{medcol!15}
 MEDIUM & NVTX enclosure (interval tree) & Kernel launch falls within an \texttt{aten::} NVTX range \\
 \rowcolor{medcol!10}
@@ -44,6 +44,54 @@ UNATTRIBUTED & None & cuDNN-internal kernels (LSTM, cuDNN conv.); eager Triton w
 \end{tabular}
 \end{table}
 
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=Stealth,
+  decision/.style={diamond, draw, fill=yellow!15, align=center,
+                   inner sep=2pt, aspect=2, font=\small},
+  result/.style={rounded corners=4pt, draw, align=center,
+                 minimum width=4.2cm, inner sep=5pt},
+  high/.style={result, fill=blue!15, draw=blue!50!black},
+  med/.style={result, fill=cyan!12, draw=cyan!50!black},
+  unattr/.style={result, fill=gray!20, draw=gray!50},
+  arr/.style={-Stealth, thick},
+]
+  \node[draw, rounded corners=3pt, fill=white, font=\small\bfseries,
+        inner sep=5pt, align=center] (k) at (0,0) {kernel $k$\\(name, invocation index)};
+  \node[decision] (d1) at (0,-2.2)
+    {\texttt{corr.json} entry\\for \texttt{(name, idx)}?};
+  \draw[arr] (k) -- (d1);
+  \node[high] (high) at (7,-2.2)
+    {\textbf{HIGH}\\torch.profiler CUPTI\\correlation};
+  \draw[arr] (d1) -- node[above,font=\scriptsize]{YES} (high);
+  \node[decision] (d2) at (0,-5.0)
+    {NVTX enclosure at\\host launch time $T_k$?};
+  \draw[arr] (d1) -- node[right,font=\scriptsize]{NO} (d2);
+  \node[med] (mnvtx) at (7,-5.0)
+    {\textbf{MEDIUM}\\NVTX enclosure\\(innermost range)};
+  \draw[arr] (d2) -- node[above,font=\scriptsize]{YES} (mnvtx);
+  \node[decision] (d3) at (0,-7.8)
+    {Inductor fusion map\\entry for kernel name?};
+  \draw[arr] (d2) -- node[right,font=\scriptsize]{NO} (d3);
+  \node[med] (mind) at (7,-7.8)
+    {\textbf{MEDIUM}\\Inductor fusion\\enrichment};
+  \draw[arr] (d3) -- node[above,font=\scriptsize]{YES} (mind);
+  \node[unattr] (unattr) at (0,-10.2)
+    {\textbf{UNATTRIBUTED}\\cuDNN-internal; eager Triton\\without NVTX or debug output};
+  \draw[arr] (d3) -- node[right,font=\scriptsize]{NO} (unattr);
+\end{tikzpicture}
+\caption{\textbf{Attribution priority decision tree.}
+  Each kernel is tested against the three attribution paths in descending confidence
+  order.  A HIGH-confidence entry from the \texttt{torch.profiler} correlation pass
+  (\secref{sec:tprofiler}) pre-empts the NVTX and Inductor checks.  The Inductor
+  fusion enrichment pass (\secref{sec:heuristic}) is applied as a \emph{post-attribution}
+  augmentation at all tiers: it populates \texttt{fused\_ops} without overriding
+  an existing attribution.  Only kernels that fail all three paths land in
+  \texttt{unattributed\_kernels[]}.}
+\label{fig:decisiontree}
+\end{figure}
+
 \subsection{Data Ingestion}
 \label{sec:ingestion}
 
@@ -52,7 +100,7 @@ A fundamental resource contention constrains the capture architecture: \nsys and
 within the same process. \nsys's CUPTI subscriber preempts the
 \texttt{torch.profiler} callback silently; the correlation pass terminates with a
 \texttt{.corr.json} containing zero entries and produces no diagnostic indication of failure.
-Thus, two sequential, non-overlapping invocations are needed. The first executes as an untraced Python process to capture \texttt{torch.profiler} correlation output and the the second executes under \texttt{nsys profile} and reuses the
+Thus, two sequential, non-overlapping invocations are needed. The first executes as an untraced Python process to capture \texttt{torch.profiler} correlation output and the second executes under \texttt{nsys profile} and reuses the
 Inductor compilation cache produced prior.
 
 \textbf{Nsight Systems export.}
@@ -88,15 +136,22 @@ Inductor-compiled workloads.
 \subsection{GPU Clock Locking for Reproducible Duration Comparisons}
 \label{sec:clocklocking}
 
-Per-operator durations in \texttt{profile.json} are derived from \nsys CUPTI GPU-domain
-timestamps.  These durations are subject to a subtle confound: a GPU's boost clock floats
-with die temperature and power draw, typically varying 5--15\% across captures separated
-by minutes or hours.  An optimized workload dissipates less power than the baseline (fewer
-FLOPs on the SIMT path), so its capture may execute at a \emph{higher} sustained clock frequency,
-artificially elevating the apparent speedup.  Conversely, thermal throttling during a
-prolonged baseline capture suppresses the measured baseline duration.  Both effects bias
-the $\text{baseline}/\text{optimized}$ duration ratio even when no architectural change
-was made.
+Duration fields in \texttt{profile.json} come from the \nsys capture, not from
+\ncu replay.  Each kernel record stores \texttt{duration\_ns} as the CUPTI
+GPU-domain interval \texttt{end\_ns - start\_ns}; each operator record stores
+\texttt{aggregated.total\_duration\_ns} as the sum of those \nsys kernel durations
+over kernels attributed to that operator.  The \ncu metric
+\texttt{gpu\_\_time\_duration.sum} is retained only as a raw replay-phase counter
+inside \texttt{metrics.raw} and is not used for speedup reporting.  These
+kernel-duration aggregates are subject to a subtle confound: a GPU's boost clock
+floats with die temperature and power draw, typically varying 5--15\% across
+captures separated by minutes or hours.  An optimized workload dissipates less
+power than the baseline (fewer FLOPs on the SIMT path), so its capture may
+execute at a \emph{higher} sustained clock frequency, artificially elevating the
+apparent speedup.  Conversely, thermal throttling during a prolonged baseline
+capture suppresses the measured baseline duration.  Both effects bias the
+$\text{baseline}/\text{optimized}$ duration ratio even when no architectural
+change was made.
 
 \textbf{Probe-and-lock.}
 \sys pins the SM and memory clocks for the duration of the \nsys capture.  The default
@@ -125,7 +180,7 @@ execution through incompatible timing mechanisms. \nsys records CUPTI GPU-domain
 the hardware's free-running clock. \ncu replays kernels in an isolated profiling pass with injected
 performance counter reads; its internal invocation clock reflects replay-mode execution, not the
 original capture clock. On a single GPU, these two clocks routinely diverge by 10--100~$\mu$s per
-kernel due to replay serialization and Performance Monitoring Unit (PMU) injection overhead. A naive timestamp join would
+kernel due to replay serialization and Performance Monitoring Unit (PMU) injection overhead (\figref{fig:clockdomain}). A na\"{i}ve timestamp join would
 incorrectly associate hardware counter measurements with the wrong operator---a failure mode
 particularly susceptible to misattribution for operators with similar execution times.
 
@@ -133,9 +188,8 @@ particularly susceptible to misattribution for operators with similar execution 
 replays kernels in the same execution order they appear in the \nsys timeline: the $i$-th
 invocation of kernel $K$ in the \nsys trace corresponds to the $i$-th row for kernel $K$ in the
 \ncu CSV output.  We exploit this ordering to assign hardware metrics without any timestamp
-comparison:
-
-This matching is correct when the workload is \emph{deterministic}: the same kernel names must
+comparison. The matching is correct
+when the workload is \emph{deterministic}: the same kernel names must
 appear in the same counts and the same execution order in both the \nsys capture and the \ncu
 replay.  Concretely, models with conditional control flow, dynamic dispatch, or
 allocator-emitted workspace kernels can violate this invariant without producing a shape
@@ -164,10 +218,65 @@ warning and metric assignment for that kernel is skipped.
 \end{algorithmic}
 \end{algorithm}
 
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\small, >=Stealth]
+  \node[anchor=east, font=\small\bfseries] at (-0.1,3.25) {\nsys};
+  \node[anchor=east, font=\scriptsize, gray] at (-0.1,2.95) {CUPTI GPU clock};
+  \draw[->,thick] (0,3.1) -- (11.8,3.1);
+  \draw[fill=blue!20,draw=blue!50] (0.55,2.85) rectangle (1.45,3.35);
+  \node[font=\scriptsize] at (1.0,3.1) {$K_A$};
+  \draw[fill=green!20,draw=green!60!black] (2.05,2.85) rectangle (2.95,3.35);
+  \node[font=\scriptsize] at (2.5,3.1) {$K_B$};
+  \draw[fill=cyan!20,draw=cyan!60!black] (3.55,2.85) rectangle (4.45,3.35);
+  \node[font=\scriptsize] at (4.0,3.1) {$K_C$};
+  \draw[fill=orange!20,draw=orange!60] (5.55,2.85) rectangle (6.45,3.35);
+  \node[font=\scriptsize] at (6.0,3.1) {$K_D$};
+  \draw[fill=red!15,draw=red!50] (7.55,2.85) rectangle (8.45,3.35);
+  \node[font=\scriptsize] at (8.0,3.1) {$K_E$};
+  \node[anchor=east, font=\small\bfseries] at (-0.1,0.9) {\ncu};
+  \node[anchor=east, font=\scriptsize, gray] at (-0.1,0.6) {replay clock};
+  \draw[->,thick] (0,0.75) -- (11.8,0.75);
+  \draw[fill=blue!20,draw=blue!50] (0.85,0.5) rectangle (1.75,1.0);
+  \node[font=\scriptsize] at (1.3,0.75) {$K_A$};
+  \draw[fill=green!20,draw=green!60!black] (2.65,0.5) rectangle (3.55,1.0);
+  \node[font=\scriptsize] at (3.1,0.75) {$K_B$};
+  \draw[fill=cyan!20,draw=cyan!60!black] (4.45,0.5) rectangle (5.35,1.0);
+  \node[font=\scriptsize] at (4.9,0.75) {$K_C$};
+  \draw[fill=orange!20,draw=orange!60] (7.05,0.5) rectangle (7.95,1.0);
+  \node[font=\scriptsize] at (7.5,0.75) {$K_D$};
+  \draw[fill=red!15,draw=red!50] (9.55,0.5) rectangle (10.45,1.0);
+  \node[font=\scriptsize] at (10.0,0.75) {$K_E$};
+  \draw[green!60!black,thick] (1.0,2.85) -- (1.3,1.0);
+  \draw[green!60!black,thick] (2.5,2.85) -- (3.1,1.0);
+  \draw[green!60!black,thick] (4.0,2.85) -- (4.9,1.0);
+  \draw[green!60!black,thick] (6.0,2.85) -- (7.5,1.0);
+  \draw[green!60!black,thick] (8.0,2.85) -- (10.0,1.0);
+  \draw[dashed,red!75,very thick] (6.0,2.85) -- (4.9,1.0);
+  \node[font=\scriptsize,red!75,align=center] at (4.9,2.45)
+    {\textit{wrong:}\\$K_D \!\leftrightarrow\! K_C$};
+  \node[above,font=\scriptsize,orange!80!black] at (6.25,1.0)
+    {$\Delta t$ grows};
+  \draw[green!60!black,thick] (10.0,2.1) -- (10.6,2.1);
+  \node[right,font=\scriptsize] at (10.6,2.1) {IOM: ordinal join};
+  \draw[dashed,red!75,thick] (10.0,1.75) -- (10.6,1.75);
+  \node[right,font=\scriptsize] at (10.6,1.75) {timestamp join (fails)};
+\end{tikzpicture}
+\caption{\textbf{Clock domain divergence and invocation-order matching.}
+  The \nsys CUPTI GPU clock and the \ncu injection replay clock diverge by
+  10--100\,$\mu$s per kernel due to PMU serialization overhead; the gap
+  \emph{accumulates} across the trace.  A na\"{i}ve timestamp join (dashed red)
+  maps the \nsys record of $K_D$ to the \ncu row for $K_C$---a wrong counter
+  assignment.  Invocation-Order Matching (IOM, green) connects each kernel in the
+  \nsys trace to the matching \ncu row by name and position,
+  making the join clock-independent.}
+\label{fig:clockdomain}
+\end{figure}
+
 \subsection{torch.profiler Correlation Attribution (HIGH Confidence)}
 \label{sec:tprofiler}
 
-The highest-confidence attribution path exploits CUPTI's External Activity API, which records a
+The highest-confidence attribution path exploits CUPTI's External Activity API~\cite{cupti2024}, which records a
 causal link between CPU-side operator dispatch and the GPU kernels it launches.  When
 \texttt{torch.profiler} is active with the Kineto backend, each \texttt{aten::} dispatch call is
 assigned a correlation ID at the moment of \texttt{cuLaunchKernel}; CUPTI propagates this ID
@@ -212,18 +321,30 @@ supporting $O(\log n)$ insertion and $O(k \log n)$ enclosure queries ($k$ = numb
 \Require \texttt{forest}: map from stream to per-stream interval tree
 \Ensure Attribution at MEDIUM confidence, or fall through to heuristic
 \State $\textit{ranges} \gets$ \texttt{forest}[$k.\textit{host\_tid}$].query\_enclosing($T_k$)
-  \Comment{all NVTX ranges $[s,e]$ with $s \le T \le e$}
-\If{$|\textit{ranges}| = 0$}
+  \Comment{all NVTX ranges $[s,e]$ with $s \le T \le e$, outermost first}
+\State $\textit{opRanges} \gets [\,]$
+\For{$r \in \textit{reverse}(\textit{ranges})$}
+  \Comment{walk innermost $\to$ outermost}
+  \If{\texttt{is\_attributed\_op}($r.\textit{text}$)}
+    \State append $r$ to $\textit{opRanges}$
+      \Comment{\texttt{aten::}, \texttt{quantized::}, or custom torch.library op}
+  \ElsIf{\texttt{"::"} \textbf{not in} $r.\textit{text}$}
+    \State \textbf{break}
+      \Comment{structural boundary (e.g.\ \texttt{ProfilerStep\#0}) --- stop the walk}
+  \Else
+    \State \textbf{continue}
+      \Comment{namespaced but non-kernel (\texttt{prims::}, \texttt{torch::}) --- skip, keep walking}
+  \EndIf
+\EndFor
+\If{$\textit{opRanges} = [\,]$}
   \State \textbf{fall through} to Inductor fusion enrichment (\secref{sec:heuristic}) or UNATTRIBUTED
-\ElsIf{$|\textit{ranges}| = 1$}
-  \State $k.\textit{operator} \gets \textit{ranges}[0].\textit{text}$,
-         \textit{confidence} $\gets$ MEDIUM
 \Else
-  \State $k.\textit{operator} \gets \arg\max_r r.\textit{nesting\_level}$
-         \Comment{innermost enclosing range; ties broken by latest \texttt{start\_ns}}
-  \State $k.\textit{is\_fused} \gets \top$;
+  \State $k.\textit{operator} \gets \textit{opRanges}[0].\textit{text}$,
+         \textit{confidence} $\gets$ MEDIUM
+    \Comment{innermost attributed range}
+  \State $k.\textit{is\_fused} \gets (|\textit{opRanges}| > 1)$;
          $k.\textit{all\_enclosing} \gets \textit{ranges}$
-         \Comment{fused kernel spans multiple operators}
+    \Comment{fused kernel spans multiple attributed operators}
 \EndIf
 \end{algorithmic}
 \end{algorithm}
@@ -281,11 +402,11 @@ and are surfaced explicitly in the profile output.
 \label{sec:dedup}
 
 For models with repeated structure (\eg transformer decoder blocks), profiling every
-layer independently costs $O(N)$ ncu replay time.  \sys identifies structurally
-identical subgraphs by computing a canonical hash over each partition's operator types
-and connectivity, grouping them into equivalence classes.  Only one representative per
-class is compiled and profiled; its hardware counter values are propagated to all
-structural duplicates, reducing replay cost to $O(\text{unique classes})$.
+layer independently costs $O(N)$ \ncu replay time, where $N$ is the total number of layer partitions.
+\sys identifies structurally identical subgraphs by computing a canonical hash over each
+partition's operator types and connectivity, grouping them into $K$ equivalence classes.
+Only one representative per class is compiled and profiled; its hardware counter values
+are propagated to all structural duplicates, reducing replay cost to $O(K)$.
 
 Deduplication is transparent to the attribution pipeline: duplicate partitions are
 tagged in the \nsys trace and skipped during \ncu replay, with metrics inherited from
@@ -305,8 +426,8 @@ memory bandwidth, compute throughput, Tensor Core utilization, occupancy and lat
 register pressure, and warp divergence, subject to two additional constraints:
 cross-architecture availability on Ampere, Hopper, \emph{and} Blackwell (several counter
 names were renamed in the Blackwell GB202 silicon), and non-redundancy (no two selected
-counters correlate perfectly).  The full counter list with bottleneck axis, aggregation
-method, and architecture-specific name fallbacks is in \tabref{tab:counters}
+counters correlate perfectly).  The full counter list with bottleneck axis, and aggregation
+method is in \tabref{tab:counters}
 (\secref{sec:appendix:counters}).  Seven counters require name fallbacks; \sys queries all
 variants and uses the first that returns a non-null value.
 
@@ -326,4 +447,3 @@ operator.  This ensures that the dominant kernel---the primary optimization targ
 proportionally to the operator-level summary.  For additive quantities (bytes, instruction counts,
 spills), \sys uses plain summation.  For per-kernel constants (register count, shared memory),
 \sys takes the maximum across all kernels, since the highest-pressure kernel limits occupancy.
-

@@ -8,12 +8,22 @@ libraries and profile-guided optimization---are surveyed below for completeness.
 
 \paragraph{Operator-level profilers.}
 \texttt{torch.profiler} and its Kineto backend \cite{kineto2021} record wall-clock durations and
-Chrome traces at the \texttt{aten::} operator granularity and expose CUDA activity correlation
+Chrome traces at the \texttt{aten::} operator granularity~\cite{pytorch2019} and expose CUDA activity correlation
 via CUPTI External IDs---giving kernel-level \emph{timing} attribution but no access to hardware
 performance counters. Practitioners can identify \emph{which} operator is slow, but cannot
 determine \emph{which hardware resource} it is contending for---the distinction that determines
 what optimization is warranted. Without hardware
 counter data at the operator level, optimization choices remain heuristic.
+NVIDIA DLProf~\cite{dlprof} is the closest NVIDIA-specific predecessor: it uses NVTX markers
+to correlate CPU and GPU time with model operations, reports at operation, layer, and kernel
+granularity, and includes Tensor Core usage diagnostics. DLProf remains timing-centric:
+its GPU-side data comes from \nsys, and Tensor Core utilization is inferred from kernel names.
+\sys adds the missing counter-attribution layer. It joins application-mode \ncu hardware
+counter rows to \nsys kernel records through invocation-order matching, then assigns those
+counter-enriched kernel records to PyTorch operators, including Inductor-era fused kernels.
+This produces per-operator hardware metrics such as measured Tensor Core activity,
+occupancy, memory throughput, register pressure, and cache behavior rather than only
+operation timing or kernel-name-derived Tensor Core eligibility.
 
 \paragraph{Kernel-level profilers.}
 NVIDIA Nsight Systems (\nsys) \cite{nsightsystems} captures the full CUDA kernel timeline with
@@ -28,7 +38,7 @@ perform per-kernel or per-operator attribution. Taken together, these tools coll
 hardware counter collection and kernel-timeline capture but leave kernel-to-operator attribution entirely unresolved.
 
 \paragraph{Deep learning compilers and optimizers.}
-TorchDynamo and TorchInductor \cite{pytorch2024} compile PyTorch programs to Triton kernels
+TorchDynamo and TorchInductor \cite{pytorch2024} compile PyTorch programs via FX graph capture~\cite{torchfx2022} to Triton kernels
 using heuristic fusion rules (pointwise chaining, matmul epilogue fusion), but fusion decisions
 are made without hardware counter feedback: whether a given fusion improved Tensor Core
 utilization is not a question the standard Inductor toolchain can answer programmatically. TVM \cite{tvm2018} and Halide \cite{halide2013} optimize tensor programs via
@@ -40,7 +50,7 @@ quantization behind black-box interfaces that cannot be extended for custom arch
 augmented with attribution data.
 
 \paragraph{Fused kernel libraries.}
-FlashAttention \cite{flashattention2022,flashattention2023} and xFormers \cite{xformers2022}
+FlashAttention \cite{flashattention2022,flashattention2024} and xFormers \cite{xformers2022}
 provide hand-optimized fused attention kernels that eliminate DRAM round-trips by keeping
 intermediate tensors in on-chip SRAM. These represent the class of optimization that
 attributed hardware counter evidence should motivate rather than apply unconditionally; what
@@ -50,6 +60,7 @@ variant is warranted for a given workload.
 \paragraph{Profile-guided optimization.}
 Classic PGO in C/C++ compilers (GCC, LLVM) collects branch frequency profiles to guide inlining
 and layout decisions \cite{autofdo2016}. Applying the same principle at the GPU operator level requires hardware counter data attributed
-to specific operators---a data source no existing tool produces automatically. To our knowledge,
-\sys is the first \emph{published} system to close this attribution gap and to use the resulting
-attributed profile to drive hardware-informed FX graph optimization.
+to specific operators. To our knowledge, \sys is the first published system to combine
+\nsys kernel traces, application-mode \ncu hardware counters, and PyTorch operator
+attribution through invocation-order matching, and to use the resulting attributed profile
+to drive hardware-informed FX graph optimization.

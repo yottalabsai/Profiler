@@ -1,4 +1,4 @@
-﻿\section{Reproduction and Additional Details}
+\section{Reproduction and Additional Details}
 \label{sec:appendix:exp}
 
 \subsection{Hardware Specification}
@@ -16,18 +16,16 @@ All experiments run on a single GPU:
 
 Software requirements: NVIDIA GPU (Ampere minimum), \nsys $\ge$ 2024.6,
 \ncu $\ge$ 2025.4.1, PyTorch 2.11+, and CUDA 12.8.
-Reproduction scripts, \texttt{profile.json} pairs, and per-example counter comparisons
-are provided in the accompanying repository.
+Reproduction scripts, \texttt{profile.json} pairs, and per-example counter comparisons are provided in the accompanying repository here: 
+\url{https://github.com/yottalabsai/Profiler}
 
 \subsection{Hardware Counter Reference}
 \label{sec:appendix:counters}
 
-\tabref{tab:counters} lists all 20 counters collected by \sys, their bottleneck axis,
-what they measure, and their aggregation method.
-
 \begin{table}[h]
 \centering
-\caption{The 20 hardware counters collected by \sys.  ``Agg.'' denotes the aggregation method
+\caption{The 20 hardware counters collected by \sys, their bottleneck axis, and
+what they measure.  ``Agg.'' denotes the aggregation method
   applied when multiple kernels are attributed to one operator (see \secref{sec:aggregation}).
   $\dagger$~\texttt{warp\_cycles\_per\_instr} is absent from the Blackwell counter set (sm\_120);
   \texttt{eligible\_\allowbreak cycles\_pct} (counter~14) serves as the latency-bound indicator on the
@@ -70,32 +68,23 @@ As a prototype implementation, \sys includes a Claude Code plugin that automates
 closed-loop protocol via a single \texttt{/optimize workload.py} command.  The plugin orchestrates five
 specialized LLM agents---\textbf{capture-agent}, \textbf{optimization-strategist},
 \textbf{backend-engineer}, \textbf{validation-agent}, and \textbf{/report}---covering all
-pipeline stages from baseline capture through cross-profile comparison.  Evaluating whether
-agent-generated optimization backends reproduce the manually-derived speedups reported in
-\secref{sec:experiments} is left for future work.
+pipeline stages from baseline capture through cross-profile comparison. 
 
 
-\subsection{Additional Limitations}
-\label{sec:appendix:limitations}
-
-\textbf{\ncu replay timing inflation.}
-All \texttt{duration\_ns} values in \texttt{profile.json} reflect \ncu's serialized
-replay execution, which runs 2--5$\times$ slower than real wall-clock execution.
-Values should be used for relative comparison only; \texttt{torch.cuda.Event} timing
-is authoritative for absolute latency.
-
-% -------------------------------------------------------
 \subsection{Annotated \texttt{profile.json} Schema}
 \label{sec:appendix:schema}
 
 \texttt{profile.json} is the central output of \sys: a JSON document that maps each
-dispatched PyTorch operator to its constituent CUDA kernels and their aggregated hardware
-metrics.  \tabref{tab:schema_fields} describes every top-level field; the listing below
+dispatched PyTorch operator to its constituent CUDA kernels, per-kernel \nsys durations,
+and aggregated hardware metrics.  \tabref{tab:schema_fields} describes every top-level field; the listing below
 shows a representative single-operator excerpt from the GPT-2 baseline
 (\texttt{aten::mm}, 512$\times$768 $\times$ 768$\times$768 weight projection, NVTX-attributed).
 The \texttt{aggregated} block condenses per-kernel counter values into a single
 operator-level record using the duration-weighted mean (\equref{eq:dwmean}); these are the
 values consumed by downstream analysis tools and the Claude Code plugin.
+The \texttt{duration\_ns} and \texttt{aggregated.total\_duration\_ns} fields are
+\nsys-derived timing fields; \ncu metrics, including
+\texttt{gpu\_\_time\_duration.sum}, are stored only inside \texttt{metrics.raw}.
 
 \begin{lstlisting}[basicstyle=\scriptsize\ttfamily, breaklines=true, frame=single,
                    xleftmargin=2pt, xrightmargin=2pt]
@@ -151,11 +140,9 @@ Key fields: \texttt{attribution\_method} records the tier that assigned operator
 \texttt{confidence} mirrors the tier level (\texttt{"high"} or \texttt{"medium"});
 \texttt{is\_fused} and \texttt{fused\_with} list all \texttt{aten::} ops fused into the
 same Triton kernel.  The \texttt{null} value for \texttt{warp\_cycles\_per\_instruction}
-reflects the absent Blackwell counter (\secref{sec:appendix:fallbacks}).
+reflects the absent Blackwell counter.
 The \texttt{metrics.raw} sub-object stores all architecture-specific ncu column names
-exactly as emitted by \texttt{ncu --import --csv}; the \texttt{aggregated} block
-resolves these to the 20 logical profile fields via the alias table in
-\secref{sec:appendix:fallbacks}.
+exactly as emitted by \texttt{ncu --import --csv}; the \texttt{aggregated} block outlines an operator-level metric summary of the attributed kernels.
 
 \begin{table}[h]
 \centering
@@ -182,200 +169,67 @@ resolves these to the 20 logical profile fields via the alias table in
 \end{tabular}
 \end{table}
 
-% -------------------------------------------------------
-\subsection{Attribution Coverage}
-\label{sec:appendix:allcoverage}
+\subsection{Supplementary Figures}
+\label{sec:appendix:candidates}
 
-\tabref{tab:allcoverage} consolidates the attribution coverage and speedup figures from
-\figref{fig:attribution} and \tabref{tab:speedup} for the three case study workloads,
-adding exact attributed and unattributed fractions by kernel runtime.
-
-\begin{table}[h]
+\begin{figure}[H]
 \centering
-\caption{Attribution coverage and profile-guided speedup for the three case study
-  workloads (NVIDIA RTX PRO 6000 Blackwell, locked clocks, correlation pass active).
-  ``Attributed'' = HIGH + MEDIUM fraction by kernel runtime.
-  Speedup is attributed kernel wall time (baseline $\div$ optimized).}
-\label{tab:allcoverage}
-\small
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{lcrrrrr}
-\toprule
-\textbf{Workload} & \textbf{Batch} & \textbf{Baseline} & \textbf{Optimized}
-  & \textbf{Speedup} & \textbf{Attributed} & \textbf{UNATTR} \\
-\midrule
-GPT-2 (12-layer)                & 4  & 7{,}313\,$\mu$s  & 4{,}161\,$\mu$s & \textbf{1.76$\times$} & 97\% & 3\% \\
-SDPA Attention                  & 8  & 906\,$\mu$s      & 405\,$\mu$s     & \textbf{2.24$\times$} & 97\% & 3\% \\
-LSTM Seq.\ Encoder (cuDNN path) & 32 & 14{,}531\,$\mu$s & 3{,}998\,$\mu$s & \textbf{3.63$\times$} & 12\%$\dagger$ & 88\% \\
-\bottomrule
-\multicolumn{7}{l}{\footnotesize $\dagger$ LSTM attributed fraction reflects the cuDNN-opaque RNN dispatch path; see \secref{sec:cs:lstm}.} \\
-\end{tabular}
-\end{table}
+\begin{tikzpicture}[font=\small, >=Stealth,
+  stage/.style={draw, rounded corners=4pt, fill=white,
+                minimum width=3.6cm, minimum height=0.75cm,
+                align=center, inner sep=5pt, font=\small},
+  hook/.style={draw, rounded corners=3pt, align=left,
+               inner sep=5pt, font=\scriptsize},
+  arr/.style={-Stealth,thick},
+  harr/.style={-Stealth, thick, dashed},
+]
 
-% -------------------------------------------------------
-\subsection{Architecture-Specific Counter Name Fallbacks}
-\label{sec:appendix:fallbacks}
+  % Pipeline stages (vertical, left column)
+  \node[stage, fill=gray!10] (in)     at (0,0)    {\texttt{workload.py}};
+  \node[stage, fill=blue!8]  (dynamo) at (0,-2.2)  {Dynamo FX\\graph capture};
+  \node[stage, fill=blue!8]  (aot)    at (0,-4.4)  {AOTAutograd\\decomposition};
+  \node[stage, fill=blue!8]  (ind)    at (0,-6.6)  {Inductor\\code generation};
+  \node[stage, fill=gray!10] (out)    at (0,-8.8)  {Triton / CUDA kernels};
 
-Of the 20 collected counters, 12 share a single name across Ampere, Hopper, and
-Blackwell (no fallback needed).  Seven counters were renamed in the Blackwell GB202
-silicon; \sys collects all variant names simultaneously via a combined \texttt{--metrics}
-argument and uses the first non-null value at parse time.  One counter
-(\texttt{warp\_cycles\_per\_instruction}) has no Blackwell equivalent with a matching
-unit denominator and is reported as \texttt{null} on sm\_120 devices.
-\tabref{tab:fallbacks} lists all non-universal counters.
+  \draw[arr] (in)     -- (dynamo);
+  \draw[arr] (dynamo) -- (aot);
+  \draw[arr] (aot)    -- (ind);
+  \draw[arr] (ind)    -- (out);
 
-\begin{table}[H]
-\centering
-\caption{Counters with architecture-specific names or absent on Blackwell.  The
-  ``Ampere/Hopper'' column gives the primary counter name (used in \texttt{--metrics}
-  first); the ``Blackwell (GB202)'' column gives the name returned by sm\_120 hardware.
-  \sys passes both; \texttt{null} indicates no equivalent counter exists.}
-\label{tab:fallbacks}
-\scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{p{2.6cm}p{4.3cm}p{4.3cm}}
-\toprule
-\textbf{Profile Field} & \textbf{Ampere / Hopper Name} & \textbf{Blackwell (GB202) Name} \\
-\midrule
-\texttt{dram\_bytes\_read}    & \texttt{dram\_\_bytes\_read.sum}
-  & \texttt{dram\_\_bytes\_op\_read.sum} \newline (\texttt{fbpa\_\_dram\_read\_bytes.sum} fallback) \\
-\texttt{dram\_bytes\_written} & \texttt{dram\_\_bytes\_written.sum}
-  & \texttt{dram\_\_bytes\_op\_write.sum} \newline (\texttt{fbpa\_\_dram\_write\_bytes.sum} fallback) \\
-\texttt{l1\_hit\_rate}        & \texttt{l1tex\_\_t\_hit\_rate.pct}
-  & \texttt{l1tex\_\_t\_sector\_hit\_rate.pct} \\
-\texttt{l2\_hit\_rate}        & \texttt{lts\_\_t\_hit\_rate.pct}
-  & \texttt{lts\_\_t\_request\_hit\_rate.pct} \newline (\texttt{lts\_\_t\_sector\_hit\_rate.pct} fallback) \\
-\texttt{sm\_active\_cycles}   & \texttt{sm\_\_active\_cycles\_elapsed.sum}
-  & \texttt{sm\_\_cycles\_active.sum} \\
-\texttt{avg\_threads\_per\_warp}
-  & \texttt{smsp\_\_average\_threads\_}\newline\texttt{executed\_per\_instruction.ratio}
-  & \texttt{smsp\_\_average\_thread\_inst\_}\newline\texttt{executed\_per\_inst\_executed.ratio} \\
-\texttt{local\_memory\_spills}
-  & \texttt{l1tex\_\_data\_pipe\_lsu\_}\newline\texttt{wavefronts\_mem\_local.sum}
-  & \texttt{l1tex\_\_t\_output\_wavefronts\_}\newline\texttt{pipe\_lsu\_mem\_local.sum} \\
-\texttt{warp\_cycles\_per\_instr}$^\dagger$
-  & \texttt{smsp\_\_warp\_cycles\_per\_}\newline\texttt{issued\_instruction.ratio}
-  & \textbf{ABSENT} (null on sm\_120) \\
-\bottomrule
-\multicolumn{3}{p{11.2cm}}{\footnotesize $\dagger$ No Blackwell counter has matching
-  units (cycles/issued instruction). \texttt{smsp\_\_amortized\_warp\_latency} measures
-  cycles/warp --- a different denominator.} \\
-\end{tabular}
-\end{table}
+  % Level 1 hook (between Dynamo and AOT)
+  \node[hook, fill=red!8, draw=red!50] (l1) at (5.5,-2.2)
+    {\textbf{Level 1} (pre-decomposition)\\
+     \textbullet\ QKV fusion (\textit{SDPA case study})\\
+     \textbullet\ Attention canonicalization};
+  \draw[harr, red!60] (l1.west) -- (dynamo.east);
 
-% -------------------------------------------------------
-\subsection{FX Graph Pass Pseudocode}
-\label{sec:appendix:passes}
+  % Level 2 hook (between AOT and Inductor)
+  \node[hook, fill=orange!8, draw=orange!50] (l2) at (5.5,-4.4)
+    {\textbf{Level 2} (Aten IR)\\
+     \textbullet\ BF16 dtype promotion (\textit{all case studies})\\
+     \textbullet\ Weight folding, layout annotation};
+  \draw[harr, orange!60] (l2.west) -- (aot.east);
 
-The optimization framework applies FX graph transformations across three IR levels
-(\secref{sec:threelevel}); a single backend combines passes from all three.
-Algorithms~\ref{alg:gpt2_backend} and~\ref{alg:sdpa_backend} show the complete backends
-for the two compiled case studies: counter-driven diagnosis selects passes, which are
-composed into a single \texttt{torch.compile} call across all three levels.  All passes
-are defensive---if the target pattern is absent the pass logs a warning and returns the
-graph unmodified.
+  % Level 3 hook (at Inductor)
+  \node[hook, fill=green!8, draw=green!50!black] (l3) at (5.5,-6.6)
+    {\textbf{Level 3} (Inductor config)\\
+     \textbullet\ Weight freezing (\textit{all case studies})\\
+     \textbullet\ Autotuning mode selection};
+  \draw[harr, green!60!black] (l3.west) -- (ind.east);
 
-\begin{algorithm}[H]
-\caption{GPT-2 Profile-Guided Backend (all three IR levels)}
-\label{alg:gpt2_backend}
-\begin{algorithmic}[1]
-\Require Attributed profile $P$ from \sys; model $M$
-\Ensure Optimized compiled model
+  % Compose label
+  \node[font=\scriptsize, gray, align=center] at (0,-9.6)
+    {Passes at each level compose\\without interfering across levels};
 
-\State \textit{// Counter-driven diagnosis}
-\State $\textit{tc} \gets P[\{\texttt{aten::mm},\texttt{aten::addmm}\}].\texttt{tensor\_core\_active\_pct}$
-  \Comment{0\% in baseline; GEMM family is 87.5\% of attributed runtime}
-\State $\textit{sdpa\_masked} \gets \exists\,n \in P : n.\textit{name} = \texttt{aten::sdpa} \wedge n.\textit{attn\_mask} \neq \texttt{None}$
-
-\State
-\State \textit{// Level 1 --- Functional IR (pre-AOTAutograd decomposition)}
-\State \textit{// Causal-mask subgraph only detectable before AOTAutograd lowers shared nodes}
-\If{$\textit{sdpa\_masked}$}
-  \For{each SDPA node $n$ with explicit \textit{attn\_mask} or $\textit{is\_causal} = \texttt{False}$}
-    \State replace $n$ with \texttt{F.sdpa}$(q,k,v,$ \texttt{attn\_mask=None, is\_causal=True}$)$
-  \EndFor
-  \State \texttt{graph.eliminate\_dead\_code()}
-    \Comment{removes \texttt{constant\_pad\_nd} / \texttt{scalar\_tensor} / \texttt{where} mask chain (48 nodes)}
-\EndIf
-
-\State
-\State \textit{// Level 2 --- Aten IR (post-AOTAutograd)}
-\If{$\textit{tc} = 0$}
-  \For{each node $n$ with target $\in \{\texttt{aten.mm},\texttt{aten.addmm}\}$ and dtype $= \text{fp32}$}
-    \State cast operands to bf16 via \texttt{prims.convert\_element\_type}
-      \Comment{fp32 SIMT $\to$ bf16 Tensor Core; 210 $\to$ 96 registers/thread}
-    \State insert fp32 cast-back after $n$; rewire users
-  \EndFor
-  \State fold adjacent \texttt{convert\_element\_type} pairs
-    \Comment{cast-cancellation: eliminates redundant fp32$\leftrightarrow$bf16 round-trips}
-\EndIf
-
-\State
-\State \textit{// Level 3 --- Inductor configuration}
-\State $\texttt{inductor\_config.freezing} \gets \texttt{True}$
-  \Comment{weight pre-packing for bf16 GEMM autotuning}
-\State $\texttt{inductor\_config.max\_autotune} \gets \texttt{True}$
-
-\State \Return \texttt{torch.compile}$(M,\ \texttt{backend=custom\_backend})$
-\end{algorithmic}
-\end{algorithm}
-
-\noindent\textit{Implementation note:} \texttt{prims.convert\_element\_type} is used in
-place of \texttt{aten.\_to\_copy} because on torch~2.11 the latter is registered as both
-a fallback and a decomposition; inserting it into an already-decomposed Aten graph raises
-an assertion inside \texttt{compile\_fx}.
-
-\begin{algorithm}[H]
-\caption{SDPA Attention Profile-Guided Backend (all three IR levels)}
-\label{alg:sdpa_backend}
-\begin{algorithmic}[1]
-\Require Attributed profile $P$ from \sys; model $M$
-\Ensure Optimized compiled model
-
-\State \textit{// Counter-driven diagnosis}
-\State $\textit{tc} \gets P[\{\texttt{aten::mm}\}].\texttt{tensor\_core\_active\_pct}$
-  \Comment{0\% in baseline over QKV projection GEMMs}
-\State $\textit{occ} \gets P[\{\texttt{aten::mm}\}].\texttt{achieved\_occupancy}$
-  \Comment{16.6\% in baseline}
-
-\State
-\State \textit{// Level 1 --- Functional IR (pre-AOTAutograd decomposition)}
-\State \textit{// Shared LayerNorm activation only visible before AOTAutograd copies it per consumer}
-\If{$\textit{occ} < 20\%$}
-  \For{each activation $x$ with $\ge 3$ bias-free \texttt{F.linear} consumers}
-    \State $W_\text{fused} \gets \texttt{aten.cat}([W_q,W_k,W_v],\ \texttt{dim=0})$
-      \Comment{shape $[3D,D]$}
-    \State replace three $[B,T,D]$ \texttt{F.linear} calls with one $[B,T,3D]$ call
-      \Comment{3 serial 128-block launches $\to$ 1 384-block launch}
-    \State slice output to $q_\text{out},k_\text{out},v_\text{out}$ and rewire users
-  \EndFor
-\EndIf
-
-\State
-\State \textit{// Level 2 --- Aten IR (post-AOTAutograd)}
-\If{$\textit{tc} = 0$}
-  \For{each node $n$ with target $\in \{\texttt{aten.mm},\texttt{aten.addmm}\}$ and dtype $= \text{fp32}$}
-    \State cast operands to bf16 via \texttt{prims.convert\_element\_type}
-      \Comment{switches SDPA dispatch: \texttt{fmha\_cutlassF\_f32} $\to$ \texttt{fmha\_cutlassF\_bf16}}
-    \State insert fp32 cast-back after $n$; rewire users
-  \EndFor
-\EndIf
-
-\State
-\State \textit{// Level 3 --- Inductor configuration}
-\State $\texttt{inductor\_config.freezing} \gets \texttt{True}$
-  \Comment{aligned weight layout for bf16 GEMM autotuning}
-\State $\texttt{inductor\_config.max\_autotune} \gets \texttt{True}$
-
-\State \Return \texttt{torch.compile}$(M,\ \texttt{backend=custom\_backend})$
-\end{algorithmic}
-\end{algorithm}
-
-The LSTM case study (\secref{sec:cs:lstm}) requires no FX pass: \texttt{nn.LSTM}
-triggers a hard Dynamo graph break, so no recurrent nodes appear in the compiled graph.
-The corrective fix (routing to cuDNN's fused Tensor-Core RNN) takes effect purely by
-allowing eager execution to proceed through \texttt{torch.\_VF.lstm} without forcing
-the recurrent region into a compiled subgraph.  This is why all registered FX passes for
-the LSTM backend report \texttt{NOT\_APPLIED} in validation logs while the workload
-still achieves the largest speedup in the suite (3.63$\times$).
-
+\end{tikzpicture}
+\caption{\textbf{Three-level FX pass hook points.}
+  The \texttt{torch.compile()} pipeline lowers a model through three IR stages.
+  Level~1 passes must run before AOTAutograd because structural patterns such as
+  a shared \texttt{LayerNorm} output feeding Q, K, and V projections---the
+  precondition for QKV fusion---are decomposed into per-consumer copies by
+  AOTAutograd and become invisible afterward.  Level~2 (Aten IR) applies
+  dtype and layout transforms on the fully decomposed graph.  Level~3
+  Inductor flags control non-graph behaviors such as weight freezing and
+  autotuning that cannot be expressed as graph rewrites.}
+\label{fig:cand:fxpasslevel}
+\end{figure}

@@ -9,7 +9,7 @@ optimization workflow in which per-operator counter values from \texttt{profile.
 the selection of FX graph transformations; the optimization layer is one downstream
 application of the attribution pipeline---others include hardware-aware neural architecture
 search, performance regression detection in CI, and kernel-level profiling of serving stacks
-such as vLLM or SGLang.
+such as vLLM~\cite{vllm2023} or SGLang~\cite{sglang2024}.
 
 \subsection{Experimental Setup}
 
@@ -35,19 +35,22 @@ LSTM Seq.\ Encoder & 32 & seq=128, hidden=512, 2 layers \\
 \end{tabular}
 \end{table}
 
-\textbf{Measurement protocol.}  Per-operator durations are \nsys CUPTI GPU-domain kernel times.
-Each workload runs 2 warm-up iterations followed by 2 measured iterations; reported times are
-the sum over measured iterations.  GPU clocks are locked to the probe-and-cache frequency
-(\secref{sec:clocklocking}) for both captures, making duration ratios clock-immune; at locked
-clocks, kernel scheduling jitter is ${<}$2\% across repeated runs, so point estimates suffice
-to distinguish the 1.76$\times$--3.63$\times$ speedups reported here from the 1.0$\times$
-null case.  \ncu replay durations are excluded from speedup reporting
-(\secref{sec:appendix:limitations}).
+\textbf{Measurement protocol.}  Reported duration fields are \nsys CUPTI GPU-domain
+kernel times.  Operator summaries sum the \nsys durations of kernels attributed to that
+operator; workload speedups sum profiled forward-pass kernel time from the same capture.
+\ncu replay supplies hardware counters only, including the raw
+\texttt{gpu\_\_time\_duration.sum} counter, and replay timing is excluded from speedup
+reporting.  Each workload runs 2 warm-up iterations followed by 2 measured iterations;
+results are point estimates from those measured iterations.
 
-\textbf{Speedup scope.}  Speedup figures are computed over \emph{attributed kernel wall time}
-only; unattributed kernels (\eg cuDNN RNN internals in the LSTM baseline) are excluded, so
-LSTM's reported speedup reflects the attributed portion only and may differ from end-to-end
-wall-clock improvement.
+\textbf{Speedup scope.}  Speedup figures are computed over profiled forward-pass
+kernel wall time at locked clocks.  Operator-level diagnosis uses attributed operator
+records, while unattributed kernels are reported separately and are not silently dropped.
+The LSTM Inductor baseline is non-representative: \texttt{torch.compile} triggers a hard
+Dynamo graph break on \texttt{nn.LSTM}, decomposing it into 1{,}280 small per-timestep FP32
+GEMMs rather than a fused cuDNN RNN call; the result reflects correcting this structural
+mismatch via cuDNN re-dispatch (\secref{sec:cs:lstm}), not a conventional FX graph
+optimization.
 
 \textbf{Baselines.}  Each workload is compared as:
 \begin{enumerate*}[label=(\arabic*)]
@@ -58,6 +61,13 @@ wall-clock improvement.
 \end{enumerate*}
 Speedups are reported as \emph{Inductor FP32 baseline} $\div$ \emph{Optimized} in attributed
 kernel wall time at locked clocks.
+Each optimized backend applies passes as a suite rather than in isolation because the
+passes target orthogonal hardware bottleneck axes---dtype precision (BF16 promotion),
+memory access pattern (SDPA canonicalization), and constant propagation (weight
+freezing)---and are selected jointly by the attributed counter evidence.
+Measuring the combined effect is the relevant outcome for the profile-guided workflow;
+the per-pass counter deltas reported in each case study (\secref{sec:cs:gpt2}--\secref{sec:cs:lstm})
+serve as per-pass verification that each transformation eliminated its target bottleneck.
 
 \subsection{Attribution Coverage}
 \label{sec:coverage}
@@ -73,8 +83,10 @@ and corrective strategy are examined in \secref{sec:cs:lstm}.
 \begin{axis}[
   xbar stacked,
   width=0.88\columnwidth,
-  height=3.6cm,
-  bar width=13pt,
+  height=4.0cm,
+  bar width=10pt,
+  ymin=-0.5,
+  ymax=2.5,
   xmin=0, xmax=100,
   xlabel={Kernel runtime attributed (\%)},
   xlabel style={font=\small},
@@ -91,7 +103,7 @@ and corrective strategy are examined in \secref{sec:cs:lstm}.
   xmajorgrids=true,
   grid style={gray!20},
   legend style={
-    at={(0.5,-0.28)}, anchor=north,
+    at={(0.5,-0.48)}, anchor=north,
     font=\scriptsize, draw=gray!50,
     fill=white, fill opacity=0.9,
     legend columns=3,
@@ -128,9 +140,6 @@ and corrective strategy are examined in \secref{sec:cs:lstm}.
 \label{fig:attribution}
 \end{figure}
 
-Layer deduplication provides a 12$\times$ \ncu replay reduction for GPT-2
-(\secref{sec:dedup}).
-
 \subsection{Optimization Infrastructure}
 \label{sec:threelevel}
 
@@ -157,14 +166,14 @@ counters; \nsys provides kernel timing without operator attribution; \ncu provid
 counters without operator attribution.  Each case study identifies the specific counter
 symptom read from \sys's per-operator attributed profile, the transformation it motivates,
 and the counter delta that confirms bottleneck elimination.  \tabref{tab:speedup} summarizes
-attributed kernel wall-time speedups at locked clocks.
+profiled-kernel-time speedups at locked clocks.
 
 \begin{table}[h]
 \centering
-\caption{Forward-pass attributed kernel wall time and speedup on NVIDIA RTX PRO 6000 Blackwell
- .  All times are from \nsys CUPTI records at locked GPU clocks (not \ncu replay).
-  Speedup = Inductor FP32 $\div$ Optimized (attributed kernel time only; see \S\ref{sec:experiments}
-  for scope).  Each result is a point estimate from 2 measured iterations.}
+\caption{Forward-pass profiled kernel wall time and speedup on NVIDIA RTX PRO 6000 Blackwell.
+  All times are sums of \nsys CUPTI kernel durations at locked GPU clocks (not \ncu replay).
+  Speedup = Inductor FP32 $\div$ Optimized.  Each result is a point estimate from
+  2 measured iterations.}
 \label{tab:speedup}
 \small
 \setlength{\tabcolsep}{5pt}
@@ -175,9 +184,12 @@ attributed kernel wall-time speedups at locked clocks.
 \midrule
 GPT-2 (12-layer)        & 7,313\,$\mu$s  & 4,161\,$\mu$s  & \textbf{1.76$\times$} \\
 SDPA Attention          & 906\,$\mu$s    & 405\,$\mu$s    & \textbf{2.24$\times$} \\
-LSTM Seq.\ Encoder      & 14,531\,$\mu$s & 3,998\,$\mu$s  & \textbf{3.63$\times$} \\
+LSTM Seq.\ Encoder$^\dagger$ & 14,531\,$\mu$s & 4,046\,$\mu$s  & \textbf{3.59$\times$} \\
 \bottomrule
 \end{tabular}
+\vspace{4pt}
+
+\noindent{\footnotesize $^\dagger$~Inductor baseline is non-representative: \texttt{nn.LSTM} triggers a Dynamo graph break, producing 1{,}280 small per-timestep GEMMs instead of a fused cuDNN RNN call. The LSTM case is diagnostic rather than a conventional FX optimization: restricting to attributed operator records gives 3.63$\times$, while including the optimized-side unattributed kernel tail gives the 3.59$\times$ profiled-kernel speedup shown here.}
 \end{table}
 
 
@@ -309,9 +321,9 @@ cuDNN's fused Tensor-Core RNN, which batches the input-to-hidden projection acro
 timesteps in one launch (M=4096 instead of M=32), eliminating all 1,280
 \texttt{splitKreduce} epilogues and reducing attributed execution time by 2.26\,ms.  All FX
 passes report \texttt{NOT\_APPLIED}---the backend callback is never invoked for the
-eagerly-dispatched LSTM region---yet this is the largest speedup in the evaluation suite
-(3.63$\times$), demonstrating that the attributed pipeline correctly routes structural
-problems to structural fixes.
+eagerly-dispatched LSTM region---yet this is the largest attributed-region speedup in the
+evaluation suite (3.63$\times$), demonstrating that the attributed pipeline correctly routes
+structural problems to structural fixes.
 
 \begin{table}[h]
 \centering
@@ -330,4 +342,3 @@ Occupancy, recurrent GEMMs (\%)  & 9.4\%   & 39.4\% & M=32 $\to$ M=4096 (batch t
 \bottomrule
 \end{tabular}
 \end{table}
-

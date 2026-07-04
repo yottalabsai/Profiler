@@ -17,13 +17,14 @@ injection-mode timestamps), and produce outputs with no shared stable key. No ex
 
 \paragraph{PyTorch compilation stack.}
 In PyTorch's default eager execution, each \texttt{aten::} operator dispatches individually
-through the operator dispatcher at runtime. Under TorchInductor, operators
+through the operator dispatcher at runtime. Under TorchInductor~\cite{pytorch2024}, operators
 for which a hand-tuned vendor library implementation exists---such as cuBLAS for matrix
 multiplication or xFormers for attention---are emitted as extern calls that
 preserve this per-operator dispatch. Operators without such external counterparts---elementwise
 operations, reductions, normalization, and layout transforms---are fused in groups into
 Triton~\cite{triton2019} kernels, JIT-compiled to CUDA, where each kernel may represent
 multiple operators and individual \texttt{aten::} dispatch does not occur at runtime.
+
 
 \paragraph{Contributions.}
 \sys decomposes the attribution problem into two orthogonal steps.
@@ -34,8 +35,10 @@ complementary attribution paths: CUPTI correlation via \texttt{torch.profiler}, 
 enclosure, and Inductor fusion-map enrichment.
 \figref{fig:overview} shows the complete end-to-end pipeline.
 Applied to profile-guided FX graph optimization, attributed profiles yield
-\textbf{1.76$\times$--3.63$\times$} kernel wall-time speedups grounded in
-counter-identified bottlenecks across three case studies.
+\textbf{1.76$\times$--2.24$\times$} profiled-kernel-time speedups on the two
+compiled optimization case studies, while an LSTM diagnostic case demonstrates
+that the UNATTRIBUTED tier can identify when the correct fix is structural
+cuDNN re-dispatch rather than FX graph rewriting.
 
 \begin{figure}[H]
 \centering
@@ -92,4 +95,3 @@ counter-identified bottlenecks across three case studies.
 \caption{\textbf{\sys system overview.} The profiling stage (top) runs \nsys and \ncu to collect kernel timelines and hardware counters. The attribution engine (middle) combines these into \texttt{profile.json}. The optimization row (bottom) shows a downstream application of the attributed profile; it is not part of the attribution pipeline itself.}
 \label{fig:overview}
 \end{figure}
-
