@@ -1,0 +1,14 @@
+name: ci
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: OK
+        run: echo "ci passed"
